@@ -2,13 +2,14 @@ from fastapi import FastAPI
 
 from .config import settings
 from .database import Base, engine
-from .routers import work_items
+from .routers import stats, work_items
 
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title=settings.app_name, version=settings.app_version)
 
 app.include_router(work_items.router)
+app.include_router(stats.router)
 
 
 @app.get("/health")
@@ -36,6 +37,7 @@ def federation_manifest():
             "version": "/version",
             "status": "/api/status",
             "work_items": "/api/work-items",
+            "stats": "/api/stats",
         },
     }
 

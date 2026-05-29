@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict
 
@@ -77,3 +77,21 @@ class FollowUpResponse(BaseModel):
 
 class BlockRequest(BaseModel):
     override_reason: Optional[str] = None
+
+
+class StatsRecentItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    type: str
+    title: str
+    status: str
+    updated_at: datetime
+
+
+class StatsResponse(BaseModel):
+    total: int
+    awaiting_approval: int
+    by_status: Dict[str, int]
+    by_type: Dict[str, int]
+    recent: List[StatsRecentItem]
