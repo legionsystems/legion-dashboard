@@ -15,6 +15,7 @@ if str(BACKEND_ROOT) not in sys.path:
 SQLALCHEMY_DATABASE_URL = "sqlite:///./test.db"
 
 os.environ["DATABASE_URL"] = SQLALCHEMY_DATABASE_URL
+os.environ["LEGION_SKIP_SEED"] = "1"
 
 from app.database import Base, get_db  # noqa: E402
 from app.main import app  # noqa: E402
@@ -27,6 +28,7 @@ def db_engine():
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
+    Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
     yield engine
     Base.metadata.drop_all(bind=engine)
@@ -34,13 +36,14 @@ def db_engine():
 
 
 @pytest.fixture()
-def client(db_engine):
-    TestingSessionLocal = sessionmaker(
-        autocommit=False, autoflush=False, bind=db_engine
-    )
+def db_session_factory(db_engine):
+    return sessionmaker(autocommit=False, autoflush=False, bind=db_engine)
 
+
+@pytest.fixture()
+def client(db_engine, db_session_factory):
     def override_get_db():
-        db = TestingSessionLocal()
+        db = db_session_factory()
         try:
             yield db
         finally:
@@ -50,3 +53,13 @@ def client(db_engine):
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()
+
+
+@pytest.fixture()
+def db_session(client, db_session_factory):
+    """Test-engine session for direct DB seeding inside tests."""
+    session = db_session_factory()
+    try:
+        yield session
+    finally:
+        session.close()

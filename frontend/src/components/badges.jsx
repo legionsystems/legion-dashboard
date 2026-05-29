@@ -4,6 +4,8 @@ const STATUS_META = {
   approved:        { color: "#3B82F6", label: "APPROVED" },
   active:          { color: "#F59E0B", label: "ACTIVE" },
   running:         { color: "#F59E0B", label: "RUNNING" },
+  stopped:         { color: "#6B7280", label: "STOPPED" },
+  unknown:         { color: "#5A5A5A", label: "UNKNOWN" },
   review_needed:   { color: "#F97316", label: "REVIEW" },
   certified:       { color: "#14B8A6", label: "CERTIFIED" },
   pr_open:         { color: "#6366F1", label: "PR OPEN" },
@@ -14,11 +16,26 @@ const STATUS_META = {
 };
 
 const TYPE_META = {
-  idea:  { color: "#EAB308", glyph: "*" },
-  bug:   { color: "#EF4444", glyph: "!" },
-  note:  { color: "#8A8A8A", glyph: "=" },
-  task:  { color: "#3B82F6", glyph: ">" },
-  slice: { color: "#A855F7", glyph: "#" },
+  idea:   { color: "#EAB308", glyph: "*" },
+  bug:    { color: "#EF4444", glyph: "!" },
+  change: { color: "#06B6D4", glyph: "~" },
+  note:   { color: "#8A8A8A", glyph: "=" },
+  task:   { color: "#3B82F6", glyph: ">" },
+  slice:  { color: "#A855F7", glyph: "#" },
+};
+
+const PRIORITY_META = {
+  low:      { color: "#6B7280", label: "LOW" },
+  medium:   { color: "#3B82F6", label: "MEDIUM" },
+  high:     { color: "#F97316", label: "HIGH" },
+  critical: { color: "#EF4444", label: "CRITICAL" },
+};
+
+const SOURCE_META = {
+  operator: { color: "#EAEAEA", label: "OPERATOR" },
+  builder:  { color: "#3B82F6", label: "BUILDER" },
+  reviewer: { color: "#A855F7", label: "REVIEWER" },
+  user:     { color: "#14B8A6", label: "USER" },
 };
 
 export function statusMeta(status) {
@@ -29,8 +46,21 @@ export function typeMeta(type) {
   return TYPE_META[type] || { color: "#5A5A5A", glyph: "?" };
 }
 
-export const ALL_STATUSES = Object.keys(STATUS_META).filter((k) => k !== "running");
+export function priorityMeta(priority) {
+  return PRIORITY_META[priority] || { color: "#5A5A5A", label: (priority || "—").toUpperCase() };
+}
+
+export function sourceMeta(source) {
+  return SOURCE_META[source] || { color: "#5A5A5A", label: (source || "—").toUpperCase() };
+}
+
+export const ALL_STATUSES = Object.keys(STATUS_META).filter(
+  (k) => !["running", "stopped", "unknown"].includes(k),
+);
 export const ALL_TYPES = Object.keys(TYPE_META);
+export const INTAKE_TYPES = ["idea", "bug", "change", "task", "slice"];
+export const ALL_PRIORITIES = Object.keys(PRIORITY_META);
+export const ALL_SOURCES = Object.keys(SOURCE_META);
 
 export function StatusBadge({ status, size = "sm" }) {
   const meta = statusMeta(status);
@@ -67,6 +97,23 @@ export function TypeBadge({ type, size = "sm" }) {
     >
       <span className="opacity-70">{meta.glyph}</span>
       {(type || "—").toUpperCase()}
+    </span>
+  );
+}
+
+export function PriorityBadge({ priority, size = "sm" }) {
+  const meta = priorityMeta(priority);
+  const pad = size === "xs" ? "px-1.5 py-0.5 text-[10px]" : "px-2 py-0.5 text-[11px]";
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 border ${pad} font-mono uppercase tracking-telemetry font-semibold`}
+      style={{
+        color: meta.color,
+        borderColor: `${meta.color}55`,
+        backgroundColor: `${meta.color}10`,
+      }}
+    >
+      {meta.label}
     </span>
   );
 }
