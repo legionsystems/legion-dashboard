@@ -1,0 +1,32 @@
+services:
+  db:
+    image: postgres:15
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-legion}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-legion}
+      POSTGRES_DB: ${POSTGRES_DB:-legion_dashboard}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-legion}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      APP_ID: ${APP_ID:-legion-dashboard}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg2://legion:legion@db:5432/legion_dashboard}
+    ports:
+      - "${APP_HOST_PORT:-8720}:8080"
+
+volumes:
+  db-data:
