@@ -1,19 +1,68 @@
+import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
+from .apps_config import APPS_CONFIG
 from .config import settings
-from .database import Base, engine
-from .routers import stats, work_items
+from .database import Base, SessionLocal, engine
+from .models import App
+from .routers import apps, stats, work_items
 
 Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title=settings.app_name, version=settings.app_version)
+
+def seed_apps() -> None:
+    """Upsert configured apps into the DB so the apps router can address them.
+
+    Runtime state (status, last_action) is preserved across restarts; only the
+    static fields (name, repo, compose_project, compose_path) are reconciled.
+    """
+    db = SessionLocal()
+    try:
+        existing = {a.app_id: a for a in db.query(App).all()}
+        for defn in APPS_CONFIG:
+            row = existing.get(defn.app_id)
+            if row is None:
+                db.add(
+                    App(
+                        app_id=defn.app_id,
+                        name=defn.name,
+                        repo=defn.repo,
+                        compose_project=defn.compose_project,
+                        compose_path=defn.compose_path,
+                    )
+                )
+            else:
+                row.name = defn.name
+                row.repo = defn.repo
+                row.compose_project = defn.compose_project
+                row.compose_path = defn.compose_path
+        db.commit()
+    finally:
+        db.close()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Tests set LEGION_SKIP_SEED=1 to keep the apps table empty between fixtures.
+    if os.environ.get("LEGION_SKIP_SEED") != "1":
+        seed_apps()
+    yield
+
+
+app = FastAPI(
+    title=settings.app_name,
+    version=settings.app_version,
+    lifespan=lifespan,
+)
 
 app.include_router(work_items.router)
 app.include_router(stats.router)
+app.include_router(apps.router)
 
 # Serve built frontend SPA from /app/frontend/dist in container
 # In dev, this path may not exist; in Docker, it's copied from the build stage
@@ -58,6 +107,7 @@ def federation_manifest():
             "status": "/api/status",
             "work_items": "/api/work-items",
             "stats": "/api/stats",
+            "apps": "/api/apps",
         },
     }
 

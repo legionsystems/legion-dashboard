@@ -3,11 +3,18 @@ import Dashboard from "./pages/Dashboard.jsx";
 import WorkItemList from "./pages/WorkItemList.jsx";
 import WorkItemDetail from "./pages/WorkItemDetail.jsx";
 import WorkItemForm from "./pages/WorkItemForm.jsx";
+import WorkItemNew from "./pages/WorkItemNew.jsx";
+import WorkIntakeForm from "./components/WorkIntakeForm.jsx";
+import Apps from "./pages/Apps.jsx";
 import { Sidebar, MobileNav, TopBar } from "./components/shell.jsx";
 
 function crumbsFromPath(pathname) {
   if (pathname === "/" || pathname === "") return ["DASHBOARD"];
-  if (pathname.startsWith("/work-items/new")) return ["WORK ITEMS", "NEW"];
+  if (pathname.match(/^\/work-items\/new\/[a-z-]+$/)) {
+    const type = pathname.split("/").pop();
+    return ["WORK ITEMS", "NEW", type.toUpperCase()];
+  }
+  if (pathname === "/work-items/new") return ["WORK ITEMS", "NEW"];
   if (pathname.match(/^\/work-items\/\d+\/edit$/))
     return ["WORK ITEMS", "EDIT"];
   if (pathname.match(/^\/work-items\/\d+$/)) {
@@ -15,6 +22,7 @@ function crumbsFromPath(pathname) {
     return ["WORK ITEMS", `#${id}`];
   }
   if (pathname.startsWith("/work-items")) return ["WORK ITEMS"];
+  if (pathname.startsWith("/apps")) return ["APPS"];
   return [pathname.toUpperCase()];
 }
 
@@ -32,9 +40,14 @@ export default function App() {
             <Routes>
               <Route path="/" element={<Dashboard />} />
               <Route path="/work-items" element={<WorkItemList />} />
-              <Route path="/work-items/new" element={<WorkItemForm />} />
+              <Route path="/work-items/new" element={<WorkItemNew />} />
+              <Route
+                path="/work-items/new/:type"
+                element={<WorkIntakeForm />}
+              />
               <Route path="/work-items/:id" element={<WorkItemDetail />} />
               <Route path="/work-items/:id/edit" element={<WorkItemForm />} />
+              <Route path="/apps" element={<Apps />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </div>

@@ -9,6 +9,11 @@ class WorkItemBase(BaseModel):
     title: str
     body: Optional[str] = None
     status: str = "draft"
+    target_app: Optional[str] = None
+    priority: str = "medium"
+    tags: Optional[str] = None
+    source: str = "operator"
+    acceptance_notes: Optional[str] = None
 
 
 class WorkItemCreate(WorkItemBase):
@@ -25,6 +30,11 @@ class WorkItemUpdate(BaseModel):
     title: Optional[str] = None
     body: Optional[str] = None
     status: Optional[str] = None
+    target_app: Optional[str] = None
+    priority: Optional[str] = None
+    tags: Optional[str] = None
+    source: Optional[str] = None
+    acceptance_notes: Optional[str] = None
     builder_profile: Optional[str] = None
     builder_model: Optional[str] = None
     builder_provider: Optional[str] = None
@@ -95,3 +105,46 @@ class StatsResponse(BaseModel):
     by_status: Dict[str, int]
     by_type: Dict[str, int]
     recent: List[StatsRecentItem]
+
+
+class AppResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    app_id: str
+    name: str
+    repo: Optional[str] = None
+    compose_project: str
+    compose_path: str
+    status: str
+    last_action: Optional[str] = None
+    last_result: Optional[str] = None
+    last_updated: Optional[datetime] = None
+
+
+class AppActionRequest(BaseModel):
+    action: str
+
+
+class AppActionLogResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    app_id: int
+    action: str
+    result: str
+    exit_code: Optional[int] = None
+    stdout_tail: Optional[str] = None
+    stderr_tail: Optional[str] = None
+    started_at: datetime
+    finished_at: Optional[datetime] = None
+
+
+class AppActionResult(BaseModel):
+    app: AppResponse
+    log: AppActionLogResponse
+
+
+class AppLogsResponse(BaseModel):
+    app_id: str
+    lines: List[str]
