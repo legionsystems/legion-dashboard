@@ -19,6 +19,25 @@ const ACTION_GLYPHS = {
   logs: "≡",
 };
 
+// Visual category for last_result; mirrors the structured result types the
+// backend now returns. Keep in sync with apps.py result classification.
+const RESULT_META = {
+  success:        { color: "#10B981", label: "OK" },
+  not_running:    { color: "#8A8A8A", label: "IDLE" },
+  not_applicable: { color: "#8A8A8A", label: "N/A" },
+  not_found:      { color: "#F97316", label: "MISSING" },
+  failed:         { color: "#EF4444", label: "FAILED" },
+  timeout:        { color: "#EF4444", label: "TIMEOUT" },
+  pending:        { color: "#5A5A5A", label: "PENDING" },
+};
+
+function resultMeta(result) {
+  return RESULT_META[result] || {
+    color: "#5A5A5A",
+    label: (result || "—").toUpperCase(),
+  };
+}
+
 function formatTimestamp(iso) {
   if (!iso) return "—";
   const d = new Date(iso);
@@ -26,7 +45,7 @@ function formatTimestamp(iso) {
   return d.toISOString().replace("T", " ").split(".")[0] + "Z";
 }
 
-function ActionButton({ action, onClick, disabled, busy }) {
+function ActionButton({ action, onClick, disabled, busy, title }) {
   const variant = ACTION_VARIANTS[action] || "ghost";
   const label = action.toUpperCase();
   return (
@@ -35,6 +54,7 @@ function ActionButton({ action, onClick, disabled, busy }) {
       size="sm"
       onClick={onClick}
       disabled={disabled}
+      title={title}
     >
       <span className="font-mono opacity-70">{ACTION_GLYPHS[action]}</span>
       {busy ? "…" : label}
@@ -48,12 +68,9 @@ export default function AppCard({
   busyAction = null,
   onAction,
 }) {
-  const lastResultColor =
-    app.last_result === "success"
-      ? "#10B981"
-      : app.last_result === "failed"
-      ? "#EF4444"
-      : "#5A5A5A";
+  const meta = resultMeta(app.last_result);
+  const buildOnly = app.build_only === true;
+  const composeMissing = app.compose_exists === false;
 
   return (
     <article className="border border-edge bg-surface flex flex-col">
@@ -66,6 +83,19 @@ export default function AppCard({
             <span className="font-mono text-[10px] tracking-telemetry text-fg-secondary">
               {app.app_id}
             </span>
+            {buildOnly && (
+              <span
+                className="font-mono text-[10px] tracking-telemetry font-semibold border px-1.5 py-0.5"
+                style={{
+                  color: "#06B6D4",
+                  borderColor: "#06B6D455",
+                  backgroundColor: "#06B6D414",
+                }}
+                title="This app is built locally; `pull` is not applicable."
+              >
+                BUILD
+              </span>
+            )}
           </div>
           <h3 className="mt-1 font-display text-lg font-bold tracking-tight truncate">
             {app.name}
@@ -85,6 +115,15 @@ export default function AppCard({
           <span className="label-tel">COMPOSE</span>
           <span className="font-mono text-fg-secondary truncate">
             {app.compose_path}
+            {composeMissing && (
+              <span
+                className="ml-2 font-mono uppercase tracking-telemetry text-[10px] font-semibold"
+                style={{ color: "#F97316" }}
+                title="Compose file not found on disk"
+              >
+                / MISSING
+              </span>
+            )}
           </span>
         </div>
         <div className="grid grid-cols-[90px_1fr] gap-2">
@@ -94,9 +133,9 @@ export default function AppCard({
             {app.last_result && (
               <span
                 className="ml-2 font-mono uppercase tracking-telemetry text-[10px] font-semibold"
-                style={{ color: lastResultColor }}
+                style={{ color: meta.color }}
               >
-                / {app.last_result}
+                / {meta.label}
               </span>
             )}
           </span>
@@ -110,15 +149,30 @@ export default function AppCard({
       </div>
 
       <footer className="border-t border-edge px-4 py-3 flex flex-wrap gap-1.5">
-        {actions.map((action) => (
-          <ActionButton
-            key={action}
-            action={action}
-            busy={busyAction === action}
-            disabled={busyAction !== null && busyAction !== action}
-            onClick={() => onAction?.(action)}
-          />
-        ))}
+        {actions.map((action) => {
+          const isPull = action === "pull";
+          const pullDisabled = isPull && buildOnly;
+          const composeDisabled = composeMissing && action !== "logs";
+          const busy = busyAction === action;
+          const lockedByOther = busyAction !== null && busyAction !== action;
+          const disabled = pullDisabled || composeDisabled || lockedByOther;
+          let title;
+          if (pullDisabled) {
+            title = "App is built locally; pull is not applicable. Use REBUILD.";
+          } else if (composeDisabled) {
+            title = "Compose file is missing on disk; actions are unavailable.";
+          }
+          return (
+            <ActionButton
+              key={action}
+              action={action}
+              busy={busy}
+              disabled={disabled}
+              title={title}
+              onClick={() => onAction?.(action)}
+            />
+          );
+        })}
       </footer>
     </article>
   );
