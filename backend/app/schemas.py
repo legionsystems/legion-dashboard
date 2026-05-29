@@ -120,6 +120,10 @@ class AppResponse(BaseModel):
     last_action: Optional[str] = None
     last_result: Optional[str] = None
     last_updated: Optional[datetime] = None
+    # Derived at response time from the compose file. None if the file is
+    # missing or could not be parsed.
+    compose_exists: Optional[bool] = None
+    build_only: Optional[bool] = None
 
 
 class AppActionRequest(BaseModel):
@@ -138,6 +142,9 @@ class AppActionLogResponse(BaseModel):
     stderr_tail: Optional[str] = None
     started_at: datetime
     finished_at: Optional[datetime] = None
+    # Concise, UI-ready summary of the outcome. The raw stdout/stderr tails
+    # remain available for operators who want the full detail.
+    message: Optional[str] = None
 
 
 class AppActionResult(BaseModel):
@@ -148,3 +155,7 @@ class AppActionResult(BaseModel):
 class AppLogsResponse(BaseModel):
     app_id: str
     lines: List[str]
+    # Classification mirroring action results so the UI can show a friendly
+    # empty/not-running state instead of a raw error.
+    result: str = "success"
+    message: Optional[str] = None
