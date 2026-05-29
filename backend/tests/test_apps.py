@@ -475,6 +475,7 @@ def test_all_allowlisted_actions_are_accepted(
         "not_running",
         "not_found",
         "not_applicable",
+        "not_configured",
         "failed",
         "timeout",
     }
@@ -487,3 +488,22 @@ def test_all_allowlisted_actions_are_accepted(
         assert body["log"]["result"] in valid_results, (
             f"{action} produced unrecognised result {body['log']['result']!r}"
         )
+
+
+def test_execute_action_returns_not_configured_when_docker_unavailable(
+    client, db_session, tmp_path, monkeypatch
+):
+    """Verify that when docker CLI is unavailable, actions return not_configured."""
+    _seed_app(db_session, "omega", tmp_path=tmp_path)
+
+    # Patch shutil.which to simulate missing docker CLI
+    monkeypatch.setattr("shutil.which", lambda name: None if name == "docker" else "/usr/bin/other")
+
+    response = client.post(
+        "/api/apps/omega/action", json={"action": "start"}
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["log"]["result"] == "not_configured"
+    assert body["app"]["last_result"] == "not_configured"
+    assert "Docker CLI not found" in body["log"]["message"]

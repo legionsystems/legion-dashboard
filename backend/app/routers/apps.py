@@ -14,11 +14,13 @@ Result classification:
 - `not_running`    — logs requested but no containers are up
 - `not_found`      — compose file missing on disk
 - `not_applicable` — action not meaningful (e.g. pull on a build-only app)
+- `not_configured` — docker CLI or socket not available in container
 - `failed`         — non-zero exit, with structured message
 - `timeout`        — command exceeded subprocess timeout
 """
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime
@@ -61,6 +63,28 @@ _ACTION_ARGS = {
 _SUBPROCESS_TIMEOUT_S = 300
 
 _TAIL_BYTES = 4000  # ~4 KB of stdout/stderr persisted in the action log
+
+
+def _check_docker_available() -> tuple[bool, str]:
+    """Check if docker CLI and socket are available.
+
+    Returns (available, reason) tuple.
+    """
+    import shutil
+    from pathlib import Path
+
+    # Check docker CLI
+    if shutil.which("docker") is None:
+        return False, "Docker CLI not found in PATH. Install docker-ce-cli in the container."
+
+    # Check socket
+    socket_path = Path("/var/run/docker.sock")
+    if not socket_path.exists():
+        return False, "Docker socket not found at /var/run/docker.sock. Mount the host socket."
+    if not os.access(socket_path, os.R_OK | os.W_OK):
+        return False, "Docker socket exists but is not readable/writable. Check permissions."
+
+    return True, ""
 
 
 @dataclass
@@ -462,33 +486,44 @@ def execute_action(
             log.stderr_tail = _tail(ps.stderr)
         success = result_kind == "success"
     else:
-        argv = _build_argv(app, action)
-        cwd = str(Path(app.compose_path).parent)
-        try:
-            run = _runner(argv, cwd)
-            success = run.exit_code == 0
-            log.exit_code = run.exit_code
-            log.stdout_tail = _tail(run.stdout)
-            log.stderr_tail = _tail(run.stderr)
-            if success:
-                log.result = "success"
-                message = f"docker compose {action} completed."
-            else:
-                log.result = "failed"
-                message = _summarize_failure(action, run)
-        except subprocess.TimeoutExpired as exc:
-            log.result = "timeout"
+        # Check docker availability before attempting action
+        docker_ok, docker_reason = _check_docker_available()
+        if not docker_ok:
+            log.result = "not_configured"
             log.exit_code = None
             message = (
-                f"docker compose {action} timed out after {exc.timeout}s. "
-                "The command may still be running in the background."
+                f"Docker control not configured: {docker_reason} "
+                "See docs/DOCKER.md for setup instructions."
             )
             log.stderr_tail = _tail(message)
-        except Exception as exc:  # noqa: BLE001
-            log.result = "failed"
-            log.exit_code = -1
-            message = f"Unexpected error running docker compose {action}: {exc}"
-            log.stderr_tail = _tail(str(exc))
+        else:
+            argv = _build_argv(app, action)
+            cwd = str(Path(app.compose_path).parent)
+            try:
+                run = _runner(argv, cwd)
+                success = run.exit_code == 0
+                log.exit_code = run.exit_code
+                log.stdout_tail = _tail(run.stdout)
+                log.stderr_tail = _tail(run.stderr)
+                if success:
+                    log.result = "success"
+                    message = f"docker compose {action} completed."
+                else:
+                    log.result = "failed"
+                    message = _summarize_failure(action, run)
+            except subprocess.TimeoutExpired as exc:
+                log.result = "timeout"
+                log.exit_code = None
+                message = (
+                    f"docker compose {action} timed out after {exc.timeout}s. "
+                    "The command may still be running in the background."
+                )
+                log.stderr_tail = _tail(message)
+            except Exception as exc:  # noqa: BLE001
+                log.result = "failed"
+                log.exit_code = -1
+                message = f"Unexpected error running docker compose {action}: {exc}"
+                log.stderr_tail = _tail(str(exc))
 
     log.finished_at = datetime.utcnow()
 
