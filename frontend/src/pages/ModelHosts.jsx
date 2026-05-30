@@ -292,7 +292,7 @@ export default function ModelHosts({ onBack }) {
   async function handleDelete(id) {
     if (!confirm("Delete this model host?")) return;
     try {
-      await postJson(`/settings/model-hosts/${id}`);
+      await fetch(`/api/settings/model-hosts/${id}`, { method: "DELETE" });
       loadHosts();
     } catch (err) {
       setError(`Failed to delete: ${err.message}`);

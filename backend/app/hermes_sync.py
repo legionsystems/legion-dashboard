@@ -96,6 +96,41 @@ def _load_hermes_config(hermes_home: Path) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _normalize_ollama_url(base_url: str) -> str:
+    """Normalize Ollama/OpenAI-compatible URLs.
+    
+    If URL is clearly Ollama (local/private host, /v1 path, no port),
+    default to port 11434.
+    
+    Examples:
+        http://ai-4080/v1 -> http://ai-4080:11434/v1
+        http://legion/v1 -> http://legion:11434/v1
+        http://ai-4080:11434/v1 -> http://ai-4080:11434/v1 (unchanged)
+    """
+    try:
+        parsed = urlparse(base_url)
+        hostname = (parsed.hostname or "").lower()
+        
+        # Only normalize local/private Ollama hosts
+        local_hosts = {"localhost", "127.0.0.1", "ai-4080", "legion", "ollama"}
+        if hostname not in local_hosts:
+            return base_url
+        
+        # Check if already has explicit port
+        if parsed.port:
+            return base_url
+        
+        # Check if it's a /v1 endpoint (OpenAI-compatible)
+        if not parsed.path.endswith("/v1"):
+            return base_url
+        
+        # Add default Ollama port
+        new_netloc = f"{parsed.hostname}:11434"
+        return parsed._replace(netloc=new_netloc).geturl()
+    except Exception:
+        return base_url
+
+
 def _extract_provider_models(
     provider_name: str,
     provider_config: Dict[str, Any],
@@ -108,12 +143,15 @@ def _extract_provider_models(
     if not base_url:
         return hosts
     
+    # Normalize Ollama URLs (add port 11434 if missing)
+    normalized_url = _normalize_ollama_url(base_url)
+    
     models = provider_config.get("models", [])
     if not models:
         return hosts
     
     # Redact URL for safe storage
-    redacted_url = _redact_url(base_url)
+    redacted_url = _redact_url(normalized_url)
     
     host = {
         "name": f"{provider_name}",
