@@ -83,15 +83,17 @@ def _diff_snapshots(previous_json: Optional[str], current_json: str) -> Optional
     return changed or None
 
 
-def execution_bridge_configured() -> bool:
-    """The dashboard does not ship with a wired-up model bridge.
-
-    A future deployment can flip ``LEGION_DEBATE_BRIDGE`` to a non-empty
-    value to opt in to live execution. We treat the absence of that env var
-    as the documented "not configured" state — runs queue, do not run, and
-    do not fabricate content.
+def execution_bridge_configured(db: Session) -> bool:
+    """Check if debate execution is enabled via DB settings.
+    
+    DB/UI-managed settings are authoritative. Environment variables
+    are bootstrap-only and not used for normal runtime configuration.
+    
+    Returns True if settings.enabled=True and a model host/model is configured.
     """
-    return bool(os.environ.get("LEGION_DEBATE_BRIDGE"))
+    from .debate_executor import get_execution_config
+    config = get_execution_config(db)
+    return bool(config.enabled) and bool(config.base_url) and bool(config.model)
 
 
 def queue_debate_run(
@@ -135,7 +137,7 @@ def queue_debate_run(
     db.add(run)
     db.flush()  # populate run.id without committing — caller commits
 
-    if not execution_bridge_configured():
+    if not execution_bridge_configured(db):
         # Record the queued-but-not-executed state as a single
         # neutral "system" note so the UI has something to render and the
         # run history is self-explanatory. NOT a fake argument from one of
@@ -146,12 +148,12 @@ def queue_debate_run(
             role="System",
             side="neutral",
             content=(
-                "Debate queued; execution bridge not configured. "
-                "Set LEGION_DEBATE_BRIDGE to enable live execution."
+                "Debate execution is disabled in Settings. "
+                "Enable it at Settings > Debate Execution."
             ),
         )
         db.add(note)
-        run.provenance = "execution-bridge-unconfigured"
+        run.provenance = "execution-disabled"
 
     return run
 

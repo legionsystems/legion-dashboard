@@ -312,8 +312,8 @@ def execute_next_debate(
         config = get_execution_config(db)
         if not config.enabled:
             run.error_message = (
-                "Debate execution is not enabled. "
-                "Set DEBATE_EXECUTION_ENABLED=true and configure a local model endpoint."
+                "Debate execution is disabled in Settings. "
+                "Enable it at Settings > Debate Execution."
             )
             db.commit()
             db.refresh(run)
@@ -382,8 +382,8 @@ def execute_debate(
         # Return run with clear message
         if not run.error_message:
             run.error_message = (
-                "Debate execution is not enabled. "
-                "Set DEBATE_EXECUTION_ENABLED=true and configure a local model endpoint."
+                "Debate execution is disabled in Settings. "
+                "Enable it at Settings > Debate Execution."
             )
         db.commit()
         db.refresh(run)
