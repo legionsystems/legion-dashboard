@@ -25,7 +25,7 @@ services:
     volumes:
       - /srv/repo:/srv/repo:ro
       - /var/run/docker.sock:/var/run/docker.sock
-      - /root/.hermes:/app/.hermes:ro  # Hermes config for model sync (read-only, mounted at /app/.hermes for container user)
+      - /srv/repo/legion-dashboard/.hermes-config.yaml:/app/.hermes/config.yaml:ro  # Hermes config (copied for container access)
     group_add:
       - docker
     environment:
