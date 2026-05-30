@@ -109,6 +109,7 @@ export function Sidebar() {
         <NavItem to="/" end glyph=">" label="DASHBOARD" />
         <NavItem to="/work-items" glyph="#" label="WORK ITEMS" />
         <NavItem to="/apps" glyph="◉" label="APPS" />
+        <NavItem to="/settings" glyph="⚙" label="SETTINGS" />
       </nav>
       <div className="border-t border-edge px-4 py-3 space-y-1.5">
         <div className="label-tel">UNIT / D-01</div>
@@ -157,6 +158,18 @@ export function MobileNav() {
         }
       >
         APPS
+      </NavLink>
+      <NavLink
+        to="/settings"
+        className={({ isActive }) =>
+          `px-3 py-1.5 border font-mono uppercase tracking-telemetry text-[11px] font-semibold ${
+            isActive
+              ? "border-fg-primary text-fg-primary bg-raised"
+              : "border-edge text-fg-secondary"
+          }`
+        }
+      >
+        SETTINGS
       </NavLink>
     </div>
   );
