@@ -6,6 +6,7 @@ import WorkItemForm from "./pages/WorkItemForm.jsx";
 import WorkItemNew from "./pages/WorkItemNew.jsx";
 import WorkIntakeForm from "./components/WorkIntakeForm.jsx";
 import Apps from "./pages/Apps.jsx";
+import Settings from "./pages/Settings.jsx";
 import { Sidebar, MobileNav, TopBar } from "./components/shell.jsx";
 
 function crumbsFromPath(pathname) {
@@ -48,6 +49,7 @@ export default function App() {
               <Route path="/work-items/:id" element={<WorkItemDetail />} />
               <Route path="/work-items/:id/edit" element={<WorkItemForm />} />
               <Route path="/apps" element={<Apps />} />
+              <Route path="/settings" element={<Settings />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </div>
