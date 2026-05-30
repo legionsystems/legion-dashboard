@@ -87,7 +87,12 @@ def get_debate_execution_config(db: Session = Depends(get_db)):
         enabled=config.enabled,
         provider=config.provider,
         base_url=config.base_url,
-        model=config.model,
+        model_mode=config.model_mode,
+        default_model=config.default_model,
+        pro_model=config.pro_model,
+        con_model=config.con_model,
+        arbiter_model=config.arbiter_model,
+        fallback_model=config.fallback_model,
         api_key_configured=config.api_key is not None and len(config.api_key) > 0,
         timeout_seconds=config.timeout_seconds,
         max_output_chars=config.max_output_chars,
@@ -116,7 +121,7 @@ def update_debate_execution_config(
         is_cloud = not _is_local_endpoint(payload.base_url)
         # Check if cloud is allowed (either already enabled OR being enabled in this request)
         cloud_allowed = config.allow_cloud_endpoints or (payload.allow_cloud_endpoints is True)
-        
+
         if is_cloud and not cloud_allowed:
             raise HTTPException(
                 status_code=400,
@@ -141,8 +146,18 @@ def update_debate_execution_config(
                 detail="base_url must use http:// or https:// scheme",
             )
         config.base_url = payload.base_url
-    if payload.model is not None:
-        config.model = payload.model
+    if payload.model_mode is not None:
+        config.model_mode = payload.model_mode
+    if payload.default_model is not None:
+        config.default_model = payload.default_model
+    if payload.pro_model is not None:
+        config.pro_model = payload.pro_model
+    if payload.con_model is not None:
+        config.con_model = payload.con_model
+    if payload.arbiter_model is not None:
+        config.arbiter_model = payload.arbiter_model
+    if payload.fallback_model is not None:
+        config.fallback_model = payload.fallback_model
 
     # API key handling
     if payload.clear_api_key:
@@ -170,7 +185,12 @@ def update_debate_execution_config(
         enabled=config.enabled,
         provider=config.provider,
         base_url=config.base_url,
-        model=config.model,
+        model_mode=config.model_mode,
+        default_model=config.default_model,
+        pro_model=config.pro_model,
+        con_model=config.con_model,
+        arbiter_model=config.arbiter_model,
+        fallback_model=config.fallback_model,
         api_key_configured=config.api_key is not None and len(config.api_key) > 0,
         timeout_seconds=config.timeout_seconds,
         max_output_chars=config.max_output_chars,
@@ -198,7 +218,7 @@ def test_debate_execution_connection(
 
     # Use supplied values or fall back to saved config
     base_url = payload.base_url or config.base_url
-    model = payload.model or config.model
+    model = payload.model or config.default_model
     api_key = payload.api_key or config.api_key
     timeout = payload.timeout_seconds or config.timeout_seconds
 

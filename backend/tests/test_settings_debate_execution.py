@@ -78,7 +78,8 @@ class TestDebateExecutionSettings:
             "clear_api_key": True,
             "base_url": "http://ai-4080:11434/v1",
             "provider": "openai_compatible",
-            "model": "deepseek-r1:32b",
+            "model_mode": "single_model",
+            "default_model": "deepseek-r1:32b",
             "timeout_seconds": 180,
             "max_output_chars": 12000,
             "default_rounds": 2,
@@ -93,8 +94,9 @@ class TestDebateExecutionSettings:
         assert data["enabled"] is False
         assert data["api_key_configured"] is False
         assert data["provider"] == "openai_compatible"
+        assert data["model_mode"] == "single_model"
+        assert data["default_model"] == "deepseek-r1:32b"
         assert data["base_url"] == "http://ai-4080:11434/v1"
-        assert data["model"] == "deepseek-r1:32b"
         assert data["default_rounds"] == 2
         assert data["allow_cloud_endpoints"] is False
 

@@ -102,11 +102,13 @@ def get_execution_config(db: Session) -> ExecutionConfig:
     config_row = db.query(DebateExecutionConfig).filter(DebateExecutionConfig.id == 1).first()
 
     if config_row is not None:
+        # Use default_model for single-model mode, or fall back to it for compatibility
+        model = config_row.default_model
         return ExecutionConfig(
             enabled=config_row.enabled,
             provider=config_row.provider,
             base_url=config_row.base_url,
-            model=config_row.model,
+            model=model,
             api_key=config_row.api_key,
             timeout_seconds=config_row.timeout_seconds,
             max_output_chars=config_row.max_output_chars,
@@ -114,6 +116,48 @@ def get_execution_config(db: Session) -> ExecutionConfig:
 
     # Fallback to environment (bootstrap only)
     return ExecutionConfig.from_env()
+
+
+def get_model_for_role(config: DebateExecutionConfig, role: str, side: Optional[str] = None) -> str:
+    """Select the appropriate model for a given debate role.
+
+    Args:
+        config: Debate execution configuration
+        role: The debate role (e.g., 'Product Owner', 'Skeptic', 'Final Arbiter')
+        side: Optional side ('pro' or 'con') — used to determine model selection
+
+    Returns:
+        Model name to use for this role
+
+    Model selection logic:
+    - single_model mode: always return default_model
+    - role_models mode:
+        - Pro/Builder roles (Product Owner, UX/Design Reviewer, Technical Architect, Builder): use pro_model or default_model
+        - Con/Skeptic roles (Skeptic/Red Team, Security/Privacy Reviewer): use con_model or default_model
+        - Arbiter (Final Arbiter): use arbiter_model or default_model
+        - Any other role: use default_model
+    """
+    # Single-model mode: all roles use default_model
+    if config.model_mode == "single_model":
+        return config.default_model
+
+    # Role-models mode: select based on role
+    role_lower = role.lower()
+
+    # Pro/Builder roles
+    if any(p in role_lower for p in ["product owner", "ux", "design reviewer", "technical architect", "builder"]):
+        return config.pro_model or config.default_model
+
+    # Con/Skeptic roles
+    if any(p in role_lower for p in ["skeptic", "red team", "security", "privacy reviewer"]):
+        return config.con_model or config.default_model
+
+    # Arbiter role
+    if "arbiter" in role_lower:
+        return config.arbiter_model or config.default_model
+
+    # Default fallback
+    return config.default_model
 
 
 def build_debate_prompt(

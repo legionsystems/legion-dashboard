@@ -307,7 +307,15 @@ class DebateExecutionConfigResponse(BaseModel):
     enabled: bool
     provider: str
     base_url: str
-    model: str
+    # Model mode: single_model (default) or role_models (advanced)
+    model_mode: str
+    # Single-model mode: all roles use this
+    default_model: str
+    # Role-specific models (only used when model_mode='role_models')
+    pro_model: Optional[str] = None
+    con_model: Optional[str] = None
+    arbiter_model: Optional[str] = None
+    fallback_model: Optional[str] = None
     # API key never returned — only indicate if configured
     api_key_configured: bool
     timeout_seconds: int
@@ -323,7 +331,15 @@ class DebateExecutionConfigUpdate(BaseModel):
     enabled: Optional[bool] = None
     provider: Optional[str] = None
     base_url: Optional[str] = None
-    model: Optional[str] = None
+    # Model mode: single_model (default) or role_models (advanced)
+    model_mode: Optional[str] = None
+    # Single-model mode: all roles use this
+    default_model: Optional[str] = None
+    # Role-specific models (only used when model_mode='role_models')
+    pro_model: Optional[str] = None
+    con_model: Optional[str] = None
+    arbiter_model: Optional[str] = None
+    fallback_model: Optional[str] = None
     # Write-only: set/replace/clear API key
     api_key: Optional[str] = None
     # Explicit clear flag for API key
@@ -333,6 +349,13 @@ class DebateExecutionConfigUpdate(BaseModel):
     default_rounds: Optional[int] = None
     allow_cloud_endpoints: Optional[bool] = None
     notes: Optional[str] = None
+
+    @field_validator("model_mode")
+    @classmethod
+    def _validate_model_mode(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in ("single_model", "role_models"):
+            raise ValueError("model_mode must be 'single_model' or 'role_models'")
+        return v
 
     @field_validator("default_rounds")
     @classmethod
@@ -359,7 +382,7 @@ class DebateExecutionConfigUpdate(BaseModel):
 class DebateExecutionTestRequest(BaseModel):
     """Test connection request — may override settings temporarily."""
     base_url: Optional[str] = None
-    model: Optional[str] = None
+    model: Optional[str] = None  # Uses default_model if not specified
     api_key: Optional[str] = None  # Non-persistent test key
     timeout_seconds: Optional[int] = None
 

@@ -228,6 +228,10 @@ class DebateExecutionConfig(Base):
 
     Stored as a singleton row (id=1). UI manages all settings.
     Environment variables may seed defaults on first start only.
+
+    Supports two modes:
+    - single_model: All roles use default_model (default, recommended for most users)
+    - role_models: Separate models for pro/con/arbiter roles (advanced)
     """
     __tablename__ = "debate_execution_config"
 
@@ -238,12 +242,24 @@ class DebateExecutionConfig(Base):
     enabled = Column(Boolean, nullable=False, default=False)
     provider = Column(String(50), nullable=False, default="openai_compatible")
     base_url = Column(String(500), nullable=False, default="http://ai-4080:11434/v1")
-    model = Column(String(200), nullable=False, default="deepseek-r1:32b")
+
+    # Model mode: single_model (default) or role_models (advanced)
+    model_mode = Column(String(20), nullable=False, default="single_model")
+
+    # Single-model mode: all roles use this model
+    default_model = Column(String(200), nullable=False, default="deepseek-r1:32b")
+
+    # Role-specific models (only used when model_mode='role_models')
+    # Pro/Builder model: Product Owner, UX/Design Reviewer, Technical Architect, Builder
+    pro_model = Column(String(200), nullable=True)
+    # Con/Skeptic model: Skeptic/Red Team, Security/Privacy Reviewer
+    con_model = Column(String(200), nullable=True)
+    # Arbiter model: Final Arbiter
+    arbiter_model = Column(String(200), nullable=True)
+    # Optional fallback model (stored for future use)
+    fallback_model = Column(String(200), nullable=True)
 
     # Secret — stored server-side only, never returned to UI
-    api_key_encrypted = Column(Text, nullable=True)
-    # For now, store as plaintext with clear security TODO
-    # TODO: Implement proper encryption-at-rest using SecretStorage or similar
     api_key = Column(String(500), nullable=True)
 
     # Timeouts and limits
