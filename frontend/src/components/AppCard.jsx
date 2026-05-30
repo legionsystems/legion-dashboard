@@ -72,6 +72,10 @@ export default function AppCard({
   const buildOnly = app.build_only === true;
   const composeMissing = app.compose_exists === false;
 
+  // Open/View link: only shown when exactly one web port is detected
+  const canOpen = app.can_open === true && app.web_url;
+  const openLabel = app.web_port ? `Open (${app.web_port})` : "Open";
+
   return (
     <article className="border border-edge bg-surface flex flex-col">
       <header className="flex items-start justify-between gap-3 border-b border-edge px-4 py-3">
@@ -173,6 +177,24 @@ export default function AppCard({
             />
           );
         })}
+        {/* Open/View link: only shown when exactly one web port is detected */}
+        {canOpen && (
+          <a
+            href={app.web_url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-mono font-semibold border rounded transition-colors"
+            style={{
+              borderColor: "#10B98155",
+              backgroundColor: "#10B98114",
+              color: "#10B981",
+            }}
+            title={`Open app at ${app.web_url}`}
+          >
+            <span>🔗</span>
+            {openLabel}
+          </a>
+        )}
       </footer>
     </article>
   );

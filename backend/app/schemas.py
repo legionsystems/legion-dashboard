@@ -124,6 +124,13 @@ class AppResponse(BaseModel):
     # missing or could not be parsed.
     compose_exists: Optional[bool] = None
     build_only: Optional[bool] = None
+    # Web endpoint for Open/View link. Populated only when exactly one web
+    # port is detected in the compose file. None if no port, multiple ports,
+    # or only internal/DB ports are exposed.
+    web_url: Optional[str] = None
+    web_port: Optional[int] = None
+    can_open: bool = False
+    open_unavailable_reason: Optional[str] = None
 
 
 class AppActionRequest(BaseModel):
@@ -145,6 +152,9 @@ class AppActionLogResponse(BaseModel):
     # Concise, UI-ready summary of the outcome. The raw stdout/stderr tails
     # remain available for operators who want the full detail.
     message: Optional[str] = None
+    # Progress tracking for long-running actions
+    phase: str = "queued"
+    elapsed_seconds: Optional[int] = None
 
 
 class AppActionResult(BaseModel):
