@@ -16,6 +16,79 @@ import {
 } from "../components/states.jsx";
 import { Button } from "../components/buttons.jsx";
 
+// Mirrors backend models.DEBATE_ELIGIBLE_STATUSES.
+const DEBATE_ELIGIBLE_STATUSES = new Set([
+  "draft",
+  "awaiting_approval",
+  "pending_approval",
+  "review",
+  "review_needed",
+  "ready_for_approval",
+]);
+
+const RUN_STATUS_COLOR = {
+  queued: "#F59E0B",
+  running: "#3B82F6",
+  completed: "#10B981",
+  failed: "#EF4444",
+};
+
+const RECOMMENDATION_LABEL = {
+  APPROVE_AS_IS: "APPROVE",
+  APPROVE_WITH_EDITS: "APPROVE+EDITS",
+  SPLIT_FIRST: "SPLIT FIRST",
+  NEEDS_MORE_DETAIL: "MORE DETAIL",
+  DO_NOT_BUILD_NOW: "DO NOT BUILD",
+};
+
+function DebateCell({ item }) {
+  const latest = item.latest_debate;
+  if (!latest) {
+    const needs = DEBATE_ELIGIBLE_STATUSES.has(item.status);
+    return needs ? (
+      <span
+        className="font-mono text-[10px] tracking-telemetry border px-1.5 py-0.5"
+        style={{
+          color: "#F59E0B",
+          borderColor: "#F59E0B55",
+          backgroundColor: "#F59E0B14",
+        }}
+      >
+        NEEDS DEBATE
+      </span>
+    ) : (
+      <span className="font-mono text-[10px] tracking-telemetry text-fg-muted">
+        —
+      </span>
+    );
+  }
+  const color = RUN_STATUS_COLOR[latest.status] || "#5A5A5A";
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      <span
+        className="inline-flex items-center gap-1 font-mono uppercase tracking-telemetry text-[10px] font-semibold border px-1.5 py-0.5"
+        style={{
+          color,
+          borderColor: `${color}55`,
+          backgroundColor: `${color}14`,
+        }}
+      >
+        <span
+          className="inline-block h-1.5 w-1.5"
+          style={{ backgroundColor: color }}
+        />
+        {latest.status.toUpperCase()}
+      </span>
+      {latest.final_recommendation && (
+        <span className="font-mono uppercase tracking-telemetry text-[10px] text-fg-secondary border border-edge px-1.5 py-0.5">
+          {RECOMMENDATION_LABEL[latest.final_recommendation] ||
+            latest.final_recommendation}
+        </span>
+      )}
+    </div>
+  );
+}
+
 export default function WorkItemList() {
   const [items, setItems] = useState([]);
   const [type, setType] = useState("");
@@ -200,13 +273,14 @@ export default function WorkItemList() {
                   <th className="label-tel px-3 py-2 w-[110px]">TYPE</th>
                   <th className="label-tel px-3 py-2">TITLE</th>
                   <th className="label-tel px-3 py-2 w-[140px]">STATUS</th>
+                  <th className="label-tel px-3 py-2 w-[180px]">DEBATE</th>
                   <th className="label-tel px-3 py-2 w-[90px] text-right">APPRV</th>
                 </tr>
               </thead>
               <tbody>
                 {loading &&
                   Array.from({ length: 5 }).map((_, i) => (
-                    <SkeletonRow key={i} cols={5} />
+                    <SkeletonRow key={i} cols={6} />
                   ))}
                 {!loading &&
                   filtered.map((item) => (
@@ -235,6 +309,9 @@ export default function WorkItemList() {
                       </td>
                       <td className="px-3 py-2.5">
                         <StatusBadge status={item.status} />
+                      </td>
+                      <td className="px-3 py-2.5">
+                        <DebateCell item={item} />
                       </td>
                       <td className="px-3 py-2.5 text-right">
                         {item.approved_by_operator ? (

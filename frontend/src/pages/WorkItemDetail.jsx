@@ -9,6 +9,7 @@ import {
   SkeletonBlock,
   EmptyState,
 } from "../components/states.jsx";
+import DebatePanel from "../components/DebatePanel.jsx";
 
 function formatTime(iso) {
   if (!iso) return null;
@@ -248,6 +249,8 @@ export default function WorkItemDetail() {
           </Button>
         </div>
       </Panel>
+
+      <DebatePanel workItemId={item.id} />
 
       <Panel
         title="FOLLOW-UPS"

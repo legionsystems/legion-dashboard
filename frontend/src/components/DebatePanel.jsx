@@ -1,0 +1,488 @@
+import { useEffect, useMemo, useState } from "react";
+import { getJson, postJson } from "../api/client.js";
+import { Panel } from "./panel.jsx";
+import { Button } from "./buttons.jsx";
+import { ErrorBanner, EmptyState, SkeletonBlock } from "./states.jsx";
+
+const DEBATE_MIN_ROUNDS = 1;
+const DEBATE_MAX_ROUNDS = 5;
+
+const RUN_STATUS_META = {
+  queued: { color: "#F59E0B", label: "QUEUED" },
+  running: { color: "#3B82F6", label: "RUNNING" },
+  completed: { color: "#10B981", label: "COMPLETED" },
+  failed: { color: "#EF4444", label: "FAILED" },
+};
+
+const RECOMMENDATION_META = {
+  APPROVE_AS_IS: { color: "#10B981", label: "APPROVE AS IS" },
+  APPROVE_WITH_EDITS: { color: "#06B6D4", label: "APPROVE WITH EDITS" },
+  SPLIT_FIRST: { color: "#A855F7", label: "SPLIT FIRST" },
+  NEEDS_MORE_DETAIL: { color: "#F97316", label: "NEEDS MORE DETAIL" },
+  DO_NOT_BUILD_NOW: { color: "#EF4444", label: "DO NOT BUILD NOW" },
+};
+
+const READINESS_META = {
+  READY: { color: "#10B981", label: "READY" },
+  READY_AFTER_EDITS: { color: "#F59E0B", label: "READY AFTER EDITS" },
+  NOT_READY: { color: "#EF4444", label: "NOT READY" },
+};
+
+const SIDE_META = {
+  pro: { color: "#10B981", label: "PRO" },
+  con: { color: "#EF4444", label: "CON" },
+  neutral: { color: "#8A8A8A", label: "NEUTRAL" },
+  arbiter: { color: "#A855F7", label: "ARBITER" },
+};
+
+const STANCE_OPTIONS = [
+  { value: "auto_assign", label: "AUTO-ASSIGN" },
+  { value: "pro", label: "PRO" },
+  { value: "con", label: "CON" },
+  { value: "neutral", label: "NEUTRAL" },
+];
+
+function formatTime(iso) {
+  if (!iso) return null;
+  return new Date(iso).toISOString().replace("T", " ").split(".")[0] + "Z";
+}
+
+function StatusChip({ kind, value }) {
+  const map =
+    kind === "status"
+      ? RUN_STATUS_META
+      : kind === "recommendation"
+      ? RECOMMENDATION_META
+      : kind === "readiness"
+      ? READINESS_META
+      : kind === "side"
+      ? SIDE_META
+      : {};
+  const meta = map[value] || { color: "#5A5A5A", label: (value || "—").toUpperCase() };
+  return (
+    <span
+      className="inline-flex items-center gap-1.5 border px-2 py-0.5 text-[10px] font-mono uppercase tracking-telemetry font-semibold"
+      style={{
+        color: meta.color,
+        borderColor: `${meta.color}55`,
+        backgroundColor: `${meta.color}14`,
+      }}
+    >
+      <span
+        className="inline-block h-1.5 w-1.5"
+        style={{ backgroundColor: meta.color }}
+      />
+      {meta.label}
+    </span>
+  );
+}
+
+function ArgumentBlock({ argument }) {
+  return (
+    <div className="border border-edge/60 bg-canvas px-3 py-2">
+      <div className="flex items-center gap-2 mb-1.5 flex-wrap">
+        <StatusChip kind="side" value={argument.side} />
+        <span className="font-mono text-[10px] tracking-telemetry text-fg-secondary">
+          {argument.role?.toUpperCase()}
+        </span>
+        <span className="font-mono text-[10px] tracking-telemetry text-fg-muted">
+          R{argument.round_number}
+        </span>
+      </div>
+      <p className="text-sm text-fg-primary whitespace-pre-wrap leading-relaxed">
+        {argument.content}
+      </p>
+    </div>
+  );
+}
+
+function DebateRunCard({ run, expanded, onToggle }) {
+  const [detail, setDetail] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    if (!expanded || detail !== null) return;
+    setLoading(true);
+    getJson(`/work-items/${run.work_item_id}/debates/${run.id}`)
+      .then(setDetail)
+      .catch((err) => setError(err.message))
+      .finally(() => setLoading(false));
+  }, [expanded, detail, run.id, run.work_item_id]);
+
+  const grouped = useMemo(() => {
+    if (!detail?.arguments) return null;
+    const by = { pro: [], con: [], neutral: [], arbiter: [] };
+    for (const arg of detail.arguments) {
+      (by[arg.side] || by.neutral).push(arg);
+    }
+    return by;
+  }, [detail]);
+
+  const hasEdits =
+    run.suggested_title || run.suggested_description || run.suggested_acceptance_notes;
+
+  return (
+    <div className="border border-edge bg-surface">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="w-full flex items-center justify-between gap-3 px-4 py-2.5 border-b border-edge text-left hover:bg-raised transition-colors"
+      >
+        <div className="flex items-center gap-2 flex-wrap min-w-0">
+          <span className="font-mono text-[11px] tracking-telemetry text-fg-muted tabular-nums">
+            RUN #{String(run.id).padStart(3, "0")}
+          </span>
+          <StatusChip kind="status" value={run.status} />
+          {run.final_recommendation && (
+            <StatusChip kind="recommendation" value={run.final_recommendation} />
+          )}
+          {run.implementation_readiness && (
+            <StatusChip kind="readiness" value={run.implementation_readiness} />
+          )}
+          <span className="font-mono text-[10px] tracking-telemetry text-fg-secondary">
+            {run.trigger?.toUpperCase()} · {run.rounds_requested}R
+          </span>
+        </div>
+        <span className="font-mono text-[10px] tracking-telemetry text-fg-muted shrink-0">
+          {expanded ? "[ − ]" : "[ + ]"}
+        </span>
+      </button>
+
+      {expanded && (
+        <div className="px-4 py-3 space-y-3">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+            <div>
+              <div className="label-tel">CREATED</div>
+              <div className="font-mono text-xs mt-0.5 tabular-nums">
+                {formatTime(run.created_at) || "—"}
+              </div>
+            </div>
+            <div>
+              <div className="label-tel">COMPLETED</div>
+              <div className="font-mono text-xs mt-0.5 tabular-nums">
+                {formatTime(run.completed_at) || "—"}
+              </div>
+            </div>
+            <div>
+              <div className="label-tel">PROVENANCE</div>
+              <div className="font-mono text-xs mt-0.5 break-words">
+                {run.provenance || run.model_route || "—"}
+              </div>
+            </div>
+          </div>
+
+          {run.error_message && (
+            <ErrorBanner message={run.error_message} />
+          )}
+
+          <div className="border-l-2 border-fg-muted/40 pl-3 py-1 text-[11px] font-mono uppercase tracking-telemetry text-fg-muted">
+            ADVISORY ONLY · OPERATOR MUST APPROVE MANUALLY
+          </div>
+
+          {run.summary && (
+            <div>
+              <div className="label-tel mb-1">ARBITER SUMMARY</div>
+              <p className="text-sm text-fg-primary whitespace-pre-wrap leading-relaxed">
+                {run.summary}
+              </p>
+            </div>
+          )}
+          {run.risks && (
+            <div>
+              <div className="label-tel mb-1">TOP RISKS</div>
+              <p className="text-sm text-fg-primary whitespace-pre-wrap leading-relaxed">
+                {run.risks}
+              </p>
+            </div>
+          )}
+
+          {hasEdits && (
+            <div className="border border-edge bg-canvas px-3 py-2 space-y-1.5">
+              <div className="label-tel-strong">SUGGESTED EDITS</div>
+              {run.suggested_title && (
+                <div>
+                  <div className="label-tel">TITLE</div>
+                  <p className="text-sm text-fg-primary">{run.suggested_title}</p>
+                </div>
+              )}
+              {run.suggested_description && (
+                <div>
+                  <div className="label-tel">DESCRIPTION</div>
+                  <p className="text-sm text-fg-primary whitespace-pre-wrap">
+                    {run.suggested_description}
+                  </p>
+                </div>
+              )}
+              {run.suggested_acceptance_notes && (
+                <div>
+                  <div className="label-tel">ACCEPTANCE NOTES</div>
+                  <p className="text-sm text-fg-primary whitespace-pre-wrap">
+                    {run.suggested_acceptance_notes}
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {error && <ErrorBanner message={error} />}
+          {loading && <SkeletonBlock rows={3} />}
+
+          {grouped && (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+              <div>
+                <div className="label-tel mb-1.5">PRO</div>
+                {grouped.pro.length === 0 ? (
+                  <p className="text-xs text-fg-muted italic">[ none ]</p>
+                ) : (
+                  <div className="space-y-2">
+                    {grouped.pro.map((a) => (
+                      <ArgumentBlock key={a.id} argument={a} />
+                    ))}
+                  </div>
+                )}
+              </div>
+              <div>
+                <div className="label-tel mb-1.5">CON</div>
+                {grouped.con.length === 0 ? (
+                  <p className="text-xs text-fg-muted italic">[ none ]</p>
+                ) : (
+                  <div className="space-y-2">
+                    {grouped.con.map((a) => (
+                      <ArgumentBlock key={a.id} argument={a} />
+                    ))}
+                  </div>
+                )}
+              </div>
+              {grouped.neutral.length > 0 && (
+                <div className="lg:col-span-2">
+                  <div className="label-tel mb-1.5">NEUTRAL / CONTEXT</div>
+                  <div className="space-y-2">
+                    {grouped.neutral.map((a) => (
+                      <ArgumentBlock key={a.id} argument={a} />
+                    ))}
+                  </div>
+                </div>
+              )}
+              {grouped.arbiter.length > 0 && (
+                <div className="lg:col-span-2">
+                  <div className="label-tel mb-1.5">ARBITER</div>
+                  <div className="space-y-2">
+                    {grouped.arbiter.map((a) => (
+                      <ArgumentBlock key={a.id} argument={a} />
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function DebatePanel({ workItemId }) {
+  const [runs, setRuns] = useState([]);
+  const [inputs, setInputs] = useState([]);
+  const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [rounds, setRounds] = useState(2);
+  const [opContent, setOpContent] = useState("");
+  const [opStance, setOpStance] = useState("auto_assign");
+  const [busy, setBusy] = useState(null);
+  const [expandedId, setExpandedId] = useState(null);
+
+  function refresh() {
+    setError(null);
+    Promise.all([
+      getJson(`/work-items/${workItemId}/debates`),
+      getJson(`/work-items/${workItemId}/debate-inputs`),
+    ])
+      .then(([rs, is]) => {
+        setRuns(rs);
+        setInputs(is);
+        // Latest run expanded by default.
+        if (rs.length > 0 && expandedId === null) {
+          setExpandedId(rs[0].id);
+        }
+      })
+      .catch((err) => setError(err.message))
+      .finally(() => setLoading(false));
+  }
+
+  useEffect(() => {
+    refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workItemId]);
+
+  function runDebate() {
+    const clamped = Math.max(
+      DEBATE_MIN_ROUNDS,
+      Math.min(DEBATE_MAX_ROUNDS, Number(rounds) || 2),
+    );
+    setBusy("run");
+    postJson(`/work-items/${workItemId}/debates`, {
+      rounds: clamped,
+      trigger: "manual_rerun",
+    })
+      .then((created) => {
+        setExpandedId(created.id);
+        refresh();
+      })
+      .catch((err) => setError(err.message))
+      .finally(() => setBusy(null));
+  }
+
+  function submitOperatorInput() {
+    if (!opContent.trim()) return;
+    setBusy("op");
+    postJson(`/work-items/${workItemId}/debate-inputs`, {
+      content: opContent.trim(),
+      stance_requested: opStance,
+    })
+      .then(() => {
+        setOpContent("");
+        setOpStance("auto_assign");
+        refresh();
+      })
+      .catch((err) => setError(err.message))
+      .finally(() => setBusy(null));
+  }
+
+  return (
+    <div className="space-y-4">
+      <Panel
+        title="DEBATE"
+        subtitle="// advisory · operator must approve manually"
+        right={
+          <div className="flex items-center gap-2">
+            <label className="label-tel">ROUNDS:</label>
+            <input
+              type="number"
+              min={DEBATE_MIN_ROUNDS}
+              max={DEBATE_MAX_ROUNDS}
+              value={rounds}
+              onChange={(e) => setRounds(e.target.value)}
+              className="w-14 bg-canvas border border-edge-strong px-2 py-1 font-mono text-xs tabular-nums outline-none focus:border-fg-primary"
+            />
+            <Button
+              variant="primary"
+              onClick={runDebate}
+              disabled={busy === "run"}
+            >
+              {busy === "run" ? "QUEUING…" : "[▶] RUN DEBATE"}
+            </Button>
+          </div>
+        }
+      >
+        <ErrorBanner message={error} />
+        <p className="text-xs text-fg-secondary">
+          Rounds clamped to {DEBATE_MIN_ROUNDS}–{DEBATE_MAX_ROUNDS}. Each run
+          produces a recommendation: APPROVE AS IS, APPROVE WITH EDITS,
+          SPLIT FIRST, NEEDS MORE DETAIL, or DO NOT BUILD NOW. The operator
+          retains final say.
+        </p>
+      </Panel>
+
+      <Panel
+        title="OPERATOR ARGUMENTS"
+        subtitle={`// ${inputs.length} record${inputs.length === 1 ? "" : "s"}`}
+      >
+        <div className="space-y-2 mb-3">
+          <textarea
+            value={opContent}
+            onChange={(e) => setOpContent(e.target.value)}
+            rows={2}
+            placeholder="// argument or counter-argument the debate should consider"
+            className="w-full px-3 py-2 text-sm font-mono bg-canvas border border-edge-strong focus:border-fg-primary outline-none"
+          />
+          <div className="flex items-center gap-2 flex-wrap">
+            <label className="label-tel">STANCE:</label>
+            <div className="flex gap-1.5">
+              {STANCE_OPTIONS.map((opt) => (
+                <button
+                  type="button"
+                  key={opt.value}
+                  onClick={() => setOpStance(opt.value)}
+                  className={`px-2 py-1 font-mono uppercase tracking-telemetry text-[10px] font-semibold border ${
+                    opStance === opt.value
+                      ? "border-fg-primary text-fg-primary bg-raised"
+                      : "border-edge text-fg-secondary hover:text-fg-primary"
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+            <div className="flex-1" />
+            <Button
+              variant="ghost"
+              onClick={submitOperatorInput}
+              disabled={busy === "op" || !opContent.trim()}
+            >
+              {busy === "op" ? "ADDING…" : "+ ADD ARGUMENT"}
+            </Button>
+          </div>
+        </div>
+        {inputs.length === 0 ? (
+          <EmptyState
+            title="NO OPERATOR ARGUMENTS"
+            hint="Add a pro/con/neutral argument the debate should weigh."
+            glyph="[ ∅ ]"
+          />
+        ) : (
+          <ul className="divide-y divide-edge/60">
+            {inputs.map((inp) => (
+              <li
+                key={inp.id}
+                className="grid grid-cols-[110px_1fr_120px] gap-3 py-2 items-start"
+              >
+                <StatusChip
+                  kind="side"
+                  value={inp.stance_assigned || inp.stance_requested}
+                />
+                <p className="text-sm text-fg-primary whitespace-pre-wrap">
+                  {inp.content}
+                </p>
+                <span className="font-mono text-[10px] tracking-telemetry text-fg-muted text-right">
+                  {inp.considered_in_run_id
+                    ? `IN RUN #${String(inp.considered_in_run_id).padStart(3, "0")}`
+                    : "PENDING"}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Panel>
+
+      <Panel
+        title="DEBATE RUNS"
+        subtitle={`// ${runs.length} run${runs.length === 1 ? "" : "s"}`}
+      >
+        {loading ? (
+          <SkeletonBlock rows={3} />
+        ) : runs.length === 0 ? (
+          <EmptyState
+            title="NO DEBATE RUNS YET"
+            hint="A run will queue automatically when this work item is in a debate-eligible status, or you can trigger one above."
+            glyph="[ ∅ ]"
+          />
+        ) : (
+          <div className="space-y-2">
+            {runs.map((run) => (
+              <DebateRunCard
+                key={run.id}
+                run={run}
+                expanded={expandedId === run.id}
+                onToggle={() =>
+                  setExpandedId(expandedId === run.id ? null : run.id)
+                }
+              />
+            ))}
+          </div>
+        )}
+      </Panel>
+    </div>
+  );
+}

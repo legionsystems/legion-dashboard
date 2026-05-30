@@ -1,7 +1,16 @@
 from datetime import datetime
 from typing import Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+# Clamped at the schema layer so both 0 and 99 are rejected with 422.
+DEBATE_MIN_ROUNDS = 1
+DEBATE_MAX_ROUNDS = 5
+DEBATE_DEFAULT_ROUNDS = 2
+
+ALLOWED_DEBATE_TRIGGERS = {"manual_rerun", "operator_requested"}
+ALLOWED_OPERATOR_STANCES = {"pro", "con", "neutral", "auto_assign"}
 
 
 class WorkItemBase(BaseModel):
@@ -64,6 +73,10 @@ class WorkItemResponse(WorkItemBase):
     merge_commit_sha: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+    # Populated by the router with the most recent debate run for this item,
+    # or None when no debate has been queued. Used by the list page to show
+    # the debate indicator without an extra round trip.
+    latest_debate: Optional["DebateRunSummary"] = None
 
 
 class FollowUpCreate(BaseModel):
@@ -171,6 +184,107 @@ class AppActionResult(BaseModel):
     log: AppActionLogResponse
 
 
+class DebateArgumentResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    debate_run_id: int
+    round_number: int
+    role: str
+    side: str
+    content: str
+    created_at: datetime
+
+
+class DebateRunSummary(BaseModel):
+    """Run metadata without the (potentially large) argument list — used in
+    list views and in the work-item-list debate indicator."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    work_item_id: int
+    work_item_type_snapshot: str
+    status: str
+    rounds_requested: int
+    rounds_completed: int
+    trigger: str
+    model_route: Optional[str] = None
+    provenance: Optional[str] = None
+    final_recommendation: Optional[str] = None
+    implementation_readiness: Optional[str] = None
+    summary: Optional[str] = None
+    risks: Optional[str] = None
+    suggested_title: Optional[str] = None
+    suggested_description: Optional[str] = None
+    suggested_acceptance_notes: Optional[str] = None
+    error_message: Optional[str] = None
+    created_at: datetime
+    completed_at: Optional[datetime] = None
+
+
+class DebateRunDetail(DebateRunSummary):
+    arguments: List[DebateArgumentResponse] = []
+
+
+class DebateRunCreate(BaseModel):
+    rounds: int = Field(default=DEBATE_DEFAULT_ROUNDS)
+    trigger: str = "manual_rerun"
+
+    @field_validator("rounds")
+    @classmethod
+    def _clamp_rounds(cls, v: int) -> int:
+        if v < DEBATE_MIN_ROUNDS or v > DEBATE_MAX_ROUNDS:
+            raise ValueError(
+                f"rounds must be between {DEBATE_MIN_ROUNDS} and "
+                f"{DEBATE_MAX_ROUNDS}"
+            )
+        return v
+
+    @field_validator("trigger")
+    @classmethod
+    def _check_trigger(cls, v: str) -> str:
+        if v not in ALLOWED_DEBATE_TRIGGERS:
+            raise ValueError(
+                "trigger must be one of " + ", ".join(sorted(ALLOWED_DEBATE_TRIGGERS))
+            )
+        return v
+
+
+class OperatorDebateInputCreate(BaseModel):
+    content: str
+    stance_requested: str = "auto_assign"
+
+    @field_validator("content")
+    @classmethod
+    def _content_nonempty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("content must not be empty")
+        return v
+
+    @field_validator("stance_requested")
+    @classmethod
+    def _check_stance(cls, v: str) -> str:
+        if v not in ALLOWED_OPERATOR_STANCES:
+            raise ValueError(
+                "stance_requested must be one of "
+                + ", ".join(sorted(ALLOWED_OPERATOR_STANCES))
+            )
+        return v
+
+
+class OperatorDebateInputResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    work_item_id: int
+    stance_requested: str
+    stance_assigned: Optional[str] = None
+    content: str
+    considered_in_run_id: Optional[int] = None
+    created_at: datetime
+
+
 class AppLogsResponse(BaseModel):
     app_id: str
     lines: List[str]
@@ -178,3 +292,8 @@ class AppLogsResponse(BaseModel):
     # empty/not-running state instead of a raw error.
     result: str = "success"
     message: Optional[str] = None
+
+
+# Resolve the forward reference from WorkItemResponse -> DebateRunSummary now
+# that both classes are defined.
+WorkItemResponse.model_rebuild()
