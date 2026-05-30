@@ -223,6 +223,49 @@ class OperatorDebateInput(Base):
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
 
 
+class DebateExecutionConfig(Base):
+    """SQL-backed configuration for debate execution bridge.
+
+    Stored as a singleton row (id=1). UI manages all settings.
+    Environment variables may seed defaults on first start only.
+    """
+    __tablename__ = "debate_execution_config"
+
+    id = Column(Integer, primary_key=True, index=True)
+    # Always 1 for singleton pattern
+
+    # Core settings
+    enabled = Column(Boolean, nullable=False, default=False)
+    provider = Column(String(50), nullable=False, default="openai_compatible")
+    base_url = Column(String(500), nullable=False, default="http://ai-4080:11434/v1")
+    model = Column(String(200), nullable=False, default="deepseek-r1:32b")
+
+    # Secret — stored server-side only, never returned to UI
+    api_key_encrypted = Column(Text, nullable=True)
+    # For now, store as plaintext with clear security TODO
+    # TODO: Implement proper encryption-at-rest using SecretStorage or similar
+    api_key = Column(String(500), nullable=True)
+
+    # Timeouts and limits
+    timeout_seconds = Column(Integer, nullable=False, default=180)
+    max_output_chars = Column(Integer, nullable=False, default=12000)
+
+    # Debate defaults
+    default_rounds = Column(Integer, nullable=False, default=2)
+
+    # Security guards
+    allow_cloud_endpoints = Column(Boolean, nullable=False, default=False)
+
+    # Metadata
+    notes = Column(Text, nullable=True)
+    updated_at = Column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
 class AppActionLog(Base):
     __tablename__ = "app_action_logs"
 
