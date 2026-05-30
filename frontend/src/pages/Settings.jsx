@@ -129,7 +129,7 @@ export default function Settings() {
 
   async function loadConfig() {
     try {
-      const data = await getJson("/api/settings/debate-execution");
+      const data = await getJson("/settings/debate-execution");
       setConfig((prev) => ({
         ...prev,
         ...data,
@@ -152,7 +152,7 @@ export default function Settings() {
       if (!payload.api_key) {
         delete payload.api_key;
       }
-      await putJson("/api/settings/debate-execution", payload);
+      await putJson("/settings/debate-execution", payload);
       // Clear API key field after save (never display it)
       setConfig((prev) => ({ ...prev, api_key: "", clear_api_key: false }));
       setTestResult(null);
@@ -172,7 +172,7 @@ export default function Settings() {
       if (config.base_url) payload.base_url = config.base_url;
       if (config.default_model) payload.model = config.default_model;
       if (config.timeout_seconds) payload.timeout_seconds = config.timeout_seconds;
-      const result = await postJson("/api/settings/debate-execution/test", payload);
+      const result = await postJson("/settings/debate-execution/test", payload);
       setTestResult(result);
     } catch (err) {
       setError(`Test failed: ${err.message}`);
