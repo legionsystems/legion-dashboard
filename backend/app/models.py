@@ -312,6 +312,16 @@ class ModelHost(Base):
     last_models_refresh_at = Column(DateTime, nullable=True)
     last_error = Column(Text, nullable=True)
 
+    # Hermes sync metadata
+    source = Column(String(20), nullable=False, default="manual")  # manual | hermes
+    source_key = Column(String(200), nullable=True)  # Stable identifier from Hermes
+    profile_name = Column(String(100), nullable=True)  # Hermes profile name
+    provider_name = Column(String(100), nullable=True)  # Hermes provider name
+    sync_enabled = Column(Boolean, nullable=False, default=True)
+    last_synced_at = Column(DateTime, nullable=True)
+    last_sync_status = Column(String(20), nullable=True)  # success, failed, skipped
+    last_sync_error = Column(Text, nullable=True)
+
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(
         DateTime,
@@ -353,7 +363,26 @@ class ModelHostModel(Base):
     is_available = Column(Boolean, nullable=False, default=True)
     discovered_at = Column(DateTime, server_default=func.now(), nullable=False)
 
+    # Hermes sync metadata
+    source = Column(String(20), nullable=False, default="manual")  # manual | hermes
+    source_key = Column(String(200), nullable=True)
+    last_synced_at = Column(DateTime, nullable=True)
+
     host = relationship("ModelHost", back_populates="models")
+
+
+class ModelSyncRun(Base):
+    """Record of a Hermes model sync run."""
+    __tablename__ = "model_sync_runs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    source = Column(String(20), nullable=False, default="hermes")
+    status = Column(String(20), nullable=False, default="running")  # running, completed, failed
+    hosts_discovered = Column(Integer, nullable=True)
+    models_discovered = Column(Integer, nullable=True)
+    error_message = Column(Text, nullable=True)  # Safe/redacted error message
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    completed_at = Column(DateTime, nullable=True)
 
 
 class AppActionLog(Base):
