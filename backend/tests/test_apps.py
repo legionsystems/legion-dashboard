@@ -351,7 +351,7 @@ def test_logs_action_on_non_running_app_is_not_running(
     assert response.status_code == 200
     body = response.json()
     assert body["log"]["result"] == "not_running"
-    assert "not running" in body["log"]["message"].lower()
+    assert "no containers" in body["log"]["message"].lower()
     # Only the ps probe should have been invoked, never `logs`.
     assert len(silent.calls) == 1
     argv, _ = silent.calls[0]

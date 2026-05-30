@@ -124,10 +124,19 @@ class AppResponse(BaseModel):
     # missing or could not be parsed.
     compose_exists: Optional[bool] = None
     build_only: Optional[bool] = None
-    # Web endpoint for Open/View link. Populated only when exactly one web
-    # port is detected in the compose file. None if no port, multiple ports,
-    # or only internal/DB ports are exposed.
-    web_url: Optional[str] = None
+    # Runtime status from docker compose ps
+    runtime_status: str = "unknown"  # running, stopped, not_created, unknown
+    # Action capabilities derived from runtime status + compose info
+    can_start: bool = False
+    can_stop: bool = False
+    can_restart: bool = False
+    can_rebuild: bool = False
+    can_pull: bool = False
+    can_logs: bool = False
+    action_unavailable_reasons: Optional[List[str]] = None
+    # Web port for Open/View link. Only the port is returned; the frontend
+    # computes the full URL from window.location to preserve the hostname/IP
+    # the operator used to access the dashboard.
     web_port: Optional[int] = None
     can_open: bool = False
     open_unavailable_reason: Optional[str] = None
