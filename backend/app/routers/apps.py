@@ -376,11 +376,13 @@ def _extract_web_port(compose_path: str) -> tuple[int | None, bool, str | None]:
     Returns (port, can_open, reason) tuple.
     Only returns can_open=True when exactly one web app port is detected.
     Internal/DB ports (5432, 3306, 6379, etc.) are excluded.
+    Database services (db, database, postgres, mysql, redis, mongo, etc.) are excluded.
     Frontend computes full URL from window.location to preserve dashboard origin.
     """
     from pathlib import Path
 
     INTERNAL_PORTS = {5432, 3306, 6379, 27017, 9200, 9300, 8080, 8443}  # DB/internal ports
+    DB_SERVICE_NAMES = {"db", "database", "postgres", "postgresql", "mysql", "mariadb", "redis", "mongo", "mongodb", "elasticsearch", "rabbitmq", "kafka", "memcached"}
     p = Path(compose_path)
     if not p.is_file():
         return (None, False, "Compose file not found")
@@ -397,7 +399,10 @@ def _extract_web_port(compose_path: str) -> tuple[int | None, bool, str | None]:
         if isinstance(data, dict):
             services = data.get("services", {})
             if isinstance(services, dict):
-                for svc in services.values():
+                for svc_name, svc in services.items():
+                    # Skip database services by name
+                    if svc_name.lower() in DB_SERVICE_NAMES:
+                        continue
                     if isinstance(svc, dict):
                         ports = svc.get("ports", [])
                         if isinstance(ports, list):
@@ -428,6 +433,7 @@ def _parse_port(port_spec) -> int | None:
     """Parse docker port spec to extract host port.
 
     Handles: 8080, "8080", "8080:80", "127.0.0.1:8080:80", {"target": 80, "published": 8080}
+    Also handles environment variable syntax: ${VAR:-default} extracts default value.
     """
     if isinstance(port_spec, int):
         return port_spec
@@ -436,6 +442,17 @@ def _parse_port(port_spec) -> int | None:
     if isinstance(port_spec, str):
         # Remove quotes
         port_spec = port_spec.strip('"').strip("'")
+        # Handle environment variable syntax ${VAR:-default} -> extract default
+        import re
+        # Replace ${...:-default} with default value
+        def extract_default(match):
+            content = match.group(1)
+            if ':-' in content:
+                return content.split(':-', 1)[1]
+            elif '-' in content:
+                return content.split('-', 1)[1]
+            return content
+        port_spec = re.sub(r'\$\{([^}]+)\}', extract_default, port_spec)
         # Handle "127.0.0.1:8080:80" or "8080:80" or "8080"
         parts = port_spec.split(":")
         if len(parts) >= 2:
