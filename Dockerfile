@@ -16,11 +16,21 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libpq5 \
+    && apt-get install -y --no-install-recommends \
+        libpq5 \
+        curl \
+        ca-certificates \
+    && install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
+    && chmod a+r /etc/apt/keyrings/docker.asc \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin \
     && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 988 --system docker \
     && groupadd --system app \
-    && useradd --system --gid app --home /app --shell /usr/sbin/nologin app
-
+    && useradd --system --gid app --home /app --shell /usr/sbin/nologin app \
+    && usermod -aG docker app
 WORKDIR /app
 
 COPY backend/pyproject.toml ./backend/pyproject.toml
