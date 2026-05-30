@@ -323,6 +323,10 @@ class ModelHost(Base):
         lazy="selectin",
     )
 
+    @property
+    def api_key_configured(self) -> bool:
+        return bool(self.api_key)
+
 
 class ModelHostModel(Base):
     """Model catalog entry for a ModelHost.
