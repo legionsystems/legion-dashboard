@@ -187,12 +187,26 @@ export default function Settings() {
         getJson("/settings/debate-execution"),
       ]);
       setHosts(hostsData);
+      // Persisted config values are authoritative - load them into state
       setConfig((prev) => ({
         ...prev,
         ...configData,
         api_key: "",
         clear_api_key: false,
       }));
+      // Preload models for any selected hosts
+      if (configData.default_host_id) {
+        loadModels(String(configData.default_host_id));
+      }
+      if (configData.pro_host_id) {
+        loadModels(String(configData.pro_host_id));
+      }
+      if (configData.con_host_id) {
+        loadModels(String(configData.con_host_id));
+      }
+      if (configData.arbiter_host_id) {
+        loadModels(String(configData.arbiter_host_id));
+      }
       setLoading(false);
     } catch (err) {
       setError(`Failed to load settings: ${err.message}`);

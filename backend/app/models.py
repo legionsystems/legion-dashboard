@@ -206,6 +206,13 @@ class DebateArgument(Base):
     # pro | con | neutral | arbiter
     side = Column(String(20), nullable=False, default="neutral")
     content = Column(Text, nullable=False)
+    
+    # Dialectic tracking: claim_id for this argument, and which prior claims it responds to
+    claim_id = Column(String(50), nullable=True)  # e.g., "R1-PRO-PO-001"
+    responds_to_claim_ids = Column(Text, nullable=True)  # JSON array of claim IDs this responds to
+    concession = Column(Text, nullable=True)  # What this side concedes from opponent
+    rebuttal = Column(Text, nullable=True)  # What this side rebuts
+    revised_position = Column(Text, nullable=True)  # How position changed after considering opponent
 
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
 

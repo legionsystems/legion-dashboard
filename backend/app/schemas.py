@@ -233,6 +233,11 @@ class DebateArgumentResponse(BaseModel):
     role: str
     side: str
     content: str
+    claim_id: Optional[str] = None
+    responds_to_claim_ids: Optional[List[str]] = None
+    concession: Optional[str] = None
+    rebuttal: Optional[str] = None
+    revised_position: Optional[str] = None
     created_at: datetime
 
 
