@@ -183,8 +183,8 @@ export default function Settings() {
   async function loadAll() {
     try {
       const [hostsData, configData] = await Promise.all([
-        getJson("/api/settings/model-hosts"),
-        getJson("/api/settings/debate-execution"),
+        getJson("/settings/model-hosts"),
+        getJson("/settings/debate-execution"),
       ]);
       setHosts(hostsData);
       setConfig((prev) => ({
@@ -202,7 +202,7 @@ export default function Settings() {
 
   async function loadModels(hostId) {
     try {
-      const models = await getJson(`/api/settings/model-hosts/${hostId}/models`);
+      const models = await getJson(`/settings/model-hosts/${hostId}/models`);
       setModelsByHost((prev) => ({ ...prev, [hostId]: models }));
     } catch (err) {
       // Silent fail - UI shows "no models"
@@ -215,7 +215,7 @@ export default function Settings() {
     try {
       const payload = { ...config };
       if (!payload.api_key) delete payload.api_key;
-      await putJson("/api/settings/debate-execution", payload);
+      await putJson("/settings/debate-execution", payload);
       setConfig((prev) => ({ ...prev, api_key: "", clear_api_key: false }));
       setTestResult(null);
     } catch (err) {
@@ -234,7 +234,7 @@ export default function Settings() {
       if (config.base_url) payload.base_url = config.base_url;
       if (config.default_model) payload.model = config.default_model;
       if (config.timeout_seconds) payload.timeout_seconds = config.timeout_seconds;
-      const result = await postJson("/api/settings/debate-execution/test", payload);
+      const result = await postJson("/settings/debate-execution/test", payload);
       setTestResult(result);
     } catch (err) {
       setError(`Test failed: ${err.message}`);
@@ -258,7 +258,7 @@ export default function Settings() {
   }
 
   function handleRefresh(hostId) {
-    postJson(`/api/settings/model-hosts/${hostId}/refresh-models`).then(() => loadModels(hostId));
+    postJson(`/settings/model-hosts/${hostId}/refresh-models`).then(() => loadModels(hostId));
   }
 
   if (loading) {

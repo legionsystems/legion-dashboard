@@ -111,7 +111,7 @@ function HostCard({ host, onEdit, onTest, onRefresh, onDelete }) {
     setTesting(true);
     setTestResult(null);
     try {
-      const result = await postJson(`/api/settings/model-hosts/${host.id}/test`);
+      const result = await postJson(`/settings/model-hosts/${host.id}/test`);
       setTestResult(result);
     } catch (err) {
       setTestResult({ success: false, error: err.message });
@@ -123,7 +123,7 @@ function HostCard({ host, onEdit, onTest, onRefresh, onDelete }) {
   async function handleRefresh() {
     setRefreshing(true);
     try {
-      await postJson(`/api/settings/model-hosts/${host.id}/refresh-models`);
+      await postJson(`/settings/model-hosts/${host.id}/refresh-models`);
       onRefresh(host.id);
     } catch (err) {
       // Error handled by parent
@@ -231,7 +231,7 @@ export default function ModelHosts({ onBack }) {
 
   async function loadHosts() {
     try {
-      const data = await getJson("/api/settings/model-hosts");
+      const data = await getJson("/settings/model-hosts");
       setHosts(data);
       setLoading(false);
     } catch (err) {
@@ -244,7 +244,7 @@ export default function ModelHosts({ onBack }) {
     setSyncing(true);
     setError(null);
     try {
-      const result = await postJson("/api/settings/model-hosts/sync-hermes");
+      const result = await postJson("/settings/model-hosts/sync-hermes");
       setLastSync(result);
       loadHosts();
     } catch (err) {
@@ -258,9 +258,9 @@ export default function ModelHosts({ onBack }) {
     setError(null);
     try {
       if (editing) {
-        await putJson(`/api/settings/model-hosts/${editing.id}`, formData);
+        await putJson(`/settings/model-hosts/${editing.id}`, formData);
       } else {
-        await postJson("/api/settings/model-hosts", formData);
+        await postJson("/settings/model-hosts", formData);
       }
       setShowForm(false);
       setEditing(null);
@@ -274,7 +274,7 @@ export default function ModelHosts({ onBack }) {
   function handleEdit(host, updates = null) {
     if (updates) {
       // Quick toggle update
-      putJson(`/api/settings/model-hosts/${host.id}`, updates).then(loadHosts);
+      putJson(`/settings/model-hosts/${host.id}`, updates).then(loadHosts);
     } else {
       setEditing(host);
       setFormData({
@@ -292,7 +292,7 @@ export default function ModelHosts({ onBack }) {
   async function handleDelete(id) {
     if (!confirm("Delete this model host?")) return;
     try {
-      await postJson(`/api/settings/model-hosts/${id}`);
+      await postJson(`/settings/model-hosts/${id}`);
       loadHosts();
     } catch (err) {
       setError(`Failed to delete: ${err.message}`);
