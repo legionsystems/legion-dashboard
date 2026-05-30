@@ -26,6 +26,8 @@ from ..models import (
 )
 from ..schemas import (
     BlockRequest,
+    BulkArchiveRequest,
+    BulkArchiveTestItemsRequest,
     DebateRunCreate,
     DebateRunDetail,
     DebateRunSummary,
@@ -33,6 +35,8 @@ from ..schemas import (
     FollowUpResponse,
     OperatorDebateInputCreate,
     OperatorDebateInputResponse,
+    WorkItemArchiveRequest,
+    WorkItemClassificationUpdate,
     WorkItemCreate,
     WorkItemResponse,
     WorkItemUpdate,
@@ -104,9 +108,28 @@ def _serialize_many_with_debate(
 def list_work_items(
     type: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
+    view: str = Query("active", description="active|archived|all"),
+    generated: str = Query("human", description="human|system|test|all"),
     db: Session = Depends(get_db),
 ):
     query = db.query(WorkItem)
+    
+    # Archive view filter
+    if view == "active":
+        query = query.filter(WorkItem.archived == False)
+    elif view == "archived":
+        query = query.filter(WorkItem.archived == True)
+    # view == "all" includes both
+    
+    # Generated/test filter
+    if generated == "human":
+        query = query.filter(WorkItem.is_system_generated == False, WorkItem.is_test_item == False)
+    elif generated == "system":
+        query = query.filter(WorkItem.is_system_generated == True)
+    elif generated == "test":
+        query = query.filter(WorkItem.is_test_item == True)
+    # generated == "all" includes everything
+    
     if type is not None:
         query = query.filter(WorkItem.type == type)
     if status is not None:
@@ -434,3 +457,162 @@ def create_debate_input(
     db.commit()
     db.refresh(op_input)
     return op_input
+
+
+# ---------------------------------------------------------------------------
+# Bulk archive endpoints (must come BEFORE /{work_item_id} routes)
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/bulk/archive",
+    response_model=List[WorkItemResponse],
+)
+def bulk_archive_work_items(
+    payload: BulkArchiveRequest,
+    db: Session = Depends(get_db),
+):
+    """Bulk archive multiple work items."""
+    if not payload.ids:
+        raise HTTPException(status_code=400, detail="No work item IDs provided")
+    
+    items = db.query(WorkItem).filter(WorkItem.id.in_(payload.ids)).all()
+    if len(items) != len(payload.ids):
+        raise HTTPException(status_code=404, detail="Some work items not found")
+    
+    for item in items:
+        if not item.archived:
+            item.archived = True
+            item.archived_at = datetime.utcnow()
+            if payload.reason:
+                item.archive_reason = payload.reason
+    
+    db.commit()
+    
+    # Refresh all items
+    for item in items:
+        db.refresh(item)
+    
+    return [_serialize_with_debate(db, item) for item in items]
+
+
+@router.post(
+    "/bulk/archive-test-items",
+    response_model=dict,
+)
+def bulk_archive_test_items(
+    payload: BulkArchiveTestItemsRequest = None,
+    db: Session = Depends(get_db),
+):
+    """Bulk archive test/system-generated work items. Dry run by default."""
+    dry_run = payload.dry_run if payload else True
+    older_than_days = payload.older_than_days if payload else None
+    
+    query = db.query(WorkItem).filter(
+        WorkItem.is_test_item == True,
+        WorkItem.archived == False,
+    )
+    
+    if older_than_days:
+        from datetime import timedelta
+        cutoff = datetime.utcnow() - timedelta(days=older_than_days)
+        query = query.filter(WorkItem.created_at < cutoff)
+    
+    items_to_archive = query.all()
+    
+    if dry_run:
+        return {
+            "dry_run": True,
+            "would_archive_count": len(items_to_archive),
+            "would_archive_ids": [item.id for item in items_to_archive],
+        }
+    
+    # Actually archive
+    for item in items_to_archive:
+        item.archived = True
+        item.archived_at = datetime.utcnow()
+        item.archive_reason = "Bulk archive of test items"
+    
+    db.commit()
+    
+    return {
+        "dry_run": False,
+        "archived_count": len(items_to_archive),
+        "archived_ids": [item.id for item in items_to_archive],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Archive lifecycle endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/{work_item_id}/archive",
+    response_model=WorkItemResponse,
+)
+def archive_work_item(
+    work_item_id: int,
+    payload: Optional[WorkItemArchiveRequest] = None,
+    db: Session = Depends(get_db),
+):
+    """Archive a work item. Soft delete - preserves all history."""
+    item = _get_or_404(db, work_item_id)
+    if item.archived:
+        raise HTTPException(status_code=400, detail="Work item is already archived")
+    
+    item.archived = True
+    item.archived_at = datetime.utcnow()
+    if payload and payload.reason:
+        item.archive_reason = payload.reason
+    
+    db.commit()
+    db.refresh(item)
+    return _serialize_with_debate(db, item)
+
+
+@router.post(
+    "/{work_item_id}/restore",
+    response_model=WorkItemResponse,
+)
+def restore_work_item(
+    work_item_id: int,
+    db: Session = Depends(get_db),
+):
+    """Restore an archived work item."""
+    item = _get_or_404(db, work_item_id)
+    if not item.archived:
+        raise HTTPException(status_code=400, detail="Work item is not archived")
+    
+    item.archived = False
+    item.archived_at = None
+    item.archived_by = None
+    item.archive_reason = None
+    
+    db.commit()
+    db.refresh(item)
+    return _serialize_with_debate(db, item)
+
+
+@router.patch(
+    "/{work_item_id}/classification",
+    response_model=WorkItemResponse,
+)
+def update_work_item_classification(
+    work_item_id: int,
+    payload: WorkItemClassificationUpdate,
+    db: Session = Depends(get_db),
+):
+    """Update work item classification (system-generated/test flags)."""
+    item = _get_or_404(db, work_item_id)
+    
+    if payload.is_system_generated is not None:
+        item.is_system_generated = payload.is_system_generated
+    if payload.is_test_item is not None:
+        item.is_test_item = payload.is_test_item
+    if payload.tags is not None:
+        item.tags = payload.tags
+    
+    db.commit()
+    db.refresh(item)
+    return _serialize_with_debate(db, item)
