@@ -115,6 +115,19 @@ export default function AppActionModal({
     };
   }, [busy, app?.app_id]);
 
+  // Update phase/elapsed from result when action completes
+  useEffect(() => {
+    if (result?.result) {
+      // Map result to terminal phase
+      const terminalPhase = result.result === 'success' ? 'completed' :
+                           result.result === 'failed' ? 'failed' :
+                           result.result === 'timeout' ? 'timed_out' : null;
+      if (terminalPhase) {
+        setPhase(terminalPhase);
+      }
+    }
+  }, [result]);
+
   if (!action || !app) return null;
   const copy = ACTION_COPY[action] || {
     headline: action.toUpperCase(),
@@ -126,11 +139,12 @@ export default function AppActionModal({
 
   const phaseInfo = phase ? PHASE_LABELS[phase] : null;
   const hasOutput = result?.stdout_tail || result?.stderr_tail;
+  const isTerminal = !busy && result?.result;
 
   return (
     <div
       className="fixed inset-0 z-50 flex items-end md:items-center justify-center bg-canvas/80 backdrop-blur-sm p-4"
-      onClick={onCancel}
+      onClick={isTerminal ? undefined : onCancel}
     >
       <div
         className={`w-full max-w-lg border ${
@@ -149,10 +163,10 @@ export default function AppActionModal({
           <div>
             <div
               className={`label-tel-strong ${
-                dangerous ? "text-alert" : "text-fg-primary"
+                dangerous ? "text-alert" : isTerminal ? "text-st-completed" : "text-fg-primary"
               }`}
             >
-              [ {dangerous ? "DANGER" : "CONFIRM"} ]
+              [ {dangerous ? "DANGER" : isTerminal ? "COMPLETE" : "CONFIRM"} ]
             </div>
             <h2
               id="modal-headline"
@@ -184,7 +198,7 @@ export default function AppActionModal({
           </div>
 
           {/* Progress indicator for long-running actions */}
-          {busy && (
+          {(busy || isTerminal) && (
             <div className="border border-edge bg-canvas px-3 py-2">
               <div className="flex items-center justify-between">
                 <div className="label-tel">STATUS</div>
@@ -208,9 +222,43 @@ export default function AppActionModal({
                   </span>
                 )}
                 <div className="font-mono text-xs text-fg-secondary">
-                  {elapsed != null ? `Running for ${formatElapsed(elapsed)}` : "Starting..."}
+                  {elapsed != null ? `Running for ${formatElapsed(elapsed)}` :
+                   isTerminal ? `Completed in ${formatElapsed(elapsed)}` :
+                   "Starting..."}
                 </div>
               </div>
+            </div>
+          )}
+
+          {/* Result summary for completed actions */}
+          {isTerminal && result && (
+            <div className="border border-edge bg-canvas px-3 py-2">
+              <div className="label-tel">RESULT</div>
+              <div className="mt-1 flex items-center gap-2">
+                <span
+                  className="font-mono text-[10px] tracking-telemetry font-semibold px-1.5 py-0.5 rounded"
+                  style={{
+                    backgroundColor: result.result === 'success' ? '#10B98120' :
+                                    result.result === 'failed' ? '#EF444420' : '#F59E0B20',
+                    color: result.result === 'success' ? '#10B981' :
+                           result.result === 'failed' ? '#EF4444' : '#F59E0B',
+                    border: `1px solid ${result.result === 'success' ? '#10B98155' :
+                                        result.result === 'failed' ? '#EF444455' : '#F59E0B55'}`,
+                  }}
+                >
+                  {result.result.toUpperCase()}
+                </span>
+                {result.exit_code !== null && result.exit_code !== undefined && (
+                  <span className="font-mono text-xs text-fg-secondary">
+                    exit code: {result.exit_code}
+                  </span>
+                )}
+              </div>
+              {result.message && (
+                <div className="mt-2 font-mono text-xs text-fg-secondary">
+                  {result.message}
+                </div>
+              )}
             </div>
           )}
 
@@ -253,16 +301,18 @@ export default function AppActionModal({
         </div>
 
         <footer className="flex items-center justify-end gap-2 border-t border-edge px-4 py-3">
-          <Button variant="ghost" onClick={onCancel} disabled={busy}>
-            CANCEL
+          <Button variant="ghost" onClick={onCancel}>
+            {isTerminal ? "CLOSE" : "CANCEL"}
           </Button>
-          <Button
-            variant={copy.confirmVariant}
-            onClick={onConfirm}
-            disabled={busy}
-          >
-            {busy ? "RUNNING…" : copy.confirmLabel}
-          </Button>
+          {!isTerminal && (
+            <Button
+              variant={copy.confirmVariant}
+              onClick={onConfirm}
+              disabled={busy}
+            >
+              {busy ? "RUNNING…" : copy.confirmLabel}
+            </Button>
+          )}
         </footer>
       </div>
     </div>
