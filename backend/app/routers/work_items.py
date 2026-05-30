@@ -7,9 +7,15 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..debate import (
     attach_operator_inputs_to_run,
+    execution_bridge_configured,
     list_pending_operator_inputs,
     queue_debate_for_eligible_item,
     queue_debate_run,
+)
+from ..debate_executor import (
+    ExecutionConfig,
+    execute_debate_run,
+    get_execution_config,
 )
 from ..models import (
     DebateArgument,
@@ -261,6 +267,65 @@ def create_debate_run(
     return run
 
 
+# ---------------------------------------------------------------------------
+# Debate execution endpoints
+# ---------------------------------------------------------------------------
+# IMPORTANT: /next must come BEFORE /{run_id}/execute to avoid "next" being
+# matched as a run_id. FastAPI matches routes in definition order.
+
+
+@router.get(
+    "/{work_item_id}/debates/next",
+    response_model=DebateRunDetail,
+)
+def execute_next_debate(
+    work_item_id: int,
+    db: Session = Depends(get_db),
+):
+    """Execute the latest queued debate run for a work item.
+
+    Creates a new run if none exists (manual trigger).
+    """
+    item = _get_or_404(db, work_item_id)
+    # Get latest QUEUED or FAILED run, not any run
+    run = (
+        db.query(DebateRun)
+        .filter(
+            DebateRun.work_item_id == work_item_id,
+            DebateRun.status.in_(["queued", "failed"]),
+        )
+        .order_by(DebateRun.id.desc())
+        .first()
+    )
+
+    if run is None:
+        # No existing run to execute — create one
+        run = queue_debate_run(db, item, trigger="operator_requested", rounds=2, force=True)
+        pending = list_pending_operator_inputs(db, work_item_id)
+        if pending:
+            attach_operator_inputs_to_run(db, run, pending)
+        db.commit()
+        db.refresh(run)
+
+    # Execute if queued or failed
+    if run.status in ("queued", "failed"):
+        config = get_execution_config(db)
+        if not config.enabled:
+            run.error_message = (
+                "Debate execution is not enabled. "
+                "Set DEBATE_EXECUTION_ENABLED=true and configure a local model endpoint."
+            )
+            db.commit()
+            db.refresh(run)
+            return run
+
+        execute_debate_run(db, run, item, config)
+        db.commit()
+        db.refresh(run)
+
+    return run
+
+
 @router.get(
     "/{work_item_id}/debates/{run_id}",
     response_model=DebateRunDetail,
@@ -278,6 +343,60 @@ def get_debate_run(
     )
     if run is None:
         raise HTTPException(status_code=404, detail="Debate run not found")
+    return run
+
+
+@router.post(
+    "/{work_item_id}/debates/{run_id}/execute",
+    response_model=DebateRunDetail,
+)
+def execute_debate(
+    work_item_id: int,
+    run_id: int,
+    db: Session = Depends(get_db),
+):
+    """Execute a queued or failed debate run.
+
+    If execution bridge is not configured, returns the run with status='queued'
+    and a clear error message.
+
+    If already running, returns current status.
+    If completed, returns existing result (does not re-execute).
+    """
+    item = _get_or_404(db, work_item_id)
+    run = (
+        db.query(DebateRun)
+        .filter(DebateRun.id == run_id, DebateRun.work_item_id == work_item_id)
+        .first()
+    )
+    if run is None:
+        raise HTTPException(status_code=404, detail="Debate run not found")
+
+    # Already completed — do not overwrite
+    if run.status == "completed":
+        return run
+
+    # Check if execution bridge is configured
+    config = get_execution_config(db)
+    if not config.enabled:
+        # Return run with clear message
+        if not run.error_message:
+            run.error_message = (
+                "Debate execution is not enabled. "
+                "Set DEBATE_EXECUTION_ENABLED=true and configure a local model endpoint."
+            )
+        db.commit()
+        db.refresh(run)
+        return run
+
+    # Already running — return current status
+    if run.status == "running":
+        return run
+
+    # Execute the debate
+    execute_debate_run(db, run, item, config)
+    db.commit()
+    db.refresh(run)
     return run
 
 

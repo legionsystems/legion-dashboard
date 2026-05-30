@@ -294,6 +294,109 @@ class AppLogsResponse(BaseModel):
     message: Optional[str] = None
 
 
+# ---------------------------------------------------------------------------
+# Debate Execution Configuration schemas
+# ---------------------------------------------------------------------------
+
+
+class DebateExecutionConfigResponse(BaseModel):
+    """Response schema — excludes raw API key for security."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    enabled: bool
+    provider: str
+    base_url: str
+    # Model mode: single_model (default) or role_models (advanced)
+    model_mode: str
+    # Single-model mode: all roles use this
+    default_model: str
+    # Role-specific models (only used when model_mode='role_models')
+    pro_model: Optional[str] = None
+    con_model: Optional[str] = None
+    arbiter_model: Optional[str] = None
+    fallback_model: Optional[str] = None
+    # API key never returned — only indicate if configured
+    api_key_configured: bool
+    timeout_seconds: int
+    max_output_chars: int
+    default_rounds: int
+    allow_cloud_endpoints: bool
+    notes: Optional[str] = None
+    updated_at: datetime
+
+
+class DebateExecutionConfigUpdate(BaseModel):
+    """Update schema — API key is write-only."""
+    enabled: Optional[bool] = None
+    provider: Optional[str] = None
+    base_url: Optional[str] = None
+    # Model mode: single_model (default) or role_models (advanced)
+    model_mode: Optional[str] = None
+    # Single-model mode: all roles use this
+    default_model: Optional[str] = None
+    # Role-specific models (only used when model_mode='role_models')
+    pro_model: Optional[str] = None
+    con_model: Optional[str] = None
+    arbiter_model: Optional[str] = None
+    fallback_model: Optional[str] = None
+    # Write-only: set/replace/clear API key
+    api_key: Optional[str] = None
+    # Explicit clear flag for API key
+    clear_api_key: bool = False
+    timeout_seconds: Optional[int] = None
+    max_output_chars: Optional[int] = None
+    default_rounds: Optional[int] = None
+    allow_cloud_endpoints: Optional[bool] = None
+    notes: Optional[str] = None
+
+    @field_validator("model_mode")
+    @classmethod
+    def _validate_model_mode(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in ("single_model", "role_models"):
+            raise ValueError("model_mode must be 'single_model' or 'role_models'")
+        return v
+
+    @field_validator("default_rounds")
+    @classmethod
+    def _validate_rounds(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and (v < 1 or v > 5):
+            raise ValueError("default_rounds must be between 1 and 5")
+        return v
+
+    @field_validator("timeout_seconds")
+    @classmethod
+    def _validate_timeout(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and (v < 10 or v > 600):
+            raise ValueError("timeout_seconds must be between 10 and 600")
+        return v
+
+    @field_validator("max_output_chars")
+    @classmethod
+    def _validate_max_chars(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and (v < 1000 or v > 100000):
+            raise ValueError("max_output_chars must be between 1000 and 100000")
+        return v
+
+
+class DebateExecutionTestRequest(BaseModel):
+    """Test connection request — may override settings temporarily."""
+    base_url: Optional[str] = None
+    model: Optional[str] = None  # Uses default_model if not specified
+    api_key: Optional[str] = None  # Non-persistent test key
+    timeout_seconds: Optional[int] = None
+
+
+class DebateExecutionTestResponse(BaseModel):
+    """Test connection response — safe, no secrets."""
+    success: bool
+    provider: str
+    base_url_host: str  # Redacted host only
+    model: str
+    latency_ms: Optional[int] = None
+    error: Optional[str] = None
+
+
 # Resolve the forward reference from WorkItemResponse -> DebateRunSummary now
 # that both classes are defined.
 WorkItemResponse.model_rebuild()

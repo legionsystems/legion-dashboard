@@ -223,6 +223,65 @@ class OperatorDebateInput(Base):
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
 
 
+class DebateExecutionConfig(Base):
+    """SQL-backed configuration for debate execution bridge.
+
+    Stored as a singleton row (id=1). UI manages all settings.
+    Environment variables may seed defaults on first start only.
+
+    Supports two modes:
+    - single_model: All roles use default_model (default, recommended for most users)
+    - role_models: Separate models for pro/con/arbiter roles (advanced)
+    """
+    __tablename__ = "debate_execution_config"
+
+    id = Column(Integer, primary_key=True, index=True)
+    # Always 1 for singleton pattern
+
+    # Core settings
+    enabled = Column(Boolean, nullable=False, default=False)
+    provider = Column(String(50), nullable=False, default="openai_compatible")
+    base_url = Column(String(500), nullable=False, default="http://ai-4080:11434/v1")
+
+    # Model mode: single_model (default) or role_models (advanced)
+    model_mode = Column(String(20), nullable=False, default="single_model")
+
+    # Single-model mode: all roles use this model
+    default_model = Column(String(200), nullable=False, default="deepseek-r1:32b")
+
+    # Role-specific models (only used when model_mode='role_models')
+    # Pro/Builder model: Product Owner, UX/Design Reviewer, Technical Architect, Builder
+    pro_model = Column(String(200), nullable=True)
+    # Con/Skeptic model: Skeptic/Red Team, Security/Privacy Reviewer
+    con_model = Column(String(200), nullable=True)
+    # Arbiter model: Final Arbiter
+    arbiter_model = Column(String(200), nullable=True)
+    # Optional fallback model (stored for future use)
+    fallback_model = Column(String(200), nullable=True)
+
+    # Secret — stored server-side only, never returned to UI
+    api_key = Column(String(500), nullable=True)
+
+    # Timeouts and limits
+    timeout_seconds = Column(Integer, nullable=False, default=180)
+    max_output_chars = Column(Integer, nullable=False, default=12000)
+
+    # Debate defaults
+    default_rounds = Column(Integer, nullable=False, default=2)
+
+    # Security guards
+    allow_cloud_endpoints = Column(Boolean, nullable=False, default=False)
+
+    # Metadata
+    notes = Column(Text, nullable=True)
+    updated_at = Column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
 class AppActionLog(Base):
     __tablename__ = "app_action_logs"
 
