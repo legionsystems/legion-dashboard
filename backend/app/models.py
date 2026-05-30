@@ -232,6 +232,8 @@ class DebateExecutionConfig(Base):
     Supports two modes:
     - single_model: All roles use default_model (default, recommended for most users)
     - role_models: Separate models for pro/con/arbiter roles (advanced)
+
+    Model selection references ModelHost entries by ID.
     """
     __tablename__ = "debate_execution_config"
 
@@ -280,6 +282,69 @@ class DebateExecutionConfig(Base):
         onupdate=func.now(),
         nullable=False,
     )
+
+
+class ModelHost(Base):
+    """SQL-backed model host configuration.
+
+    Represents an OpenAI-compatible model provider endpoint.
+    UI manages hosts; debate execution references them.
+    """
+    __tablename__ = "model_hosts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), nullable=False, unique=True, index=True)
+    provider = Column(String(50), nullable=False, default="openai_compatible")
+    base_url = Column(String(500), nullable=False)
+    api_key = Column(String(500), nullable=True)
+    enabled = Column(Boolean, nullable=False, default=True)
+    allow_cloud_endpoints = Column(Boolean, nullable=False, default=False)
+
+    # Test/refresh status
+    last_test_status = Column(String(20), nullable=True)  # success, failed, unknown
+    last_test_message = Column(Text, nullable=True)
+    last_tested_at = Column(DateTime, nullable=True)
+    last_models_refresh_at = Column(DateTime, nullable=True)
+    last_error = Column(Text, nullable=True)
+
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    # Relationship to model catalog
+    models = relationship(
+        "ModelHostModel",
+        back_populates="host",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+
+
+class ModelHostModel(Base):
+    """Model catalog entry for a ModelHost.
+
+    Discovered via GET {base_url}/models endpoint.
+    """
+    __tablename__ = "model_host_models"
+
+    id = Column(Integer, primary_key=True, index=True)
+    host_id = Column(
+        Integer,
+        ForeignKey("model_hosts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    model_id = Column(String(200), nullable=False, index=True)  # e.g., "deepseek-r1:32b"
+    display_name = Column(String(200), nullable=True)  # Human-friendly name
+    raw_json = Column(Text, nullable=True)  # Bounded raw metadata
+    is_available = Column(Boolean, nullable=False, default=True)
+    discovered_at = Column(DateTime, server_default=func.now(), nullable=False)
+
+    host = relationship("ModelHost", back_populates="models")
 
 
 class AppActionLog(Base):
