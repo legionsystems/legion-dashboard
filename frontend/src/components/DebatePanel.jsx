@@ -77,7 +77,9 @@ function StatusChip({ kind, value }) {
   );
 }
 
-function ArgumentBlock({ argument }) {
+function ArgumentBlock({ argument, showChronological }) {
+  const respondsTo = argument.responds_to_claim_ids ? JSON.parse(argument.responds_to_claim_ids) : [];
+  
   return (
     <div className="border border-edge/60 bg-canvas px-3 py-2">
       <div className="flex items-center gap-2 mb-1.5 flex-wrap">
@@ -88,7 +90,47 @@ function ArgumentBlock({ argument }) {
         <span className="font-mono text-[10px] tracking-telemetry text-fg-muted">
           R{argument.round_number}
         </span>
+        {argument.claim_id && (
+          <span className="font-mono text-[9px] tracking-tighter text-fg-muted px-1.5 py-0.5 border border-edge rounded">
+            {argument.claim_id}
+          </span>
+        )}
       </div>
+      
+      {respondsTo.length > 0 && (
+        <div className="mb-2 flex flex-wrap gap-1">
+          <span className="font-mono text-[9px] text-fg-muted uppercase tracking-tight">Responds to:</span>
+          {respondsTo.map(id => (
+            <span key={id} className="font-mono text-[9px] text-[#3B82F6] bg-[#3B82F6]10 px-1.5 py-0.5 rounded">
+              {id}
+            </span>
+          ))}
+        </div>
+      )}
+      
+      {(argument.concession || argument.rebuttal || argument.revised_position) && (
+        <div className="mb-2 grid grid-cols-1 gap-1">
+          {argument.concession && (
+            <div className="text-xs">
+              <span className="font-mono text-[9px] text-[#F59E0B] uppercase tracking-tight">Concession: </span>
+              <span className="text-fg-secondary italic">{argument.concession}</span>
+            </div>
+          )}
+          {argument.rebuttal && (
+            <div className="text-xs">
+              <span className="font-mono text-[9px] text-[#EF4444] uppercase tracking-tight">Rebuttal: </span>
+              <span className="text-fg-secondary">{argument.rebuttal}</span>
+            </div>
+          )}
+          {argument.revised_position && (
+            <div className="text-xs">
+              <span className="font-mono text-[9px] text-[#10B981] uppercase tracking-tight">Revised: </span>
+              <span className="text-fg-secondary italic">{argument.revised_position}</span>
+            </div>
+          )}
+        </div>
+      )}
+      
       <p className="text-sm text-fg-primary whitespace-pre-wrap leading-relaxed">
         {argument.content}
       </p>
@@ -254,51 +296,72 @@ function DebateRunCard({ run, expanded, onToggle, onExecute, onRerun, executingI
           {loading && <SkeletonBlock rows={3} />}
 
           {grouped && (
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+            <div className="space-y-4">
+              {/* Chronological debate flow - shows back-and-forth */}
               <div>
-                <div className="label-tel mb-1.5">PRO</div>
-                {grouped.pro.length === 0 ? (
-                  <p className="text-xs text-fg-muted italic">[ none ]</p>
-                ) : (
-                  <div className="space-y-2">
-                    {grouped.pro.map((a) => (
-                      <ArgumentBlock key={a.id} argument={a} />
+                <div className="label-tel mb-1.5">CHRONOLOGICAL FLOW</div>
+                <div className="space-y-2">
+                  {detail.arguments
+                    .sort((a, b) => {
+                      if (a.round_number !== b.round_number) return a.round_number - b.round_number;
+                      return a.id - b.id;
+                    })
+                    .map((a) => (
+                      <ArgumentBlock key={a.id} argument={a} showChronological={true} />
                     ))}
-                  </div>
-                )}
-              </div>
-              <div>
-                <div className="label-tel mb-1.5">CON</div>
-                {grouped.con.length === 0 ? (
-                  <p className="text-xs text-fg-muted italic">[ none ]</p>
-                ) : (
-                  <div className="space-y-2">
-                    {grouped.con.map((a) => (
-                      <ArgumentBlock key={a.id} argument={a} />
-                    ))}
-                  </div>
-                )}
-              </div>
-              {grouped.neutral.length > 0 && (
-                <div className="lg:col-span-2">
-                  <div className="label-tel mb-1.5">NEUTRAL / CONTEXT</div>
-                  <div className="space-y-2">
-                    {grouped.neutral.map((a) => (
-                      <ArgumentBlock key={a.id} argument={a} />
-                    ))}
-                  </div>
                 </div>
-              )}
-              {grouped.arbiter.length > 0 && (
-                <div className="lg:col-span-2">
-                  <div className="label-tel mb-1.5">ARBITER</div>
-                  <div className="space-y-2">
-                    {grouped.arbiter.map((a) => (
-                      <ArgumentBlock key={a.id} argument={a} />
-                    ))}
+              </div>
+              
+              {/* Side-grouped view for quick pro/con scan */}
+              <div className="border-t border-edge pt-4">
+                <div className="label-tel mb-2">BY SIDE</div>
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                  <div>
+                    <div className="label-tel mb-1.5">PRO</div>
+                    {grouped.pro.length === 0 ? (
+                      <p className="text-xs text-fg-muted italic">[ none ]</p>
+                    ) : (
+                      <div className="space-y-2">
+                        {grouped.pro.map((a) => (
+                          <ArgumentBlock key={a.id} argument={a} />
+                        ))}
+                      </div>
+                    )}
                   </div>
+                  <div>
+                    <div className="label-tel mb-1.5">CON</div>
+                    {grouped.con.length === 0 ? (
+                      <p className="text-xs text-fg-muted italic">[ none ]</p>
+                    ) : (
+                      <div className="space-y-2">
+                        {grouped.con.map((a) => (
+                          <ArgumentBlock key={a.id} argument={a} />
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  {grouped.neutral.length > 0 && (
+                    <div className="lg:col-span-2">
+                      <div className="label-tel mb-1.5">NEUTRAL / CONTEXT</div>
+                      <div className="space-y-2">
+                        {grouped.neutral.map((a) => (
+                          <ArgumentBlock key={a.id} argument={a} />
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {grouped.arbiter.length > 0 && (
+                    <div className="lg:col-span-2">
+                      <div className="label-tel mb-1.5">ARBITER</div>
+                      <div className="space-y-2">
+                        {grouped.arbiter.map((a) => (
+                          <ArgumentBlock key={a.id} argument={a} />
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
-              )}
+              </div>
             </div>
           )}
         </div>
