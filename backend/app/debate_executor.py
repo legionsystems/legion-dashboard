@@ -97,19 +97,36 @@ def get_execution_config(db: Session) -> ExecutionConfig:
 
     DB settings take precedence. Environment variables are only used as
     bootstrap defaults when no DB row exists.
+
+    Resolves ModelHost references to actual base_url/provider/api_key.
     """
     # Try DB first
     config_row = db.query(DebateExecutionConfig).filter(DebateExecutionConfig.id == 1).first()
 
     if config_row is not None:
+        # Resolve host if selected
+        base_url = config_row.base_url
+        provider = config_row.provider
+        api_key = config_row.api_key
+
+        # If host_id is set, use the host's settings (overrides base_url/provider/api_key)
+        if config_row.default_host_id:
+            from .models import ModelHost
+            host = db.query(ModelHost).filter(ModelHost.id == config_row.default_host_id).first()
+            if host and host.enabled:
+                base_url = host.base_url
+                provider = host.provider
+                api_key = host.api_key or api_key
+
         # Use default_model for single-model mode, or fall back to it for compatibility
         model = config_row.default_model
+
         return ExecutionConfig(
             enabled=config_row.enabled,
-            provider=config_row.provider,
-            base_url=config_row.base_url,
+            provider=provider,
+            base_url=base_url,
             model=model,
-            api_key=config_row.api_key,
+            api_key=api_key,
             timeout_seconds=config_row.timeout_seconds,
             max_output_chars=config_row.max_output_chars,
         )
