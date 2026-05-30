@@ -123,13 +123,16 @@ export default function Apps() {
           ? prev.map((a) => (a.app_id === result.app.app_id ? result.app : a))
           : prev,
       );
-      setActionFeedback({
+      const feedback = {
         appId: target.app_id,
         action: pending.action,
         result: result.log.result,
         exitCode: result.log.exit_code,
         message: result.log.message,
-      });
+        stdout_tail: result.log.stdout_tail,
+        stderr_tail: result.log.stderr_tail,
+      };
+      setActionFeedback(feedback);
 
       // Only fetch the logs panel when the logs action actually produced
       // running containers — otherwise the structured result already carries
@@ -167,8 +170,15 @@ export default function Apps() {
       });
     } finally {
       setBusy(false);
-      setPending({ appId: null, action: null });
+      // Do NOT clear pending here — keep modal open so operator can read result.
+      // Modal will stay open with result visible until operator closes it.
     }
+  }
+
+  function clearActionModal() {
+    // Explicitly clear modal state when operator closes it.
+    setPending({ appId: null, action: null });
+    setActionFeedback(null);
   }
 
   const counts = apps ? summariseStatuses(apps) : null;
@@ -280,7 +290,7 @@ export default function Apps() {
         busy={busy}
         result={actionFeedback}
         onConfirm={confirmAction}
-        onCancel={closeAction}
+        onCancel={clearActionModal}
       />
     </div>
   );
