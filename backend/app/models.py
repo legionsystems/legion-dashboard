@@ -15,6 +15,19 @@ from sqlalchemy.sql import func
 from .database import Base
 
 
+# Statuses that auto-queue a debate run when a work item enters them.
+DEBATE_ELIGIBLE_STATUSES = frozenset(
+    {
+        "draft",
+        "awaiting_approval",
+        "pending_approval",
+        "review",
+        "review_needed",
+        "ready_for_approval",
+    }
+)
+
+
 class WorkItem(Base):
     __tablename__ = "work_items"
 
@@ -97,6 +110,117 @@ class App(Base):
     action_logs = relationship(
         "AppActionLog", back_populates="app", cascade="all, delete-orphan"
     )
+
+
+class DebateRun(Base):
+    __tablename__ = "debate_runs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    work_item_id = Column(
+        Integer,
+        ForeignKey("work_items.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # Snapshot of the work item's type at the time the run was created. Kept
+    # separate so historical runs remain legible even if the item's type is
+    # later edited (which the API allows).
+    work_item_type_snapshot = Column(String(30), nullable=False)
+
+    # queued | running | completed | failed
+    status = Column(String(20), nullable=False, default="queued")
+
+    # Operator-controlled (1..5, default 2). The router enforces the clamp;
+    # the column trusts the router and the model layer's pre-write validation.
+    rounds_requested = Column(Integer, nullable=False, default=2)
+    rounds_completed = Column(Integer, nullable=False, default=0)
+
+    # automatic | manual_rerun | operator_requested
+    trigger = Column(String(30), nullable=False, default="automatic")
+
+    # Free-form provenance string identifying the model route used (or empty
+    # if the execution bridge was not configured).
+    model_route = Column(String(200), nullable=True)
+    provenance = Column(Text, nullable=True)
+
+    # Snapshot of the work item's debate-relevant fields at the moment this
+    # run was queued. Used to de-duplicate automatic re-runs against an
+    # unchanged item.
+    input_snapshot_json = Column(Text, nullable=True)
+    changed_since_previous_json = Column(Text, nullable=True)
+
+    # Final arbiter output. NULL until the run completes successfully.
+    final_recommendation = Column(String(40), nullable=True)
+    implementation_readiness = Column(String(30), nullable=True)
+    summary = Column(Text, nullable=True)
+    risks = Column(Text, nullable=True)
+    suggested_title = Column(String(300), nullable=True)
+    suggested_description = Column(Text, nullable=True)
+    suggested_acceptance_notes = Column(Text, nullable=True)
+
+    error_message = Column(Text, nullable=True)
+
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    completed_at = Column(DateTime, nullable=True)
+
+    arguments = relationship(
+        "DebateArgument",
+        back_populates="debate_run",
+        cascade="all, delete-orphan",
+        order_by="DebateArgument.id",
+    )
+
+
+class DebateArgument(Base):
+    __tablename__ = "debate_arguments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    debate_run_id = Column(
+        Integer,
+        ForeignKey("debate_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    round_number = Column(Integer, nullable=False, default=1)
+
+    # Role names follow the spec: Product Owner, UX/Design Reviewer,
+    # Technical Architect, Security/Privacy Reviewer, Builder,
+    # Skeptic/Red Team, Final Arbiter, Operator (for operator-attached args).
+    role = Column(String(60), nullable=False)
+    # pro | con | neutral | arbiter
+    side = Column(String(20), nullable=False, default="neutral")
+    content = Column(Text, nullable=False)
+
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+
+    debate_run = relationship("DebateRun", back_populates="arguments")
+
+
+class OperatorDebateInput(Base):
+    __tablename__ = "operator_debate_inputs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    work_item_id = Column(
+        Integer,
+        ForeignKey("work_items.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    # pro | con | neutral | auto_assign
+    stance_requested = Column(String(20), nullable=False, default="auto_assign")
+    # pro | con | neutral — populated when execution actually places the
+    # argument on a side. NULL while the operator's request is still
+    # auto_assign and no run has consumed it yet.
+    stance_assigned = Column(String(20), nullable=True)
+    content = Column(Text, nullable=False)
+    considered_in_run_id = Column(
+        Integer,
+        ForeignKey("debate_runs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
 
 
 class AppActionLog(Base):
