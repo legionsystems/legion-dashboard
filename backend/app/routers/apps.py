@@ -242,12 +242,147 @@ def _serialize_app(app: App) -> AppResponse:
     response = AppResponse.model_validate(app)
     response.compose_exists = info.exists
     response.build_only = info.build_only if info.exists else None
+
+    # Derive web endpoint from compose file ports
+    web_url, web_port, can_open, reason = _extract_web_endpoint(app.compose_path)
+    response.web_url = web_url
+    response.web_port = web_port
+    response.can_open = can_open
+    response.open_unavailable_reason = reason
+
     return response
+
+
+def _extract_web_endpoint(compose_path: str) -> tuple[str | None, int | None, bool, str | None]:
+    """Extract single web endpoint from compose file.
+
+    Returns (url, port, can_open, reason) tuple.
+    Only returns can_open=True when exactly one web app port is detected.
+    Internal/DB ports (5432, 3306, 6379, etc.) are excluded.
+    """
+    from pathlib import Path
+
+    INTERNAL_PORTS = {5432, 3306, 6379, 27017, 9200, 9300, 8080, 8443}  # DB/internal ports
+    p = Path(compose_path)
+    if not p.is_file():
+        return (None, None, False, "Compose file not found")
+
+    try:
+        text = p.read_text(encoding="utf-8")
+    except OSError:
+        return (None, None, False, "Cannot read compose file")
+
+    web_ports = []
+    try:
+        import yaml
+        data = yaml.safe_load(text)
+        if isinstance(data, dict):
+            services = data.get("services", {})
+            if isinstance(services, dict):
+                for svc in services.values():
+                    if isinstance(svc, dict):
+                        ports = svc.get("ports", [])
+                        if isinstance(ports, list):
+                            for port_spec in ports:
+                                port = _parse_port(port_spec)
+                                if port and port not in INTERNAL_PORTS:
+                                    web_ports.append(port)
+    except Exception:  # noqa: BLE001
+        # Fallback to text scan
+        for raw in text.splitlines():
+            line = raw.strip()
+            if line.startswith("-") and ":" in line:
+                # Port mapping like "- 8080:80" or "- 3000:3000"
+                port = _parse_port(line.strip('"').strip("'"))
+                if port and port not in INTERNAL_PORTS:
+                    web_ports.append(port)
+
+    if len(web_ports) == 0:
+        return (None, None, False, "No web port configured")
+    elif len(web_ports) > 1:
+        return (None, None, False, "Multiple web ports detected")
+    else:
+        port = web_ports[0]
+        url = f"http://localhost:{port}"
+        return (url, port, True, None)
+
+
+def _parse_port(port_spec) -> int | None:
+    """Parse docker port spec to extract host port.
+
+    Handles: 8080, "8080", "8080:80", "127.0.0.1:8080:80", {"target": 80, "published": 8080}
+    """
+    if isinstance(port_spec, int):
+        return port_spec
+    if isinstance(port_spec, dict):
+        return port_spec.get("published")
+    if isinstance(port_spec, str):
+        # Remove quotes
+        port_spec = port_spec.strip('"').strip("'")
+        # Handle "127.0.0.1:8080:80" or "8080:80" or "8080"
+        parts = port_spec.split(":")
+        if len(parts) >= 2:
+            # Host port is second-to-last (last is container port)
+            try:
+                return int(parts[-2])
+            except ValueError:
+                return None
+        elif len(parts) == 1:
+            try:
+                return int(parts[0])
+            except ValueError:
+                return None
+    return None
 
 
 def _serialize_log(log: AppActionLog, message: str | None) -> AppActionLogResponse:
     response = AppActionLogResponse.model_validate(log)
     response.message = message
+    return response
+
+
+def _get_latest_action(db: Session, app_id: int) -> AppActionLog | None:
+    """Get the most recent action log for an app."""
+    return (
+        db.query(AppActionLog)
+        .filter(AppActionLog.app_id == app_id)
+        .order_by(AppActionLog.id.desc())
+        .first()
+    )
+
+
+@router.get("/{app_id}/actions/latest", response_model=AppActionLogResponse)
+def get_latest_action(app_id: str, db: Session = Depends(get_db)) -> AppActionLogResponse:
+    """Get the latest action status for an app.
+
+    Used by frontend to poll for action progress during long-running operations.
+    Returns the most recent action log with phase and elapsed_seconds.
+    """
+    app = _get_app_or_404(db, app_id)
+    log = _get_latest_action(db, app.id)
+    if log is None:
+        raise HTTPException(status_code=404, detail="No actions recorded for this app")
+
+    # Calculate elapsed seconds if still running
+    elapsed = None
+    if log.finished_at is None and log.started_at:
+        elapsed = int((datetime.utcnow() - log.started_at).total_seconds())
+    elif log.finished_at and log.started_at:
+        elapsed = int((log.finished_at - log.started_at).total_seconds())
+
+    message = _summarize_failure(log.action, RunResult(log.exit_code or 0, log.stdout_tail or "", log.stderr_tail or "")) if log.result == "failed" else None
+    if log.result == "success":
+        message = f"docker compose {log.action} completed."
+    elif log.result == "not_configured":
+        message = f"Docker control not configured. See docs/DOCKER.md."
+    elif log.result == "timeout":
+        message = f"docker compose {log.action} timed out."
+
+    response = AppActionLogResponse.model_validate(log)
+    response.message = message
+    if elapsed is not None:
+        response.elapsed_seconds = elapsed
+
     return response
 
 
@@ -451,6 +586,7 @@ def execute_action(
         app_id=app.id,
         action=action,
         result="pending",
+        phase="queued",
         started_at=datetime.utcnow(),
     )
     db.add(log)

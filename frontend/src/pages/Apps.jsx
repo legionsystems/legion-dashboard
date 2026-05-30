@@ -278,6 +278,7 @@ export default function Apps() {
         app={pendingApp()}
         action={pending.action}
         busy={busy}
+        result={actionFeedback}
         onConfirm={confirmAction}
         onCancel={closeAction}
       />

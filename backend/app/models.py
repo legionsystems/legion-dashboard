@@ -116,5 +116,10 @@ class AppActionLog(Base):
     stderr_tail = Column(Text, nullable=True)
     started_at = Column(DateTime, nullable=False)
     finished_at = Column(DateTime, nullable=True)
+    # Phase tracking for progress visibility during long-running actions.
+    # Phases: queued, validating_docker, running_compose, collecting_output, completed, failed, timed_out
+    phase = Column(String(30), nullable=False, default="queued")
+    # Elapsed time in seconds (updated while running, final value on completion)
+    elapsed_seconds = Column(Integer, nullable=True)
 
     app = relationship("App", back_populates="action_logs")
