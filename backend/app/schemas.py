@@ -310,11 +310,16 @@ class DebateExecutionConfigResponse(BaseModel):
     # Model mode: single_model (default) or role_models (advanced)
     model_mode: str
     # Single-model mode: all roles use this
+    default_host_id: Optional[int] = None
     default_model: str
     # Role-specific models (only used when model_mode='role_models')
+    pro_host_id: Optional[int] = None
     pro_model: Optional[str] = None
+    con_host_id: Optional[int] = None
     con_model: Optional[str] = None
+    arbiter_host_id: Optional[int] = None
     arbiter_model: Optional[str] = None
+    fallback_host_id: Optional[int] = None
     fallback_model: Optional[str] = None
     # API key never returned — only indicate if configured
     api_key_configured: bool
@@ -334,11 +339,16 @@ class DebateExecutionConfigUpdate(BaseModel):
     # Model mode: single_model (default) or role_models (advanced)
     model_mode: Optional[str] = None
     # Single-model mode: all roles use this
+    default_host_id: Optional[int] = None
     default_model: Optional[str] = None
     # Role-specific models (only used when model_mode='role_models')
+    pro_host_id: Optional[int] = None
     pro_model: Optional[str] = None
+    con_host_id: Optional[int] = None
     con_model: Optional[str] = None
+    arbiter_host_id: Optional[int] = None
     arbiter_model: Optional[str] = None
+    fallback_host_id: Optional[int] = None
     fallback_model: Optional[str] = None
     # Write-only: set/replace/clear API key
     api_key: Optional[str] = None

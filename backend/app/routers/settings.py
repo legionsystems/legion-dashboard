@@ -88,12 +88,17 @@ def get_debate_execution_config(db: Session = Depends(get_db)):
         provider=config.provider,
         base_url=config.base_url,
         model_mode=config.model_mode,
+        default_host_id=config.default_host_id,
         default_model=config.default_model,
+        pro_host_id=config.pro_host_id,
         pro_model=config.pro_model,
+        con_host_id=config.con_host_id,
         con_model=config.con_model,
+        arbiter_host_id=config.arbiter_host_id,
         arbiter_model=config.arbiter_model,
+        fallback_host_id=config.fallback_host_id,
         fallback_model=config.fallback_model,
-        api_key_configured=config.api_key is not None and len(config.api_key) > 0,
+        api_key_configured=bool(config.api_key),
         timeout_seconds=config.timeout_seconds,
         max_output_chars=config.max_output_chars,
         default_rounds=config.default_rounds,
@@ -148,14 +153,24 @@ def update_debate_execution_config(
         config.base_url = payload.base_url
     if payload.model_mode is not None:
         config.model_mode = payload.model_mode
+    if payload.default_host_id is not None:
+        config.default_host_id = payload.default_host_id
     if payload.default_model is not None:
         config.default_model = payload.default_model
+    if payload.pro_host_id is not None:
+        config.pro_host_id = payload.pro_host_id
     if payload.pro_model is not None:
         config.pro_model = payload.pro_model
+    if payload.con_host_id is not None:
+        config.con_host_id = payload.con_host_id
     if payload.con_model is not None:
         config.con_model = payload.con_model
+    if payload.arbiter_host_id is not None:
+        config.arbiter_host_id = payload.arbiter_host_id
     if payload.arbiter_model is not None:
         config.arbiter_model = payload.arbiter_model
+    if payload.fallback_host_id is not None:
+        config.fallback_host_id = payload.fallback_host_id
     if payload.fallback_model is not None:
         config.fallback_model = payload.fallback_model
 
@@ -186,12 +201,17 @@ def update_debate_execution_config(
         provider=config.provider,
         base_url=config.base_url,
         model_mode=config.model_mode,
+        default_host_id=config.default_host_id,
         default_model=config.default_model,
+        pro_host_id=config.pro_host_id,
         pro_model=config.pro_model,
+        con_host_id=config.con_host_id,
         con_model=config.con_model,
+        arbiter_host_id=config.arbiter_host_id,
         arbiter_model=config.arbiter_model,
+        fallback_host_id=config.fallback_host_id,
         fallback_model=config.fallback_model,
-        api_key_configured=config.api_key is not None and len(config.api_key) > 0,
+        api_key_configured=bool(config.api_key),
         timeout_seconds=config.timeout_seconds,
         max_output_chars=config.max_output_chars,
         default_rounds=config.default_rounds,

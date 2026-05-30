@@ -248,17 +248,22 @@ class DebateExecutionConfig(Base):
     # Model mode: single_model (default) or role_models (advanced)
     model_mode = Column(String(20), nullable=False, default="single_model")
 
-    # Single-model mode: all roles use this model
+    # Single-model mode: all roles use this model/host
+    default_host_id = Column(Integer, nullable=True)
     default_model = Column(String(200), nullable=False, default="deepseek-r1:32b")
 
     # Role-specific models (only used when model_mode='role_models')
     # Pro/Builder model: Product Owner, UX/Design Reviewer, Technical Architect, Builder
+    pro_host_id = Column(Integer, nullable=True)
     pro_model = Column(String(200), nullable=True)
     # Con/Skeptic model: Skeptic/Red Team, Security/Privacy Reviewer
+    con_host_id = Column(Integer, nullable=True)
     con_model = Column(String(200), nullable=True)
     # Arbiter model: Final Arbiter
+    arbiter_host_id = Column(Integer, nullable=True)
     arbiter_model = Column(String(200), nullable=True)
     # Optional fallback model (stored for future use)
+    fallback_host_id = Column(Integer, nullable=True)
     fallback_model = Column(String(200), nullable=True)
 
     # Secret — stored server-side only, never returned to UI
