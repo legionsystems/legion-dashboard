@@ -61,11 +61,20 @@ def _find_hermes_home() -> Optional[Path]:
         Path.home() / ".hermes",
         Path("/root/.hermes"),
         Path("/srv/hermes"),
+        Path("/app/.hermes"),  # Container-mounted Hermes config
     ]
     
     for candidate in candidates:
-        if candidate and candidate.exists() and (candidate / "config.yaml").exists():
-            return candidate
+        if candidate and candidate.exists():
+            config_path = candidate / "config.yaml"
+            if config_path.exists():
+                # Test if readable
+                try:
+                    with open(config_path, "r") as f:
+                        f.read(1)
+                    return candidate
+                except (PermissionError, IOError):
+                    continue
     
     # Check profiles
     profiles_base = Path("/srv/hermes/profiles")

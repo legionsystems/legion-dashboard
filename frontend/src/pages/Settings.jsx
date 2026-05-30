@@ -277,11 +277,11 @@ export default function Settings() {
             SETTINGS
           </h1>
           <p className="font-mono text-xs text-fg-muted">
-            Configure debate execution
+            Configure debate execution and model providers
           </p>
         </div>
-        <Button onClick={() => navigate("/model-hosts")} variant="secondary" size="sm">
-          Manage Model Hosts
+        <Button onClick={() => navigate("/settings/model-providers")} variant="secondary" size="sm">
+          Manage Model Providers
         </Button>
       </div>
 
