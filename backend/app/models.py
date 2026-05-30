@@ -60,6 +60,21 @@ class WorkItem(Base):
     pr_url = Column(String(500), nullable=True)
     merge_commit_sha = Column(String(40), nullable=True)
 
+    # Archive lifecycle
+    archived = Column(Boolean, nullable=False, default=False, index=True)
+    archived_at = Column(DateTime, nullable=True)
+    archived_by = Column(String(100), nullable=True)
+    archive_reason = Column(Text, nullable=True)
+
+    # System-generated/test-item metadata
+    is_system_generated = Column(Boolean, nullable=False, default=False, index=True)
+    is_test_item = Column(Boolean, nullable=False, default=False, index=True)
+    generated_by = Column(String(100), nullable=True)
+    generated_by_prompt_id = Column(String(200), nullable=True)
+    source_run_id = Column(Integer, nullable=True)
+    source_kind = Column(String(50), nullable=True)
+    source_ref = Column(String(200), nullable=True)
+
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(
         DateTime,

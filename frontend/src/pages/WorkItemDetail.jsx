@@ -23,6 +23,8 @@ export default function WorkItemDetail() {
   const [error, setError] = useState(null);
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(null);
+  const [showArchiveInput, setShowArchiveInput] = useState(false);
+  const [archiveReason, setArchiveReason] = useState("");
 
   function refresh() {
     setError(null);
@@ -54,6 +56,26 @@ export default function WorkItemDetail() {
         setReason("");
         refresh();
       })
+      .catch((err) => setError(err.message))
+      .finally(() => setBusy(null));
+  }
+
+  function archive() {
+    setBusy("archive");
+    postJson(`/work-items/${id}/archive`, { reason: archiveReason || undefined })
+      .then(() => {
+        setArchiveReason("");
+        setShowArchiveInput(false);
+        refresh();
+      })
+      .catch((err) => setError(err.message))
+      .finally(() => setBusy(null));
+  }
+
+  function restore() {
+    setBusy("restore");
+    postJson(`/work-items/${id}/restore`, {})
+      .then(() => refresh())
       .catch((err) => setError(err.message))
       .finally(() => setBusy(null));
   }
@@ -98,6 +120,98 @@ export default function WorkItemDetail() {
 
       <ErrorBanner message={error} />
 
+      {item.archived && (
+        <div
+          className="border border-fg-muted/60 bg-fg-muted/10 px-4 py-3"
+          style={{ borderLeft: "3px solid #8A8A8A" }}
+        >
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <div>
+              <div className="label-tel" style={{ color: "#8A8A8A" }}>
+                ARCHIVED
+              </div>
+              <div className="text-sm text-fg-secondary mt-0.5">
+                {item.archived_at && (
+                  <span>
+                    Archived: {new Date(item.archived_at).toISOString().replace("T", " ").split(".")[0]}Z
+                  </span>
+                )}
+                {item.archive_reason && (
+                  <span className="ml-4">
+                    Reason: {item.archive_reason}
+                  </span>
+                )}
+              </div>
+            </div>
+            <Button
+              variant="success"
+              onClick={restore}
+              disabled={busy === "restore"}
+            >
+              {busy === "restore" ? "RESTORING…" : "RESTORE"}
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {(item.is_system_generated || item.is_test_item || item.generated_by) && (
+        <Panel title="CLASSIFICATION" subtitle="// origin metadata">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {item.is_system_generated && (
+              <div className="flex items-center gap-2">
+                <span
+                  className="inline-flex items-center gap-1 border px-1.5 py-0.5 text-[10px] font-mono uppercase tracking-telemetry font-semibold"
+                  style={{
+                    color: "#A855F7",
+                    borderColor: "#A855F766",
+                    backgroundColor: "#A855F714",
+                  }}
+                >
+                  SYSTEM-GENERATED
+                </span>
+                {item.generated_by && (
+                  <span className="text-xs text-fg-secondary font-mono">
+                    by: {item.generated_by}
+                  </span>
+                )}
+              </div>
+            )}
+            {item.is_test_item && (
+              <div className="flex items-center gap-2">
+                <span
+                  className="inline-flex items-center gap-1 border px-1.5 py-0.5 text-[10px] font-mono uppercase tracking-telemetry font-semibold"
+                  style={{
+                    color: "#F59E0B",
+                    borderColor: "#F59E0B66",
+                    backgroundColor: "#F59E0B14",
+                  }}
+                >
+                  TEST ITEM
+                </span>
+              </div>
+            )}
+            {item.source_kind && (
+              <div>
+                <span className="label-tel">SOURCE KIND:</span>
+                <span className="text-xs text-fg-secondary font-mono ml-2">{item.source_kind}</span>
+              </div>
+            )}
+            {item.source_run_id && (
+              <div>
+                <span className="label-tel">SOURCE RUN ID:</span>
+                <span className="text-xs text-fg-secondary font-mono ml-2">#{item.source_run_id}</span>
+              </div>
+            )}
+            {item.generated_by_prompt_id && (
+              <div>
+                <span className="label-tel">PROMPT ID:</span>
+                <span className="text-xs text-fg-secondary font-mono ml-2">{item.generated_by_prompt_id}</span>
+              </div>
+            )}
+          </div>
+        </Panel>
+      )}
+
       <div className="border border-edge bg-surface">
         <div className="border-b border-edge px-5 py-4">
           <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
@@ -116,6 +230,35 @@ export default function WorkItemDetail() {
                     ✓ OPERATOR APPROVED
                   </span>
                 )}
+                {item.archived && (
+                  <span className="font-mono text-[10px] tracking-telemetry text-fg-muted border border-fg-muted/60 bg-fg-muted/10 px-1.5 py-0.5">
+                    ARCHIVED
+                  </span>
+                )}
+                {item.is_system_generated && (
+                  <span
+                    className="font-mono text-[10px] tracking-telemetry border px-1.5 py-0.5"
+                    style={{
+                      color: "#A855F7",
+                      borderColor: "#A855F766",
+                      backgroundColor: "#A855F714",
+                    }}
+                  >
+                    SYSTEM
+                  </span>
+                )}
+                {item.is_test_item && (
+                  <span
+                    className="font-mono text-[10px] tracking-telemetry border px-1.5 py-0.5"
+                    style={{
+                      color: "#F59E0B",
+                      borderColor: "#F59E0B66",
+                      backgroundColor: "#F59E0B14",
+                    }}
+                  >
+                    TEST
+                  </span>
+                )}
               </div>
               <h1 className="font-display font-extrabold tracking-tighter-display text-fg-primary text-2xl md:text-3xl leading-tight break-words">
                 {item.title}
@@ -125,6 +268,52 @@ export default function WorkItemDetail() {
               <Link to={`/work-items/${item.id}/edit`}>
                 <Button variant="ghost">EDIT</Button>
               </Link>
+              {!item.archived ? (
+                <>
+                  {!showArchiveInput ? (
+                    <Button
+                      variant="danger"
+                      onClick={() => setShowArchiveInput(true)}
+                    >
+                      ARCHIVE
+                    </Button>
+                  ) : (
+                    <div className="flex gap-2 items-center">
+                      <input
+                        type="text"
+                        value={archiveReason}
+                        onChange={(e) => setArchiveReason(e.target.value)}
+                        placeholder="Archive reason (optional)"
+                        className="px-2 py-1 text-sm bg-canvas border border-edge outline-none"
+                      />
+                      <Button
+                        variant="danger"
+                        onClick={archive}
+                        disabled={busy === "archive"}
+                      >
+                        {busy === "archive" ? "ARCHIVING…" : "CONFIRM"}
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        onClick={() => {
+                          setShowArchiveInput(false);
+                          setArchiveReason("");
+                        }}
+                      >
+                        CANCEL
+                      </Button>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <Button
+                  variant="success"
+                  onClick={restore}
+                  disabled={busy === "restore"}
+                >
+                  {busy === "restore" ? "RESTORING…" : "RESTORE"}
+                </Button>
+              )}
               <Button
                 variant="success"
                 disabled={item.approved_by_operator || busy === "approve"}

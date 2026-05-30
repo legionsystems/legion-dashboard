@@ -24,6 +24,15 @@ class WorkItemBase(BaseModel):
     source: str = "operator"
     acceptance_notes: Optional[str] = None
 
+    # System-generated/test-item classification (optional at creation)
+    is_system_generated: bool = False
+    is_test_item: bool = False
+    generated_by: Optional[str] = None
+    generated_by_prompt_id: Optional[str] = None
+    source_run_id: Optional[int] = None
+    source_kind: Optional[str] = None
+    source_ref: Optional[str] = None
+
 
 class WorkItemCreate(WorkItemBase):
     builder_profile: Optional[str] = None
@@ -73,10 +82,41 @@ class WorkItemResponse(WorkItemBase):
     merge_commit_sha: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+    
+    # Archive lifecycle fields
+    archived: bool = False
+    archived_at: Optional[datetime] = None
+    archived_by: Optional[str] = None
+    archive_reason: Optional[str] = None
+    
     # Populated by the router with the most recent debate run for this item,
     # or None when no debate has been queued. Used by the list page to show
     # the debate indicator without an extra round trip.
     latest_debate: Optional["DebateRunSummary"] = None
+
+
+class WorkItemArchiveRequest(BaseModel):
+    """Request body for archiving a work item."""
+    reason: Optional[str] = None
+
+
+class WorkItemClassificationUpdate(BaseModel):
+    """Request body for updating work item classification."""
+    is_system_generated: Optional[bool] = None
+    is_test_item: Optional[bool] = None
+    tags: Optional[str] = None
+
+
+class BulkArchiveRequest(BaseModel):
+    """Request body for bulk archiving work items."""
+    ids: List[int]
+    reason: Optional[str] = None
+
+
+class BulkArchiveTestItemsRequest(BaseModel):
+    """Request body for bulk archiving test items."""
+    older_than_days: Optional[int] = None
+    dry_run: bool = True
 
 
 class FollowUpCreate(BaseModel):
