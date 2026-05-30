@@ -25,12 +25,14 @@ services:
     volumes:
       - /srv/repo:/srv/repo:ro
       - /var/run/docker.sock:/var/run/docker.sock
+      - /srv/repo/legion-dashboard/.hermes-config.yaml:/app/.hermes/config.yaml:ro  # Hermes config (copied for container access)
     group_add:
       - docker
     environment:
       APP_ID: ${APP_ID:-legion-dashboard}
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg2://legion:legion@db:5432/legion_dashboard}
       LEGION_DOCKER_CONTROL_ENABLED: ${LEGION_DOCKER_CONTROL_ENABLED:-true}
+      HERMES_HOME: /app/.hermes  # Point to mounted config location
     ports:
       - "${APP_HOST_PORT:-8720}:8080"
 

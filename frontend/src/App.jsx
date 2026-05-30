@@ -25,6 +25,8 @@ function crumbsFromPath(pathname) {
   }
   if (pathname.startsWith("/work-items")) return ["WORK ITEMS"];
   if (pathname.startsWith("/apps")) return ["APPS"];
+  if (pathname === "/settings/model-providers") return ["SETTINGS", "MODEL PROVIDERS"];
+  if (pathname === "/settings") return ["SETTINGS"];
   return [pathname.toUpperCase()];
 }
 
@@ -51,7 +53,9 @@ export default function App() {
               <Route path="/work-items/:id/edit" element={<WorkItemForm />} />
               <Route path="/apps" element={<Apps />} />
               <Route path="/settings" element={<Settings />} />
-              <Route path="/model-hosts" element={<ModelHosts />} />
+              <Route path="/settings/model-providers" element={<ModelHosts />} />
+              {/* Legacy route - redirects to new location */}
+              <Route path="/model-hosts" element={<Navigate to="/settings/model-providers" replace />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </div>

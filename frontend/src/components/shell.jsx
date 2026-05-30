@@ -110,7 +110,6 @@ export function Sidebar() {
         <NavItem to="/work-items" glyph="#" label="WORK ITEMS" />
         <NavItem to="/apps" glyph="◉" label="APPS" />
         <NavItem to="/settings" glyph="⚙" label="SETTINGS" />
-        <NavItem to="/model-hosts" glyph="◈" label="MODEL HOSTS" />
       </nav>
       <div className="border-t border-edge px-4 py-3 space-y-1.5">
         <div className="label-tel">UNIT / D-01</div>
@@ -171,18 +170,6 @@ export function MobileNav() {
         }
       >
         SETTINGS
-      </NavLink>
-      <NavLink
-        to="/model-hosts"
-        className={({ isActive }) =>
-          `px-3 py-1.5 border font-mono uppercase tracking-telemetry text-[11px] font-semibold ${
-            isActive
-              ? "border-fg-primary text-fg-primary bg-raised"
-              : "border-edge text-fg-secondary"
-          }`
-        }
-      >
-        MODEL HOSTS
       </NavLink>
     </div>
   );
