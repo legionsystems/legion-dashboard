@@ -96,7 +96,7 @@ function ArgumentBlock({ argument }) {
   );
 }
 
-function DebateRunCard({ run, expanded, onToggle }) {
+function DebateRunCard({ run, expanded, onToggle, onExecute, onRerun, executingId, rerunningId }) {
   const [detail, setDetail] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -109,6 +109,9 @@ function DebateRunCard({ run, expanded, onToggle }) {
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
   }, [expanded, detail, run.id, run.work_item_id]);
+
+  const canExecute = run.status === "queued" && !executingId;
+  const canRerun = (run.status === "failed" || run.provenance === "execution-bridge-unconfigured" || run.provenance === "execution-disabled") && !rerunningId;
 
   const grouped = useMemo(() => {
     if (!detail?.arguments) return null;
@@ -144,9 +147,31 @@ function DebateRunCard({ run, expanded, onToggle }) {
             {run.trigger?.toUpperCase()} · {run.rounds_requested}R
           </span>
         </div>
-        <span className="font-mono text-[10px] tracking-telemetry text-fg-muted shrink-0">
-          {expanded ? "[ − ]" : "[ + ]"}
-        </span>
+        <div className="flex items-center gap-2 shrink-0">
+          {canExecute && (
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onExecute(run.id); }}
+              className="px-2 py-0.5 text-[10px] font-mono uppercase tracking-telemetry font-semibold border border-[#3B82F6] text-[#3B82F6] bg-[#3B82F6]14 hover:bg-[#3B82F6]22 rounded"
+              title="Execute this queued debate run"
+            >
+              ▶ EXECUTE
+            </button>
+          )}
+          {canRerun && (
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onRerun(run.id); }}
+              className="px-2 py-0.5 text-[10px] font-mono uppercase tracking-telemetry font-semibold border border-[#F59E0B] text-[#F59E0B] bg-[#F59E0B]14 hover:bg-[#F59E0B]22 rounded"
+              title="Rerun this debate with current settings"
+            >
+              ↻ RERUN
+            </button>
+          )}
+          <span className="font-mono text-[10px] tracking-telemetry text-fg-muted">
+            {expanded ? "[ − ]" : "[ + ]"}
+          </span>
+        </div>
       </button>
 
       {expanded && (
@@ -292,6 +317,9 @@ export default function DebatePanel({ workItemId }) {
   const [opStance, setOpStance] = useState("auto_assign");
   const [busy, setBusy] = useState(null);
   const [expandedId, setExpandedId] = useState(null);
+  const [executingId, setExecutingId] = useState(null);
+  const [rerunningId, setRerunningId] = useState(null);
+  const [pollingInterval, setPollingInterval] = useState(null);
 
   function refresh() {
     setError(null);
@@ -306,6 +334,19 @@ export default function DebatePanel({ workItemId }) {
         if (rs.length > 0 && expandedId === null) {
           setExpandedId(rs[0].id);
         }
+        // Check if any run is running - if so, keep polling
+        const hasRunning = rs.some(r => r.status === "running");
+        if (hasRunning && !pollingInterval) {
+          // Start polling
+          const interval = setInterval(refresh, 2000);
+          setPollingInterval(interval);
+        } else if (!hasRunning && pollingInterval) {
+          // Stop polling
+          clearInterval(pollingInterval);
+          setPollingInterval(null);
+          setExecutingId(null);
+          setRerunningId(null);
+        }
       })
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
@@ -315,6 +356,15 @@ export default function DebatePanel({ workItemId }) {
     refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workItemId]);
+
+  useEffect(() => {
+    // Cleanup polling on unmount
+    return () => {
+      if (pollingInterval) {
+        clearInterval(pollingInterval);
+      }
+    };
+  }, [pollingInterval]);
 
   function runDebate() {
     const clamped = Math.max(
@@ -328,10 +378,48 @@ export default function DebatePanel({ workItemId }) {
     })
       .then((created) => {
         setExpandedId(created.id);
+        // Auto-execute the created debate
+        return postJson(`/work-items/${workItemId}/debates/${created.id}/execute`, {});
+      })
+      .then(() => {
+        setExecutingId(true);
         refresh();
       })
       .catch((err) => setError(err.message))
       .finally(() => setBusy(null));
+  }
+
+  function executeRun(runId) {
+    setExecutingId(runId);
+    postJson(`/work-items/${workItemId}/debates/${runId}/execute`, {})
+      .then(() => {
+        refresh();
+      })
+      .catch((err) => setError(err.message))
+      .finally(() => setExecutingId(null));
+  }
+
+  function rerunRun(runId) {
+    setRerunningId(runId);
+    // Get the original run's round count
+    const originalRun = runs.find(r => r.id === runId);
+    const roundsToUse = originalRun?.rounds_requested || 2;
+    
+    postJson(`/work-items/${workItemId}/debates`, {
+      rounds: roundsToUse,
+      trigger: "manual_rerun",
+    })
+      .then((created) => {
+        setExpandedId(created.id);
+        // Auto-execute the new run
+        return postJson(`/work-items/${workItemId}/debates/${created.id}/execute`, {});
+      })
+      .then(() => {
+        setExecutingId(true);
+        refresh();
+      })
+      .catch((err) => setError(err.message))
+      .finally(() => setRerunningId(null));
   }
 
   function submitOperatorInput() {
@@ -371,7 +459,7 @@ export default function DebatePanel({ workItemId }) {
               onClick={runDebate}
               disabled={busy === "run"}
             >
-              {busy === "run" ? "QUEUING…" : "[▶] RUN DEBATE"}
+              {busy === "run" ? "QUEUING & EXECUTING…" : "[▶] RUN DEBATE"}
             </Button>
           </div>
         }
@@ -478,6 +566,10 @@ export default function DebatePanel({ workItemId }) {
                 onToggle={() =>
                   setExpandedId(expandedId === run.id ? null : run.id)
                 }
+                onExecute={executeRun}
+                onRerun={rerunRun}
+                executingId={executingId === true || executingId === run.id}
+                rerunningId={rerunningId === true || rerunningId === run.id}
               />
             ))}
           </div>

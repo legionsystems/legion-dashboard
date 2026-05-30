@@ -138,10 +138,9 @@ def queue_debate_run(
     db.flush()  # populate run.id without committing — caller commits
 
     if not execution_bridge_configured(db):
-        # Record the queued-but-not-executed state as a single
-        # neutral "system" note so the UI has something to render and the
-        # run history is self-explanatory. NOT a fake argument from one of
-        # the debate roles — this is operational signal, not debate content.
+        # Record the queued-but-not-executed state with clear messaging.
+        # This is shown in the UI so the operator knows why the run hasn't
+        # executed and can enable execution in Settings.
         note = DebateArgument(
             debate_run_id=run.id,
             round_number=0,
