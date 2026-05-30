@@ -105,6 +105,8 @@ function HostCard({ host, onEdit, onTest, onRefresh, onDelete }) {
   const [refreshing, setRefreshing] = useState(false);
   const [testResult, setTestResult] = useState(null);
 
+  const isHermes = host.source === "hermes";
+
   async function handleTest() {
     setTesting(true);
     setTestResult(null);
@@ -137,10 +139,22 @@ function HostCard({ host, onEdit, onTest, onRefresh, onDelete }) {
     <div className="border border-edge bg-canvas rounded p-3 mb-3">
       <div className="flex items-center justify-between mb-2">
         <div>
-          <h4 className="font-mono uppercase tracking-telemetry text-xs font-semibold text-fg-primary">
-            {host.name}
-          </h4>
+          <div className="flex items-center gap-2">
+            <h4 className="font-mono uppercase tracking-telemetry text-xs font-semibold text-fg-primary">
+              {host.name}
+            </h4>
+            <span className={`font-mono text-[8px] uppercase px-1.5 py-0.5 rounded border ${
+              isHermes ? "border-fg-primary text-fg-primary" : "border-edge text-fg-muted"
+            }`}>
+              {isHermes ? "Hermes" : "Manual"}
+            </span>
+          </div>
           <p className="font-mono text-[10px] text-fg-muted">{host.base_url}</p>
+          {isHermes && host.provider_name && (
+            <p className="font-mono text-[9px] text-fg-secondary mt-0.5">
+              {host.profile_name || "default"}:{host.provider_name}
+            </p>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <span className={`font-mono text-[9px] uppercase ${statusColor}`}>
@@ -154,15 +168,19 @@ function HostCard({ host, onEdit, onTest, onRefresh, onDelete }) {
         <Button onClick={handleTest} variant="secondary" size="sm" disabled={testing}>
           {testing ? "Testing..." : "Test"}
         </Button>
-        <Button onClick={handleRefresh} variant="secondary" size="sm" disabled={refreshing}>
-          {refreshing ? "Refreshing..." : "Refresh Models"}
-        </Button>
+        {!isHermes && (
+          <Button onClick={handleRefresh} variant="secondary" size="sm" disabled={refreshing}>
+            {refreshing ? "Refreshing..." : "Refresh Models"}
+          </Button>
+        )}
         <Button onClick={() => onEdit(host)} variant="secondary" size="sm">
           Edit
         </Button>
-        <Button onClick={() => onDelete(host.id)} variant="danger" size="sm">
-          Delete
-        </Button>
+        {!isHermes && (
+          <Button onClick={() => onDelete(host.id)} variant="danger" size="sm">
+            Delete
+          </Button>
+        )}
       </div>
 
       {testResult && (
@@ -172,11 +190,19 @@ function HostCard({ host, onEdit, onTest, onRefresh, onDelete }) {
         </div>
       )}
 
-      {host.last_models_refresh_at && (
-        <p className="font-mono text-[9px] text-fg-muted mt-1">
-          Models refreshed: {new Date(host.last_models_refresh_at).toLocaleString()}
-        </p>
-      )}
+      <div className="mt-2 flex items-center gap-4 text-[9px] font-mono text-fg-muted">
+        {host.last_models_refresh_at && (
+          <span>Models: {new Date(host.last_models_refresh_at).toLocaleString()}</span>
+        )}
+        {isHermes && host.last_synced_at && (
+          <span>Synced: {new Date(host.last_synced_at).toLocaleString()}</span>
+        )}
+        {isHermes && host.last_sync_status && (
+          <span className={host.last_sync_status === "success" ? "text-green-400" : host.last_sync_status === "stale" ? "text-amber-400" : "text-red-400"}>
+            {host.last_sync_status}
+          </span>
+        )}
+      </div>
     </div>
   );
 }
@@ -187,6 +213,8 @@ export default function ModelHosts({ onBack }) {
   const [editing, setEditing] = useState(null);
   const [showForm, setShowForm] = useState(false);
   const [error, setError] = useState(null);
+  const [syncing, setSyncing] = useState(false);
+  const [lastSync, setLastSync] = useState(null);
 
   const [formData, setFormData] = useState({
     name: "",
@@ -209,6 +237,20 @@ export default function ModelHosts({ onBack }) {
     } catch (err) {
       setError(`Failed to load hosts: ${err.message}`);
       setLoading(false);
+    }
+  }
+
+  async function handleSync() {
+    setSyncing(true);
+    setError(null);
+    try {
+      const result = await postJson("/api/settings/model-hosts/sync-hermes");
+      setLastSync(result);
+      loadHosts();
+    } catch (err) {
+      setError(`Sync failed: ${err.message}`);
+    } finally {
+      setSyncing(false);
     }
   }
 
@@ -274,16 +316,31 @@ export default function ModelHosts({ onBack }) {
       <div className="mb-6 flex items-center justify-between">
         <div>
           <h1 className="font-display font-extrabold tracking-tighter-display text-fg-primary text-2xl mb-1">
-            MODEL HOSTS
+            MODEL PROVIDERS
           </h1>
           <p className="font-mono text-xs text-fg-muted">
-            Configure model provider endpoints
+            Model hosts are AI/model endpoints used by Debate Execution. Sync from Hermes or add manually.
           </p>
         </div>
-        <Button onClick={() => { setShowForm(true); setEditing(null); setFormData({ name: "", provider: "openai_compatible", base_url: "", api_key: "", enabled: true, allow_cloud_endpoints: false }); }}>
-          Add Host
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button onClick={handleSync} variant="primary" disabled={syncing}>
+            {syncing ? "Syncing..." : "Sync from Hermes"}
+          </Button>
+          <Button onClick={() => { setShowForm(true); setEditing(null); setFormData({ name: "", provider: "openai_compatible", base_url: "", api_key: "", enabled: true, allow_cloud_endpoints: false }); }}>
+            Add Host
+          </Button>
+        </div>
       </div>
+
+      {lastSync && (
+        <div className={`mb-4 border rounded p-3 ${lastSync.error_message ? "border-amber-500 bg-amber-500/10" : "border-green-500 bg-green-500/10"}`}>
+          <p className={`font-mono text-xs ${lastSync.error_message ? "text-amber-400" : "text-green-400"}`}>
+            {lastSync.error_message 
+              ? `⚠ ${lastSync.error_message}`
+              : `✓ Synced ${lastSync.hosts_discovered} hosts, ${lastSync.models_discovered} models from Hermes`}
+          </p>
+        </div>
+      )}
 
       {error && (
         <div className="mb-4 border border-red-500 bg-red-500/10 rounded p-3">

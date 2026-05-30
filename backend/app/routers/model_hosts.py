@@ -10,7 +10,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..models import ModelHost, ModelHostModel
+from ..hermes_sync import dedupe_hosts, discover_from_hermes
+from ..models import ModelHost, ModelHostModel, ModelSyncRun
 from ..schemas_model_hosts import (
     ModelHostCreate,
     ModelHostModelResponse,
@@ -18,6 +19,7 @@ from ..schemas_model_hosts import (
     ModelHostTestRequest,
     ModelHostTestResponse,
     ModelHostUpdate,
+    ModelSyncRunResponse,
 )
 
 
@@ -78,6 +80,179 @@ def list_model_hosts(db: Session = Depends(get_db)):
     return hosts
 
 
+@router.get("/sync-runs", response_model=List[ModelSyncRunResponse])
+def list_sync_runs(db: Session = Depends(get_db)):
+    """List Hermes sync run history."""
+    runs = db.query(ModelSyncRun).order_by(ModelSyncRun.created_at.desc()).limit(20).all()
+    return runs
+
+
+@router.post("/sync-hermes", response_model=ModelSyncRunResponse)
+def sync_from_hermes(db: Session = Depends(get_db)):
+    """Sync model hosts and models from Hermes configuration.
+    
+    Discovers providers/models from Hermes config files (read-only).
+    Updates local cache, marks stale entries, preserves manual hosts.
+    Never exposes API keys or secrets.
+    """
+    # Create sync run record
+    sync_run = ModelSyncRun(
+        source="hermes",
+        status="running",
+    )
+    db.add(sync_run)
+    db.commit()
+    db.refresh(sync_run)
+    
+    try:
+        # Discover from Hermes
+        discovered_hosts, error = discover_from_hermes()
+        
+        if error:
+            sync_run.status = "completed"
+            sync_run.error_message = error
+            sync_run.hosts_discovered = 0
+            sync_run.models_discovered = 0
+            sync_run.completed_at = datetime.utcnow()
+            db.commit()
+            
+            return ModelSyncRunResponse(
+                id=sync_run.id,
+                source=sync_run.source,
+                status=sync_run.status,
+                hosts_discovered=0,
+                models_discovered=0,
+                error_message=error,
+                created_at=sync_run.created_at,
+                completed_at=sync_run.completed_at,
+            )
+        
+        # Get existing hosts
+        existing_hosts = db.query(ModelHost).all()
+        existing_list = []
+        for h in existing_hosts:
+            host_dict = {
+                "id": h.id,
+                "name": h.name,
+                "provider": h.provider,
+                "base_url": h.base_url,
+                "source": h.source,
+                "source_key": h.source_key,
+                "profile_name": h.profile_name,
+                "provider_name": h.provider_name,
+                "sync_enabled": h.sync_enabled,
+                "allow_cloud_endpoints": h.allow_cloud_endpoints,
+                "models": [{"model_id": m.model_id, "display_name": m.display_name} for m in h.models],
+            }
+            existing_list.append(host_dict)
+        
+        # Dedupe and merge
+        merged_hosts = dedupe_hosts(existing_list, discovered_hosts)
+        
+        # Apply changes to DB
+        hosts_added = 0
+        models_added = 0
+        
+        # Index existing by source_key
+        existing_by_key = {h.source_key: h for h in existing_hosts if h.source_key}
+        existing_by_name = {h.name: h for h in existing_hosts}
+        
+        for host_data in merged_hosts:
+            if host_data.get("source") != "hermes":
+                continue
+            
+            source_key = host_data.get("source_key")
+            name = host_data.get("name")
+            
+            # Find or create host
+            host = None
+            if source_key and source_key in existing_by_key:
+                host = existing_by_key[source_key]
+            elif name in existing_by_name:
+                host = existing_by_name[name]
+            
+            if not host:
+                # Create new
+                host = ModelHost(
+                    name=name,
+                    provider=host_data.get("provider", "openai_compatible"),
+                    base_url=host_data.get("base_url", ""),
+                    source="hermes",
+                    source_key=source_key,
+                    profile_name=host_data.get("profile_name"),
+                    provider_name=host_data.get("provider_name"),
+                    sync_enabled=host_data.get("sync_enabled", True),
+                    allow_cloud_endpoints=host_data.get("allow_cloud_endpoints", False),
+                )
+                db.add(host)
+                db.commit()
+                db.refresh(host)
+                hosts_added += 1
+            else:
+                # Update existing
+                host.base_url = host_data.get("base_url", host.base_url)
+                host.provider_name = host_data.get("provider_name")
+                host.profile_name = host_data.get("profile_name")
+                host.last_synced_at = datetime.utcnow()
+                host.last_sync_status = host_data.get("last_sync_status", "success")
+                host.last_sync_error = host_data.get("last_sync_error")
+                if host_data.get("sync_enabled") is not None:
+                    host.sync_enabled = host_data["sync_enabled"]
+                db.commit()
+            
+            # Sync models
+            models_data = host_data.get("models", [])
+            models_count = 0
+            
+            # Clear existing Hermes-synced models for this host
+            db.query(ModelHostModel).filter(
+                ModelHostModel.host_id == host.id,
+                ModelHostModel.source == "hermes"
+            ).delete()
+            
+            for model_data in models_data:
+                model = ModelHostModel(
+                    host_id=host.id,
+                    model_id=model_data.get("model_id", ""),
+                    display_name=model_data.get("display_name"),
+                    source="hermes",
+                    source_key=model_data.get("source_key"),
+                    last_synced_at=datetime.utcnow(),
+                )
+                db.add(model)
+                models_count += 1
+            
+            models_added += models_count
+            db.commit()
+        
+        # Update sync run
+        sync_run.status = "completed"
+        sync_run.hosts_discovered = hosts_added
+        sync_run.models_discovered = models_added
+        sync_run.completed_at = datetime.utcnow()
+        db.commit()
+        
+        return ModelSyncRunResponse(
+            id=sync_run.id,
+            source=sync_run.source,
+            status=sync_run.status,
+            hosts_discovered=hosts_added,
+            models_discovered=models_added,
+            error_message=None,
+            created_at=sync_run.created_at,
+            completed_at=sync_run.completed_at,
+        )
+        
+    except Exception as e:
+        error_msg = str(e)[:500]
+        sync_run.status = "failed"
+        sync_run.error_message = error_msg
+        sync_run.completed_at = datetime.utcnow()
+        db.commit()
+        
+        raise HTTPException(status_code=500, detail=f"Sync failed: {error_msg}")
+
+
 @router.post("", response_model=ModelHostResponse)
 def create_model_host(payload: ModelHostCreate, db: Session = Depends(get_db)):
     """Create a new model host."""
@@ -100,6 +275,7 @@ def create_model_host(payload: ModelHostCreate, db: Session = Depends(get_db)):
         api_key=payload.api_key,
         enabled=payload.enabled,
         allow_cloud_endpoints=payload.allow_cloud_endpoints,
+        source="manual",  # Explicitly mark as manual
     )
     db.add(host)
     db.commit()

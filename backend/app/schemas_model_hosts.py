@@ -30,6 +30,15 @@ class ModelHostResponse(BaseModel):
     last_error: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+    # Hermes sync metadata
+    source: str = "manual"
+    source_key: Optional[str] = None
+    profile_name: Optional[str] = None
+    provider_name: Optional[str] = None
+    sync_enabled: bool = True
+    last_synced_at: Optional[datetime] = None
+    last_sync_status: Optional[str] = None
+    last_sync_error: Optional[str] = None
 
 
 class ModelHostCreate(BaseModel):
@@ -89,6 +98,24 @@ class ModelHostModelResponse(BaseModel):
     display_name: Optional[str] = None
     is_available: bool
     discovered_at: datetime
+    # Hermes sync metadata
+    source: str = "manual"
+    source_key: Optional[str] = None
+    last_synced_at: Optional[datetime] = None
+
+
+class ModelSyncRunResponse(BaseModel):
+    """Sync run history entry."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    source: str
+    status: str
+    hosts_discovered: Optional[int] = None
+    models_discovered: Optional[int] = None
+    error_message: Optional[str] = None
+    created_at: datetime
+    completed_at: Optional[datetime] = None
 
 
 # ---------------------------------------------------------------------------
