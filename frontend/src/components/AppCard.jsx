@@ -64,17 +64,44 @@ function ActionButton({ action, onClick, disabled, busy, title }) {
 
 export default function AppCard({
   app,
-  actions = ["start", "stop", "restart", "pull", "rebuild", "logs"],
   busyAction = null,
   onAction,
 }) {
   const meta = resultMeta(app.last_result);
   const buildOnly = app.build_only === true;
   const composeMissing = app.compose_exists === false;
+  const runtimeStatus = app.runtime_status || "unknown";
 
-  // Open/View link: only shown when exactly one web port is detected
-  const canOpen = app.can_open === true && app.web_url;
+  // Compute Open/View URL from current dashboard origin
+  const openUrl = app.can_open && app.web_port
+    ? `${window.location.protocol}//${window.location.hostname}:${app.web_port}/`
+    : null;
   const openLabel = app.web_port ? `Open (${app.web_port})` : "Open";
+
+  // Determine which actions to show based on runtime status and capabilities
+  const showActions = [];
+
+  if (app.can_start) {
+    showActions.push("start");
+  }
+  if (app.can_stop) {
+    showActions.push("stop");
+  }
+  if (app.can_restart) {
+    showActions.push("restart");
+  }
+  // Rebuild always shown
+  if (app.can_rebuild) {
+    showActions.push("rebuild");
+  }
+  // Pull only for image-based apps
+  if (app.can_pull) {
+    showActions.push("pull");
+  }
+  // Logs always shown
+  if (app.can_logs) {
+    showActions.push("logs");
+  }
 
   return (
     <article className="border border-edge bg-surface flex flex-col">
@@ -105,7 +132,7 @@ export default function AppCard({
             {app.name}
           </h3>
         </div>
-        <StatusBadge status={app.status} />
+        <StatusBadge status={runtimeStatus} />
       </header>
 
       <div className="px-4 py-3 space-y-2 text-xs flex-1">
@@ -131,6 +158,12 @@ export default function AppCard({
           </span>
         </div>
         <div className="grid grid-cols-[90px_1fr] gap-2">
+          <span className="label-tel">STATUS</span>
+          <span className="font-mono text-fg-primary">
+            {runtimeStatus.toUpperCase()}
+          </span>
+        </div>
+        <div className="grid grid-cols-[90px_1fr] gap-2">
           <span className="label-tel">LAST ACTION</span>
           <span className="font-mono text-fg-primary">
             {app.last_action || "—"}
@@ -153,7 +186,7 @@ export default function AppCard({
       </div>
 
       <footer className="border-t border-edge px-4 py-3 flex flex-wrap gap-1.5">
-        {actions.map((action) => {
+        {showActions.map((action) => {
           const isPull = action === "pull";
           const pullDisabled = isPull && buildOnly;
           const composeDisabled = composeMissing && action !== "logs";
@@ -165,6 +198,8 @@ export default function AppCard({
             title = "App is built locally; pull is not applicable. Use REBUILD.";
           } else if (composeDisabled) {
             title = "Compose file is missing on disk; actions are unavailable.";
+          } else if (app.action_unavailable_reasons?.length) {
+            title = app.action_unavailable_reasons.join(". ");
           }
           return (
             <ActionButton
@@ -178,9 +213,9 @@ export default function AppCard({
           );
         })}
         {/* Open/View link: only shown when exactly one web port is detected */}
-        {canOpen && (
+        {openUrl && (
           <a
-            href={app.web_url}
+            href={openUrl}
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-mono font-semibold border rounded transition-colors"
@@ -189,7 +224,7 @@ export default function AppCard({
               backgroundColor: "#10B98114",
               color: "#10B981",
             }}
-            title={`Open app at ${app.web_url}`}
+            title={`Open app at ${openUrl}`}
           >
             <span>🔗</span>
             {openLabel}

@@ -236,16 +236,133 @@ def _inspect_compose_text(text: str) -> ComposeInfo:
     return ComposeInfo(exists=True, has_image=has_image, has_build=has_build)
 
 
+def _get_runtime_status(app: App) -> tuple[str, bool]:
+    """Check runtime status via docker compose ps.
+
+    Returns (status, is_running) tuple.
+    Status: running, stopped, not_created, unknown
+    """
+    import subprocess
+
+    # Access the actual value from the ORM instance (runtime is str, not Column)
+    compose_path_str: str = app.compose_path or ""  # type: ignore[assignment]
+    if not compose_path_str:
+        return ("unknown", False)
+    # Check compose_exists attribute (may not exist in test fixtures)
+    compose_exists = getattr(app, "compose_exists", None)
+    if compose_exists is False:
+        return ("unknown", False)
+
+    compose_dir = os.path.dirname(compose_path_str)
+    project = app.compose_project
+
+    try:
+        # Run docker compose ps --format json to get container status
+        result = subprocess.run(
+            ["docker", "compose", "-p", project, "ps", "--format", "json"],
+            cwd=compose_dir,
+            capture_output=True,
+            text=True,
+            shell=False,
+            timeout=10,
+        )
+
+        if result.returncode != 0:
+            # Docker command failed - could be not logged in, socket issue, etc.
+            return ("unknown", False)
+
+        # Parse JSON output
+        import json
+        containers = []
+        for line in result.stdout.strip().split("\n"):
+            if line:
+                try:
+                    containers.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+
+        if not containers:
+            return ("not_created", False)
+
+        # Check if any container is running
+        running = any(
+            c.get("State") == "running" or c.get("status") == "running" or c.get("state") == "running"
+            for c in containers
+        )
+
+        return ("running" if running else "stopped", running)
+
+    except subprocess.TimeoutExpired:
+        return ("unknown", False)
+    except FileNotFoundError:
+        return ("unknown", False)
+    except Exception:
+        return ("unknown", False)
+
+
+def _compute_capabilities(
+    runtime_status: str,
+    is_running: bool,
+    compose_exists: bool,
+    build_only: bool,
+) -> dict:
+    """Compute action capabilities based on runtime status and compose info."""
+
+    if not compose_exists:
+        return {
+            "can_start": False,
+            "can_stop": False,
+            "can_restart": False,
+            "can_rebuild": False,
+            "can_pull": False,
+            "can_logs": False,
+            "reasons": ["Compose file not found"],
+        }
+
+    capabilities = {
+        "can_start": runtime_status in ("stopped", "not_created"),
+        "can_stop": is_running,
+        "can_restart": is_running,
+        "can_rebuild": True,  # Always available
+        "can_pull": not build_only,  # Pull only for image-based apps
+        "can_logs": True,  # Logs always available
+        "reasons": [],
+    }
+
+    # Add reasons for disabled actions
+    if build_only:
+        capabilities["reasons"].append("Source-built app; Pull not applicable")
+
+    return capabilities
+
+
 def _serialize_app(app: App) -> AppResponse:
     """Build an AppResponse and decorate it with derived compose-file info."""
     info = _inspect_compose(app.compose_path)
-    response = AppResponse.model_validate(app)
-    response.compose_exists = info.exists
-    response.build_only = info.build_only if info.exists else None
+    runtime_status, is_running = _get_runtime_status(app)
+    compose_exists = info.exists
+    build_only = info.build_only if info.exists else False
+    capabilities = _compute_capabilities(
+        runtime_status,
+        is_running,
+        compose_exists,
+        build_only,
+    )
 
-    # Derive web endpoint from compose file ports
-    web_url, web_port, can_open, reason = _extract_web_endpoint(app.compose_path)
-    response.web_url = web_url
+    response = AppResponse.model_validate(app)
+    response.compose_exists = compose_exists
+    response.build_only = build_only if info.exists else None
+    response.runtime_status = runtime_status
+    response.can_start = capabilities["can_start"]
+    response.can_stop = capabilities["can_stop"]
+    response.can_restart = capabilities["can_restart"]
+    response.can_rebuild = capabilities["can_rebuild"]
+    response.can_pull = capabilities["can_pull"]
+    response.can_logs = capabilities["can_logs"]
+    response.action_unavailable_reasons = capabilities["reasons"] or None
+
+    # Derive web port from compose file (frontend computes full URL)
+    web_port, can_open, reason = _extract_web_port(app.compose_path)  # type: ignore[arg-type]
     response.web_port = web_port
     response.can_open = can_open
     response.open_unavailable_reason = reason
@@ -253,24 +370,25 @@ def _serialize_app(app: App) -> AppResponse:
     return response
 
 
-def _extract_web_endpoint(compose_path: str) -> tuple[str | None, int | None, bool, str | None]:
-    """Extract single web endpoint from compose file.
+def _extract_web_port(compose_path: str) -> tuple[int | None, bool, str | None]:
+    """Extract single web port from compose file.
 
-    Returns (url, port, can_open, reason) tuple.
+    Returns (port, can_open, reason) tuple.
     Only returns can_open=True when exactly one web app port is detected.
     Internal/DB ports (5432, 3306, 6379, etc.) are excluded.
+    Frontend computes full URL from window.location to preserve dashboard origin.
     """
     from pathlib import Path
 
     INTERNAL_PORTS = {5432, 3306, 6379, 27017, 9200, 9300, 8080, 8443}  # DB/internal ports
     p = Path(compose_path)
     if not p.is_file():
-        return (None, None, False, "Compose file not found")
+        return (None, False, "Compose file not found")
 
     try:
         text = p.read_text(encoding="utf-8")
     except OSError:
-        return (None, None, False, "Cannot read compose file")
+        return (None, False, "Cannot read compose file")
 
     web_ports = []
     try:
@@ -298,13 +416,12 @@ def _extract_web_endpoint(compose_path: str) -> tuple[str | None, int | None, bo
                     web_ports.append(port)
 
     if len(web_ports) == 0:
-        return (None, None, False, "No web port configured")
+        return (None, False, "No web port configured")
     elif len(web_ports) > 1:
-        return (None, None, False, "Multiple web ports detected")
+        return (None, False, "Multiple web ports detected")
     else:
         port = web_ports[0]
-        url = f"http://localhost:{port}"
-        return (url, port, True, None)
+        return (port, True, None)
 
 
 def _parse_port(port_spec) -> int | None:
@@ -539,6 +656,8 @@ def _summarize_failure(action: str, run: RunResult) -> str:
 def _classify_logs_action(app: App) -> tuple[str, str, RunResult | None]:
     """Implements the `logs` action via execute_action. Returns
     (result, message, run-or-None) so the caller can finalize the log row.
+
+    Actually runs `docker compose logs --tail 200 --no-color` to get real logs.
     """
     try:
         ps = _ps_quiet(app)
@@ -554,10 +673,44 @@ def _classify_logs_action(app: App) -> tuple[str, str, RunResult | None]:
     if ps.exit_code == 0 and not ps.stdout.strip():
         return (
             "not_running",
-            "App is not running. Start it to produce logs.",
+            "No containers yet. Start or rebuild the app first.",
             ps,
         )
-    return ("success", "Containers detected. Use the logs panel for output.", ps)
+
+    # Containers exist - fetch actual logs
+    compose_path_str: str = app.compose_path or ""  # type: ignore[assignment]
+    compose_dir = os.path.dirname(compose_path_str) if compose_path_str else None
+    project = app.compose_project
+
+    try:
+        result = subprocess.run(
+            ["docker", "compose", "-p", project, "logs", "--tail", "200", "--no-color"],
+            cwd=compose_dir,
+            capture_output=True,
+            text=True,
+            shell=False,
+            timeout=30,
+        )
+
+        if result.returncode == 0:
+            if result.stdout.strip():
+                return ("success", "Logs retrieved successfully.", result)
+            else:
+                return ("success", "Containers exist but no logs yet.", result)
+        else:
+            return (
+                "failed",
+                f"docker compose logs failed (exit {result.returncode})",
+                result,
+            )
+    except subprocess.TimeoutExpired as exc:
+        return (
+            "timeout",
+            f"docker compose logs timed out after {exc.timeout}s.",
+            None,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return ("failed", f"Failed to fetch logs: {exc}", None)
 
 
 @router.post(
@@ -617,7 +770,7 @@ def execute_action(
         log.result = result_kind
         message = msg
         if ps is not None:
-            log.exit_code = ps.exit_code
+            log.exit_code = ps.returncode if hasattr(ps, "returncode") else ps.exit_code
             log.stdout_tail = _tail(ps.stdout)
             log.stderr_tail = _tail(ps.stderr)
         success = result_kind == "success"
