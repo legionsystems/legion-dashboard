@@ -984,10 +984,16 @@ def _execute_arbiter_turn(
     all_arguments: list,
 ) -> Optional[dict]:
     """Execute Final Arbiter turn."""
+    print(f"[ARBITER] Starting with {len(all_arguments)} arguments...", flush=True)
+    
+    # Truncate arguments for arbiter to avoid timeout - use last 6 only
+    truncated_args = all_arguments[-6:] if len(all_arguments) > 6 else all_arguments
+    print(f"[ARBITER] Using {len(truncated_args)} arguments (truncated from {len(all_arguments)})", flush=True)
+    
     arbiter_prompt = build_debate_prompt(
         work_item=work_item,
         operator_inputs=[],
-        previous_arguments=all_arguments,
+        previous_arguments=truncated_args,
         round_number=run.rounds_requested + 1,
         total_rounds=run.rounds_requested + 1,
         role="Final Arbiter",
@@ -995,14 +1001,20 @@ def _execute_arbiter_turn(
         turn_index=1,
         total_turns_in_round=1,
     )
+    
+    print(f"[ARBITER] Prompt length: {len(arbiter_prompt)} chars", flush=True)
 
     messages = [
         {"role": "system", "content": "You are the Final Arbiter. Produce valid JSON only."},
         {"role": "user", "content": arbiter_prompt},
     ]
 
+    print(f"[ARBITER] Calling model (timeout={config.timeout_seconds}s)...", flush=True)
     arbiter_content = call_model(config, messages)
+    print(f"[ARBITER] Response length: {len(arbiter_content) if arbiter_content else 0} chars", flush=True)
+    
     arbiter_data = parse_arbiter_json(arbiter_content)
+    print(f"[ARBITER] Parsed result: {arbiter_data is not None}", flush=True)
 
     if arbiter_data:
         # Store arbiter argument
