@@ -161,6 +161,7 @@ class DebateWorker:
         base_url = config.base_url
         model = config.default_model
         api_key = config.api_key
+        host = None  # Initialize for use in provider_type check
         
         if config.default_host_id:
             host = db.query(ModelHost).filter(ModelHost.id == config.default_host_id).first()
@@ -190,11 +191,14 @@ class DebateWorker:
             return False
         
         # Perform warmup - use provider_type for routing
+        print(f"[WORKER] host={host}, host.provider_type={host.provider_type if host else None}")
         use_ollama_native = (
             host.provider_type == "ollama_native" if host else
             (base_url.rstrip("/").endswith("/v1") or "ollama" in base_url.lower())
         )
+        print(f"[WORKER] use_ollama_native={use_ollama_native}")
         run.warmup_method = "ollama_native" if use_ollama_native else "openai_compatible_ping"
+        print(f"[WORKER] run.warmup_method={run.warmup_method}")
         
         try:
             if use_ollama_native:
