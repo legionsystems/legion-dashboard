@@ -325,8 +325,12 @@ class DebateWorker:
             # Execute turns
             self._execute_turns(db, run, config)
             
-            # Check final state
-            if run.status not in ["failed", "cancelled"]:
+            # Check final state - refresh to get latest state from execute_debate_run
+            db.refresh(run)
+            print(f"[WORKER] After execution: run {run.id} status={run.status}, worker_status={run.worker_status}")
+            
+            # Only complete if not already failed/cancelled by execute_debate_run
+            if run.status not in ["failed", "cancelled"] and run.worker_status not in ["failed", "cancelled"]:
                 self._complete_run(db, run)
                 
         except Exception as e:
