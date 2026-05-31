@@ -189,12 +189,15 @@ class DebateWorker:
             db.commit()
             return False
         
-        # Perform warmup
-        is_ollama = base_url.rstrip("/").endswith("/v1") or "ollama" in base_url.lower()
-        run.warmup_method = "ollama_native" if is_ollama else "openai_compatible_ping"
+        # Perform warmup - use provider_type for routing
+        use_ollama_native = (
+            host.provider_type == "ollama_native" if host else
+            (base_url.rstrip("/").endswith("/v1") or "ollama" in base_url.lower())
+        )
+        run.warmup_method = "ollama_native" if use_ollama_native else "openai_compatible_ping"
         
         try:
-            if is_ollama:
+            if use_ollama_native:
                 success, error, latency_ms = warmup_ollama(
                     base_url=base_url,
                     model=model,
@@ -282,9 +285,21 @@ class DebateWorker:
             db.commit()
     
     def _complete_run(self, db: Session, run: DebateRun):
-        """Mark run as completed."""
+        """Mark run as completed - but NOT if there's a fatal error."""
         print(f"[WORKER] Completing run {run.id}...")
         now = datetime.now(timezone.utc)
+        
+        # INVARIANT: Do not mark as completed if there's a fatal error
+        if run.error_type and run.status != "completed":
+            # Run has an error - mark as failed instead
+            run.worker_status = "failed"
+            run.status = "failed"
+            run.completed_at = now
+            run.execution_stage = "failed"
+            print(f"[WORKER] Run {run.id} has error_type={run.error_type}, marking as FAILED not completed")
+            db.commit()
+            return
+        
         run.worker_status = "completed"
         run.status = "completed"
         run.completed_at = now

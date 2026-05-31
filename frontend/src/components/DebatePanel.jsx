@@ -58,6 +58,17 @@ function formatTime(iso) {
   }).replace(',', '');
 }
 
+function formatDuration(ms) {
+  if (!ms || ms <= 0) return null;
+  const seconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+  if (minutes > 0) {
+    return `${minutes}m ${secs}s`;
+  }
+  return `${seconds}s`;
+}
+
 function StatusChip({ kind, value }) {
   const map =
     kind === "status"
@@ -199,6 +210,20 @@ function DebateRunCard({ run, expanded, onToggle, onExecute, onRerun, onCancel, 
           <span className="font-mono text-[10px] tracking-telemetry text-fg-secondary">
             {run.trigger?.toUpperCase()} · {run.rounds_requested}R
           </span>
+          {/* Timestamps and duration */}
+          {run.created_at && (
+            <span className="font-mono text-[10px] tracking-telemetry text-fg-muted tabular-nums">
+              · {formatTime(run.created_at)}
+              {run.completed_at && ` → ${formatTime(run.completed_at)}`}
+              {run.generation_duration_ms && ` · ${formatDuration(run.generation_duration_ms)}`}
+            </span>
+          )}
+          {/* Provider/model if available */}
+          {run.model_route && (
+            <span className="font-mono text-[10px] tracking-telemetry text-fg-secondary truncate max-w-[150px]" title={run.model_route}>
+              · {run.model_route.split(':')[1] || run.model_route}
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2 shrink-0">
           {canExecute && (
