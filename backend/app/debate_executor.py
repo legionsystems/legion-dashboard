@@ -683,6 +683,7 @@ def execute_debate_run(
         turns_per_round = 3  # pro_opening, con_response, pro_reply
 
         print(f"[EXECUTE] Starting {run.rounds_requested} rounds with {turns_per_round} turns each", flush=True)
+        print(f"[EXECUTE] Config timeout: {config.timeout_seconds}s per turn", flush=True)
         
         for round_num in range(1, run.rounds_requested + 1):
             print(f"[EXECUTE] === Starting Round {round_num}/{run.rounds_requested} ===", flush=True)
@@ -699,7 +700,7 @@ def execute_debate_run(
             run.progress_message = f"Round {round_num}: PRO opening argument"
             db_session.flush()
             
-            print(f"[TURN] Round {round_num} Turn 1: PRO side", flush=True)
+            print(f"[TURN] Round {round_num} Turn 1: PRO side (timeout={config.timeout_seconds}s)", flush=True)
 
             # Turn 1: PRO side opening (or response in round 2+)
             pro_roles = ["Product Owner", "Builder"]
@@ -722,7 +723,7 @@ def execute_debate_run(
                 print(f"[TURN] Added PRO argument, total args: {len(all_arguments)}", flush=True)
 
             # Turn 2: CON side response
-            print(f"[TURN] Round {round_num} Turn 2: CON side", flush=True)
+            print(f"[TURN] Round {round_num} Turn 2: CON side (timeout={config.timeout_seconds}s)", flush=True)
             con_roles = ["UX/Design Reviewer", "Technical Architect", "Security/Privacy Reviewer", "Skeptic/Red Team"]
             # CON sees PRO's argument from this round
             prior_args_with_pro = all_arguments.copy()
@@ -745,7 +746,7 @@ def execute_debate_run(
                 print(f"[TURN] Added CON argument, total args: {len(all_arguments)}", flush=True)
 
             # Turn 3: PRO side reply to CON
-            print(f"[TURN] Round {round_num} Turn 3: PRO reply", flush=True)
+            print(f"[TURN] Round {round_num} Turn 3: PRO reply (timeout={config.timeout_seconds}s)", flush=True)
             prior_args_with_con = all_arguments.copy()
             pro_reply_content = _execute_debate_turn(
                 db_session=db_session,
