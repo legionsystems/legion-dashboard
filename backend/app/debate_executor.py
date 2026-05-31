@@ -474,10 +474,31 @@ def call_model(
 ) -> str:
     """Call the configured model endpoint.
 
+    Uses Ollama native API (/api/chat) for ollama_native providers.
+    Uses OpenAI-compatible API (/v1/chat/completions) for openai_compatible providers.
+
     Returns raw model output (not parsed).
     Raises httpx.RequestError on network/model failures.
     """
-    url = config.base_url.rstrip("/") + "/chat/completions"
+    # Route based on provider
+    if config.provider == "ollama_native":
+        # Ollama native: /api/chat
+        url = config.base_url.rstrip("/") + "/api/chat"
+        payload = {
+            "model": config.model,
+            "messages": messages,
+            "stream": False,
+        }
+    else:
+        # OpenAI-compatible: /chat/completions
+        url = config.base_url.rstrip("/") + "/chat/completions"
+        payload = {
+            "model": config.model,
+            "messages": messages,
+            "temperature": 0.7,
+            "max_tokens": 2048,
+            "stream": False,
+        }
 
     headers = {
         "Content-Type": "application/json",
@@ -485,18 +506,16 @@ def call_model(
     if config.api_key:
         headers["Authorization"] = f"Bearer {config.api_key}"
 
-    payload = {
-        "model": config.model,
-        "messages": messages,
-        "temperature": 0.7,
-        "max_tokens": 2048,
-        "stream": False,
-    }
-
     with httpx.Client(timeout=config.timeout_seconds) as client:
         response = client.post(url, headers=headers, json=payload)
         response.raise_for_status()
         data = response.json()
+        
+        # Parse response based on provider
+        if config.provider == "ollama_native":
+            return data.get("message", {}).get("content", "")
+        else:
+            return data.get("choices", [{}])[0].get("message", {}).get("content", "")
 
     # Extract content from OpenAI-compatible response
     try:
