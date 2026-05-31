@@ -110,14 +110,15 @@ def get_execution_config(db: Session) -> ExecutionConfig:
         base_url = config_row.base_url
         provider = config_row.provider
         api_key = config_row.api_key
-
+        
         # If host_id is set, use the host's settings (overrides base_url/provider/api_key)
         if config_row.default_host_id:
             from .models import ModelHost
             host = db.query(ModelHost).filter(ModelHost.id == config_row.default_host_id).first()
             if host and host.enabled:
                 base_url = host.base_url
-                provider = host.provider
+                # Use provider_type for routing, fall back to legacy provider
+                provider = host.provider_type if host.provider_type else host.provider
                 api_key = host.api_key or api_key
 
         # Use default_model for single-model mode, or fall back to it for compatibility
