@@ -42,7 +42,17 @@ function formatTimestamp(iso) {
   if (!iso) return "—";
   const d = new Date(iso);
   if (isNaN(d.getTime())) return "—";
-  return d.toISOString().replace("T", " ").split(".")[0] + "Z";
+  // Display in user's local timezone (Sydney: Australia/Sydney)
+  return d.toLocaleString('en-AU', {
+    timeZone: 'Australia/Sydney',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  }).replace(',', '');
 }
 
 function ActionButton({ action, onClick, disabled, busy, title }) {

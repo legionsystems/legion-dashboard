@@ -44,7 +44,18 @@ const STANCE_OPTIONS = [
 
 function formatTime(iso) {
   if (!iso) return null;
-  return new Date(iso).toISOString().replace("T", " ").split(".")[0] + "Z";
+  // Display in user's local timezone (Sydney: Australia/Sydney)
+  const date = new Date(iso);
+  return date.toLocaleString('en-AU', {
+    timeZone: 'Australia/Sydney',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  }).replace(',', '');
 }
 
 function StatusChip({ kind, value }) {
