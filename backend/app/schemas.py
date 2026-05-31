@@ -266,6 +266,25 @@ class DebateRunSummary(BaseModel):
     error_message: Optional[str] = None
     created_at: datetime
     completed_at: Optional[datetime] = None
+    # Execution stage tracking
+    execution_stage: Optional[str] = None
+    warmup_started_at: Optional[datetime] = None
+    warmup_completed_at: Optional[datetime] = None
+    warmup_duration_ms: Optional[int] = None
+    warmup_method: Optional[str] = None
+    warmup_error: Optional[str] = None
+    generation_started_at: Optional[datetime] = None
+    generation_completed_at: Optional[datetime] = None
+    generation_duration_ms: Optional[int] = None
+    error_type: Optional[str] = None
+    # Cleanup/visibility controls
+    hidden_at: Optional[datetime] = None
+    hidden_by: Optional[str] = None
+    hidden_reason: Optional[str] = None
+    hidden_category: Optional[str] = None
+    is_test_run: bool = False
+    superseded_by_run_id: Optional[int] = None
+    cleanup_note: Optional[str] = None
 
 
 class DebateRunDetail(DebateRunSummary):
@@ -372,6 +391,13 @@ class DebateExecutionConfigResponse(BaseModel):
     max_output_chars: int
     default_rounds: int
     allow_cloud_endpoints: bool
+    # Warmup settings
+    warm_model_before_debate: bool = True
+    warmup_timeout_seconds: int = 300
+    keep_model_loaded_for: str = "1h"
+    fail_debate_if_warmup_fails: bool = True
+    # Failed run display
+    visible_failed_runs_limit: int = 2
     notes: Optional[str] = None
     updated_at: datetime
 
@@ -403,6 +429,13 @@ class DebateExecutionConfigUpdate(BaseModel):
     max_output_chars: Optional[int] = None
     default_rounds: Optional[int] = None
     allow_cloud_endpoints: Optional[bool] = None
+    # Warmup settings
+    warm_model_before_debate: Optional[bool] = None
+    warmup_timeout_seconds: Optional[int] = None
+    keep_model_loaded_for: Optional[str] = None
+    fail_debate_if_warmup_fails: Optional[bool] = None
+    # Failed run display
+    visible_failed_runs_limit: Optional[int] = None
     notes: Optional[str] = None
 
     @field_validator("model_mode")
@@ -448,6 +481,64 @@ class DebateExecutionTestResponse(BaseModel):
     provider: str
     base_url_host: str  # Redacted host only
     model: str
+    latency_ms: Optional[int] = None
+    error: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Debate run cleanup/visibility schemas
+# ---------------------------------------------------------------------------
+
+
+class DebateRunHideRequest(BaseModel):
+    """Request to hide a debate run."""
+    reason: Optional[str] = None
+    category: str = "operator_cleanup"
+
+
+class DebateRunRestoreRequest(BaseModel):
+    """Request to restore a hidden debate run."""
+    pass
+
+
+class DebateRunBulkHideRequest(BaseModel):
+    """Request to bulk hide failed debate runs for a work item."""
+    older_than_run_id: Optional[int] = None
+    keep_latest_failed: bool = True
+    reason: Optional[str] = None
+
+
+class DebateRunHideResponse(BaseModel):
+    """Response for hide/restore operations."""
+    model_config = ConfigDict(from_attributes=True)
+    
+    id: int
+    work_item_id: int
+    status: str
+    hidden_at: Optional[datetime] = None
+    hidden_by: Optional[str] = None
+    hidden_reason: Optional[str] = None
+    hidden_category: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Model warmup schemas
+# ---------------------------------------------------------------------------
+
+
+class ModelWarmupRequest(BaseModel):
+    """Request to warm up a model."""
+    keep_alive: Optional[str] = "1h"
+    timeout_seconds: Optional[int] = 300
+
+
+class ModelWarmupResponse(BaseModel):
+    """Response for model warmup operations."""
+    success: bool
+    provider: Optional[str] = None
+    base_url_host: Optional[str] = None
+    model: str
+    warmup_method: str  # ollama_native | openai_compatible_ping
     latency_ms: Optional[int] = None
     error: Optional[str] = None
 

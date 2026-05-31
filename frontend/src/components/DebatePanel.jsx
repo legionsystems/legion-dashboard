@@ -383,11 +383,14 @@ export default function DebatePanel({ workItemId }) {
   const [executingId, setExecutingId] = useState(null);
   const [rerunningId, setRerunningId] = useState(null);
   const [pollingInterval, setPollingInterval] = useState(null);
+  const [showHiddenRuns, setShowHiddenRuns] = useState(false);
+  const [showOlderFailed, setShowOlderFailed] = useState(false);
+  const VISIBLE_FAILED_LIMIT = 2; // Show latest N failed runs, collapse older
 
   function refresh() {
     setError(null);
     Promise.all([
-      getJson(`/work-items/${workItemId}/debates`),
+      getJson(`/work-items/${workItemId}/debates?view=active`),
       getJson(`/work-items/${workItemId}/debate-inputs`),
     ])
       .then(([rs, is]) => {
@@ -398,7 +401,7 @@ export default function DebatePanel({ workItemId }) {
           setExpandedId(rs[0].id);
         }
         // Check if any run is running - if so, keep polling
-        const hasRunning = rs.some(r => r.status === "running");
+        const hasRunning = rs.some(r => r.status === "running" || r.execution_stage === "warming");
         if (hasRunning && !pollingInterval) {
           // Start polling
           const interval = setInterval(refresh, 2000);

@@ -28,11 +28,13 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import httpx
 from sqlalchemy.orm import Session
 
 from .models import DebateArgument, DebateExecutionConfig, DebateRun, OperatorDebateInput, WorkItem
+from .debate_warmup import warm_model_ollama_native, warm_model_openai_compatible
 
 
 # Debate roles in order
@@ -133,6 +135,186 @@ def get_execution_config(db: Session) -> ExecutionConfig:
 
     # Fallback to environment (bootstrap only)
     return ExecutionConfig.from_env()
+
+
+def derive_ollama_native_url(openai_compatible_url: str) -> str:
+    """Derive Ollama native API URL from OpenAI-compatible URL.
+    
+    Example: http://ai-4080:11434/v1 -> http://ai-4080:11434/api/chat
+    
+    Args:
+        openai_compatible_url: URL ending with /v1
+        
+    Returns:
+        Native Ollama chat endpoint URL
+    """
+    from urllib.parse import urlparse, urlunparse
+    
+    parsed = urlparse(openai_compatible_url)
+    
+    # Strip /v1 suffix if present
+    path = parsed.path
+    if path.endswith("/v1"):
+        path = path[:-3]  # Remove /v1
+    elif path.endswith("/v1/"):
+        path = path[:-4]  # Remove /v1/
+    
+    # Build native chat endpoint
+    native_path = path.rstrip("/") + "/api/chat"
+    
+    return urlunparse((
+        parsed.scheme,
+        parsed.netloc,
+        native_path,
+        parsed.params,
+        parsed.query,
+        parsed.fragment
+    ))
+
+
+def is_local_endpoint(url: str) -> bool:
+    """Check if URL is a local/private endpoint (not cloud)."""
+    from urllib.parse import urlparse
+    
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        
+        # Local/private patterns
+        local_patterns = [
+            "localhost",
+            "127.0.0.1",
+            "0.0.0.0",
+            "ai-4080",
+            "lgn-remote",
+            "lgn-local",
+        ]
+        if any(p in host for p in local_patterns):
+            return True
+        
+        # RFC1918 private ranges
+        if host.startswith("192.168.") or host.startswith("10.") or host.startswith("172."):
+            return True
+        
+        # Tailscale pattern (100.x.y.z)
+        if host.startswith("100."):
+            return True
+        
+        return False
+    except Exception:
+        return False
+
+
+def warm_model_if_enabled(
+    db_session: Session,
+    config_row: DebateExecutionConfig,
+    model: str,
+) -> dict:
+    """Warm up the model before debate execution if enabled.
+    
+    Args:
+        db_session: Database session
+        config_row: Debate execution config with warmup settings
+        model: Model name to warm
+        
+    Returns:
+        dict with keys:
+            - success: bool
+            - warmup_method: str (ollama_native | openai_compatible_ping | skipped)
+            - duration_ms: int (if successful)
+            - error: str (if failed)
+    """
+    # Check if warmup is enabled
+    if not config_row.warm_model_before_debate:
+        return {"success": True, "warmup_method": "skipped", "duration_ms": 0}
+    
+    # Resolve host if selected
+    base_url = config_row.base_url
+    api_key = config_row.api_key
+    
+    if config_row.default_host_id:
+        from .models import ModelHost
+        host = db_session.query(ModelHost).filter(ModelHost.id == config_row.default_host_id).first()
+        if host and host.enabled:
+            base_url = host.base_url
+            api_key = host.api_key or api_key
+    
+    # Cloud endpoint guard
+    is_cloud = not is_local_endpoint(base_url)
+    if is_cloud and not config_row.allow_cloud_endpoints:
+        return {
+            "success": False,
+            "warmup_method": "skipped",
+            "error": "Cloud endpoints require allow_cloud_endpoints=true",
+        }
+    
+    # Derive native Ollama URL if applicable
+    is_ollama = "ollama" in base_url.lower() or "11434" in base_url
+    warmup_url = derive_ollama_native_url(base_url) if is_ollama else base_url.rstrip("/") + "/chat/completions"
+    
+    timeout = config_row.warmup_timeout_seconds
+    keep_alive = config_row.keep_model_loaded_for
+    
+    try:
+        start = time.time()
+        
+        if is_ollama:
+            # Native Ollama warmup: POST /api/chat with empty messages
+            warmup_payload = {
+                "model": model,
+                "messages": [],
+                "keep_alive": keep_alive,
+            }
+            warmup_method = "ollama_native"
+        else:
+            # OpenAI-compatible ping
+            warmup_payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": "OK"}],
+                "max_tokens": 1,
+            }
+            warmup_method = "openai_compatible_ping"
+        
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        
+        with httpx.Client(timeout=timeout) as client:
+            response = client.post(warmup_url, headers=headers, json=warmup_payload)
+            response.raise_for_status()
+        
+        duration_ms = int((time.time() - start) * 1000)
+        
+        return {
+            "success": True,
+            "warmup_method": warmup_method,
+            "duration_ms": duration_ms,
+        }
+        
+    except httpx.TimeoutException:
+        return {
+            "success": False,
+            "warmup_method": "ollama_native" if is_ollama else "openai_compatible_ping",
+            "error": f"Warmup timeout after {timeout}s",
+        }
+    except httpx.ConnectError as e:
+        return {
+            "success": False,
+            "warmup_method": "ollama_native" if is_ollama else "openai_compatible_ping",
+            "error": f"Connection failed: {str(e)[:200]}",
+        }
+    except httpx.HTTPStatusError as e:
+        return {
+            "success": False,
+            "warmup_method": "ollama_native" if is_ollama else "openai_compatible_ping",
+            "error": f"HTTP {e.response.status_code}: {str(e)[:200]}",
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "warmup_method": "ollama_native" if is_ollama else "openai_compatible_ping",
+            "error": f"Warmup error: {type(e).__name__}: {str(e)[:200]}",
+        }
 
 
 def get_model_for_role(config: DebateExecutionConfig, role: str, side: Optional[str] = None) -> str:
@@ -370,30 +552,121 @@ def execute_debate_run(
     work_item: WorkItem,
     config: ExecutionConfig,
 ) -> None:
-    """Execute a single debate run with true dialectic back-and-forth.
-
-    Each turn must respond to prior opposing claims.
+    """Execute a single debate run with model warmup and true dialectic back-and-forth.
+    
+    Warmup phase (if enabled):
+    - Loads the model before starting debate timer
+    - Uses warmup_timeout_seconds (separate from generation timeout)
+    - Records warmup duration and method
+    
+    Generation phase:
+    - Only starts after warmup completes
+    - Uses config.timeout_seconds for actual debate generation
+    - Tracks generation timestamps separately
+    
     Updates the run in-place with status, arguments, and outcomes.
     Caller must commit the session.
     """
     import uuid
-
+    
+    # Load DebateExecutionConfig for warmup settings
+    config_row = db_session.query(DebateExecutionConfig).filter(DebateExecutionConfig.id == 1).first()
+    
     # Fetch operator inputs for this work item
     operator_inputs = (
         db_session.query(OperatorDebateInput)
         .filter(OperatorDebateInput.work_item_id == work_item.id)
         .all()
     )
-
-    # Mark as running
-    run.status = "running"
+    
+    # Mark as queued initially
+    run.status = "queued"
+    run.execution_stage = "queued"
     run.rounds_completed = 0
     run.model_route = f"{config.provider}:{config.model}"
     run.provenance = f"executed via {config.redacted_base_url()}"
-
+    db_session.flush()
+    
+    # ===== WARMUP PHASE =====
+    warmup_result = None
+    if config_row and config_row.warm_model_before_debate:
+        run.execution_stage = "warming"
+        run.warmup_started_at = datetime.utcnow()
+        db_session.flush()
+        
+        # Call warmup helper - uses config_row settings
+        base_url = config_row.base_url
+        model_to_warm = config_row.default_model
+        api_key = config_row.api_key
+        keep_alive = config_row.keep_model_loaded_for
+        warmup_timeout = config_row.warmup_timeout_seconds
+        
+        # Resolve host if selected
+        if config_row.default_host_id:
+            from .models import ModelHost
+            host = db_session.query(ModelHost).filter(ModelHost.id == config_row.default_host_id).first()
+            if host and host.enabled:
+                base_url = host.base_url
+                api_key = host.api_key or api_key
+        
+        # Determine warmup method
+        is_ollama = base_url.rstrip("/").endswith("/v1") or "ollama" in base_url.lower()
+        run.warmup_method = "ollama_native" if is_ollama else "openai_compatible_ping"
+        
+        # Check cloud guard
+        is_cloud = not is_local_endpoint(base_url)
+        if is_cloud and not config_row.allow_cloud_endpoints:
+            warmup_result = {"success": False, "error": "Cloud endpoints not allowed", "warmup_method": "cloud_blocked", "duration_ms": 0}
+        else:
+            # Perform warmup
+            if is_ollama:
+                success, error, latency_ms = warm_model_ollama_native(
+                    base_url=base_url,
+                    model=model_to_warm,
+                    keep_alive=keep_alive,
+                    timeout_seconds=warmup_timeout,
+                )
+            else:
+                success, error, latency_ms = warm_model_openai_compatible(
+                    base_url=base_url,
+                    model=model_to_warm,
+                    api_key=api_key,
+                    timeout_seconds=warmup_timeout,
+                )
+            warmup_result = {"success": success, "error": error, "warmup_method": run.warmup_method, "duration_ms": latency_ms}
+        
+        if warmup_result["success"]:
+            run.warmup_completed_at = datetime.utcnow()
+            run.warmup_duration_ms = warmup_result.get("duration_ms", 0)
+            run.warmup_method = warmup_result.get("warmup_method", "unknown")
+            run.execution_stage = "running"
+            db_session.flush()
+        else:
+            # Warmup failed
+            run.warmup_error = warmup_result.get("error", "Unknown warmup error")
+            run.warmup_method = warmup_result.get("warmup_method", "unknown")
+            run.warmup_completed_at = datetime.utcnow()
+            
+            if config_row and config_row.fail_debate_if_warmup_fails:
+                run.status = "failed"
+                run.execution_stage = "failed"
+                run.error_type = "model_warmup_failed"
+                run.error_message = f"Model warmup failed: {run.warmup_error}"
+                run.completed_at = datetime.utcnow()
+                return
+            else:
+                # Continue to generation but record warmup failure
+                run.execution_stage = "running"
+                db_session.flush()
+    
+    # ===== GENERATION PHASE =====
+    run.generation_started_at = datetime.utcnow()
+    db_session.flush()
+    
     # Track all arguments for dialectic context
     all_arguments = []  # List of dicts with claim_id, side, role, content
-
+    generation_error = None
+    
     try:
         # Define turn order: sequential pro/con exchanges per round
         # Round 1: PRO opening -> CON response -> PRO reply
@@ -493,19 +766,31 @@ def execute_debate_run(
 
         # Success
         run.status = "completed"
+        run.execution_stage = "completed"
+        run.generation_completed_at = datetime.utcnow()
+        run.generation_duration_ms = int((run.generation_completed_at - run.generation_started_at).total_seconds() * 1000) if run.generation_started_at else None
         run.completed_at = datetime.utcnow()
 
+    except httpx.TimeoutException as e:
+        generation_error = f"Model generation timeout: {type(e).__name__}"
+        run.error_type = "model_generation_timeout"
     except httpx.RequestError as e:
-        run.status = "failed"
-        run.error_message = f"Model endpoint error: {type(e).__name__}"
-        run.completed_at = datetime.utcnow()
+        generation_error = f"Model endpoint error: {type(e).__name__}"
+        run.error_type = "model_read_timeout" if "timeout" in str(e).lower() else "model_provider_unreachable"
     except ValueError as e:
-        run.status = "failed"
-        run.error_message = f"Model response parsing error: {str(e)[:200]}"
-        run.completed_at = datetime.utcnow()
+        generation_error = f"Model response parsing error: {str(e)[:200]}"
+        run.error_type = "model_response_parse_error"
     except Exception as e:
+        generation_error = f"Unexpected error: {type(e).__name__}"
+        run.error_type = "unexpected_error"
+    
+    # Handle generation failure
+    if generation_error:
         run.status = "failed"
-        run.error_message = f"Unexpected error: {type(e).__name__}"
+        run.execution_stage = "failed"
+        run.error_message = generation_error
+        run.generation_completed_at = datetime.utcnow()
+        run.generation_duration_ms = int((run.generation_completed_at - run.generation_started_at).total_seconds() * 1000) if run.generation_started_at else None
         run.completed_at = datetime.utcnow()
 
 
