@@ -276,7 +276,10 @@ class DebateWorker:
         try:
             execute_debate_run(db, run, work_item, exec_config)
             print(f"[WORKER] execute_debate_run completed for run {run.id}")
-            # Refresh run state after execution
+            # Commit changes from execute_debate_run (status, arguments, arbiter result, etc.)
+            db.commit()
+            print(f"[WORKER] Committed run {run.id} changes")
+            # Refresh run state after commit
             db.refresh(run)
             print(f"[WORKER] Run {run.id} state after execution: status={run.status}, error_type={run.error_type}")
         except Exception as e:
