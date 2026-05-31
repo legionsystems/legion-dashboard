@@ -727,45 +727,61 @@ def execute_debate_run(
             con_roles = ["UX/Design Reviewer", "Technical Architect", "Security/Privacy Reviewer", "Skeptic/Red Team"]
             # CON sees PRO's argument from this round
             prior_args_with_pro = all_arguments.copy()
-            con_content = _execute_debate_turn(
-                db_session=db_session,
-                run=run,
-                work_item=work_item,
-                operator_inputs=operator_inputs,
-                config=config,
-                round_number=round_num,
-                turn_index=2,
-                total_turns=turns_per_round,
-                side="con",
-                roles=con_roles,
-                prior_arguments=prior_args_with_pro,
-            )
-            print(f"[TURN] CON content result: {con_content is not None}", flush=True)
-            if con_content:
-                all_arguments.append(con_content)
-                print(f"[TURN] Added CON argument, total args: {len(all_arguments)}", flush=True)
+            try:
+                con_content = _execute_debate_turn(
+                    db_session=db_session,
+                    run=run,
+                    work_item=work_item,
+                    operator_inputs=operator_inputs,
+                    config=config,
+                    round_number=round_num,
+                    turn_index=2,
+                    total_turns=turns_per_round,
+                    side="con",
+                    roles=con_roles,
+                    prior_arguments=prior_args_with_pro,
+                )
+                print(f"[TURN] CON content result: {con_content is not None}", flush=True)
+                if con_content:
+                    all_arguments.append(con_content)
+                    print(f"[TURN] Added CON argument, total args: {len(all_arguments)}", flush=True)
+            except Exception as e:
+                print(f"[TURN] CON turn failed: {type(e).__name__}: {e}", flush=True)
+                generation_error = f"CON turn failed: {type(e).__name__}"
+                run.error_type = "model_generation_error"
+                run.error_stage = f"round_{round_num}_turn_2_con"
+                run.error_message = str(e)[:500]
+                break  # Exit the round loop
 
             # Turn 3: PRO side reply to CON
             print(f"[TURN] Round {round_num} Turn 3: PRO reply (timeout={config.timeout_seconds}s)", flush=True)
             prior_args_with_con = all_arguments.copy()
-            pro_reply_content = _execute_debate_turn(
-                db_session=db_session,
-                run=run,
-                work_item=work_item,
-                operator_inputs=operator_inputs,
-                config=config,
-                round_number=round_num,
-                turn_index=3,
-                total_turns=turns_per_round,
-                side="pro",
-                roles=pro_roles,
-                prior_arguments=prior_args_with_con,
-                is_reply=True,
-            )
-            print(f"[TURN] PRO reply result: {pro_reply_content is not None}", flush=True)
-            if pro_reply_content:
-                all_arguments.append(pro_reply_content)
-                print(f"[TURN] Added PRO reply argument, total args: {len(all_arguments)}", flush=True)
+            try:
+                pro_reply_content = _execute_debate_turn(
+                    db_session=db_session,
+                    run=run,
+                    work_item=work_item,
+                    operator_inputs=operator_inputs,
+                    config=config,
+                    round_number=round_num,
+                    turn_index=3,
+                    total_turns=turns_per_round,
+                    side="pro",
+                    roles=pro_roles,
+                    prior_arguments=prior_args_with_con,
+                    is_reply=True,
+                )
+                print(f"[TURN] PRO reply result: {pro_reply_content is not None}", flush=True)
+                if pro_reply_content:
+                    all_arguments.append(pro_reply_content)
+                    print(f"[TURN] Added PRO reply argument, total args: {len(all_arguments)}", flush=True)
+            except Exception as e:
+                print(f"[TURN] PRO reply turn failed: {type(e).__name__}: {e}", flush=True)
+                generation_error = f"PRO reply turn failed: {type(e).__name__}"
+                run.error_type = "model_generation_error"
+                run.error_stage = f"round_{round_num}_turn_3_pro_reply"
+                run.error_message = str(e)[:500]
+                break  # Exit the round loop
 
             # End of round
             db_session.flush()
