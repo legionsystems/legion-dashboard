@@ -248,10 +248,22 @@ class DebateWorker:
         run.generation_started_at = datetime.now(timezone.utc)
         db.commit()
         
-        # Use existing execute_debate_run which now persists progress
-        # The executor has been updated to persist after each turn
+        # Fetch work item for this run
+        from .models import WorkItem
+        work_item = db.query(WorkItem).filter(WorkItem.id == run.work_item_id).first()
+        if not work_item:
+            print(f"[WORKER] Work item {run.work_item_id} not found for run {run.id}")
+            run.worker_status = "failed"
+            run.status = "failed"
+            run.error_type = "work_item_not_found"
+            run.error_message = f"Work item {run.work_item_id} not found"
+            run.completed_at = datetime.now(timezone.utc)
+            db.commit()
+            return
+        
+        # Use existing execute_debate_run which persists progress
         try:
-            execute_debate_run(db, run, None, config)
+            execute_debate_run(db, run, work_item, config)
         except Exception as e:
             print(f"[WORKER] Error executing run {run.id}: {e}")
             run.worker_status = "failed"
