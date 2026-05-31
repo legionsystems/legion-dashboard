@@ -661,6 +661,7 @@ def execute_debate_run(
     
     # ===== GENERATION PHASE =====
     run.generation_started_at = datetime.utcnow()
+    run.execution_stage = "generating"
     db_session.flush()
     
     # Track all arguments for dialectic context
@@ -676,6 +677,16 @@ def execute_debate_run(
         for round_num in range(1, run.rounds_requested + 1):
             # Get arguments from prior rounds for context
             prior_args = all_arguments.copy()
+            
+            # Update progress before PRO turn
+            run.current_round = round_num
+            run.current_turn = "pro_opening"
+            run.current_side = "pro"
+            run.current_role = "Product Owner + Builder"
+            run.current_model = config.model
+            run.last_progress_at = datetime.utcnow()
+            run.progress_message = f"Round {round_num}: PRO opening argument"
+            db_session.flush()
 
             # Turn 1: PRO side opening (or response in round 2+)
             pro_roles = ["Product Owner", "Builder"]
@@ -774,15 +785,24 @@ def execute_debate_run(
     except httpx.TimeoutException as e:
         generation_error = f"Model generation timeout: {type(e).__name__}"
         run.error_type = "model_generation_timeout"
+        run.error_stage = "generation"
+        run.error_round = run.current_round
+        run.error_turn = run.current_turn
+        run.error_elapsed_ms = int((datetime.utcnow() - run.generation_started_at).total_seconds() * 1000) if run.generation_started_at else None
     except httpx.RequestError as e:
         generation_error = f"Model endpoint error: {type(e).__name__}"
         run.error_type = "model_read_timeout" if "timeout" in str(e).lower() else "model_provider_unreachable"
+        run.error_stage = "generation"
+        run.error_round = run.current_round
+        run.error_turn = run.current_turn
     except ValueError as e:
         generation_error = f"Model response parsing error: {str(e)[:200]}"
         run.error_type = "model_response_parse_error"
+        run.error_stage = "generation"
     except Exception as e:
         generation_error = f"Unexpected error: {type(e).__name__}"
         run.error_type = "unexpected_error"
+        run.error_stage = "generation"
     
     # Handle generation failure
     if generation_error:

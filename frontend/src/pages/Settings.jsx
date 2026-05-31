@@ -193,7 +193,9 @@ export default function Settings() {
         getJson("/settings/model-hosts"),
         getJson("/settings/debate-execution"),
       ]);
-      setHosts(hostsData);
+      // Filter to enabled hosts only for normal dropdown
+      const enabledHosts = hostsData.filter(h => h.enabled);
+      setHosts(enabledHosts);
       // Persisted config values are authoritative - load them into state
       setConfig((prev) => ({
         ...prev,

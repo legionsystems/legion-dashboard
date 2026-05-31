@@ -177,7 +177,14 @@ class DebateRun(Base):
     error_message = Column(Text, nullable=True)
 
     # Execution stage tracking (warming, running, etc.)
-    execution_stage = Column(String(20), nullable=True)  # queued | warming | running | completed | failed
+    execution_stage = Column(String(20), nullable=True)  # queued | warming | generating | running | completed | failed
+    current_round = Column(Integer, nullable=True)  # Active round during execution
+    current_turn = Column(String(50), nullable=True)  # Active turn name (e.g., "pro_opening", "con_response")
+    current_side = Column(String(10), nullable=True)  # pro | con | arbiter
+    current_role = Column(String(100), nullable=True)  # Active role during execution
+    current_model = Column(String(200), nullable=True)  # Model being used
+    last_progress_at = Column(DateTime, nullable=True)
+    progress_message = Column(Text, nullable=True)
     warmup_started_at = Column(DateTime, nullable=True)
     warmup_completed_at = Column(DateTime, nullable=True)
     warmup_duration_ms = Column(Integer, nullable=True)
@@ -186,7 +193,11 @@ class DebateRun(Base):
     generation_started_at = Column(DateTime, nullable=True)
     generation_completed_at = Column(DateTime, nullable=True)
     generation_duration_ms = Column(Integer, nullable=True)
-    error_type = Column(String(50), nullable=True)  # model_warmup_timeout | model_warmup_failed | model_generation_timeout | model_read_timeout | model_provider_unreachable
+    error_type = Column(String(50), nullable=True)
+    error_stage = Column(String(20), nullable=True)  # warmup | generation
+    error_round = Column(Integer, nullable=True)
+    error_turn = Column(String(50), nullable=True)
+    error_elapsed_ms = Column(Integer, nullable=True)
 
     # Cleanup/visibility controls
     hidden_at = Column(DateTime, nullable=True)

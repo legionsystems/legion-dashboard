@@ -504,6 +504,80 @@ export default function DebatePanel({ workItemId }) {
       .finally(() => setBusy(null));
   }
 
+  // Render runs with failed run collapse logic
+  function renderRuns() {
+    if (runs.length === 0) {
+      return (
+        <EmptyState
+          title="NO DEBATE RUNS YET"
+          hint="A run will queue automatically when this work item is in a debate-eligible status, or you can trigger one above."
+          glyph="[ ∅ ]"
+        />
+      );
+    }
+
+    // Separate runs by status
+    const activeRuns = runs.filter(r => r.status !== 'failed');
+    const failedRuns = runs.filter(r => r.status === 'failed');
+    
+    // Show latest N failed runs, collapse older ones
+    const visibleFailed = failedRuns.slice(0, VISIBLE_FAILED_LIMIT);
+    const collapsedFailed = failedRuns.slice(VISIBLE_FAILED_LIMIT);
+    
+    // Combine for display
+    const displayRuns = [...activeRuns, ...visibleFailed];
+    const hasCollapsed = collapsedFailed.length > 0;
+    
+    return (
+      <div>
+        <div className="space-y-2">
+          {displayRuns.map((run) => (
+            <DebateRunCard
+              key={run.id}
+              run={run}
+              expanded={expandedId === run.id}
+              onToggle={() => setExpandedId(expandedId === run.id ? null : run.id)}
+              onExecute={executeRun}
+              onRerun={rerunRun}
+              executingId={executingId === true || executingId === run.id}
+              rerunningId={rerunningId === true || rerunningId === run.id}
+            />
+          ))}
+        </div>
+        
+        {hasCollapsed && (
+          <div className="border border-edge bg-canvas rounded p-3">
+            <button
+              type="button"
+              onClick={() => setShowOlderFailed(!showOlderFailed)}
+              className="font-mono text-xs text-fg-secondary hover:text-fg-primary flex items-center gap-2"
+            >
+              {showOlderFailed ? "▲" : "▼"}
+              {collapsedFailed.length} older failed attempt{collapsedFailed.length > 1 ? 's' : ''} — {showOlderFailed ? "Hide" : "Show"}
+            </button>
+            
+            {showOlderFailed && (
+              <div className="mt-2 space-y-2">
+                {collapsedFailed.map((run) => (
+                  <DebateRunCard
+                    key={run.id}
+                    run={run}
+                    expanded={expandedId === run.id}
+                    onToggle={() => setExpandedId(expandedId === run.id ? null : run.id)}
+                    onExecute={executeRun}
+                    onRerun={rerunRun}
+                    executingId={executingId === true || executingId === run.id}
+                    rerunningId={rerunningId === true || rerunningId === run.id}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-4">
       <Panel
@@ -616,29 +690,8 @@ export default function DebatePanel({ workItemId }) {
       >
         {loading ? (
           <SkeletonBlock rows={3} />
-        ) : runs.length === 0 ? (
-          <EmptyState
-            title="NO DEBATE RUNS YET"
-            hint="A run will queue automatically when this work item is in a debate-eligible status, or you can trigger one above."
-            glyph="[ ∅ ]"
-          />
         ) : (
-          <div className="space-y-2">
-            {runs.map((run) => (
-              <DebateRunCard
-                key={run.id}
-                run={run}
-                expanded={expandedId === run.id}
-                onToggle={() =>
-                  setExpandedId(expandedId === run.id ? null : run.id)
-                }
-                onExecute={executeRun}
-                onRerun={rerunRun}
-                executingId={executingId === true || executingId === run.id}
-                rerunningId={rerunningId === true || rerunningId === run.id}
-              />
-            ))}
-          </div>
+          renderRuns()
         )}
       </Panel>
     </div>
