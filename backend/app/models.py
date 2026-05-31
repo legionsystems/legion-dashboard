@@ -384,25 +384,34 @@ class DebateExecutionConfig(Base):
 class ModelHost(Base):
     """SQL-backed model host configuration.
 
-    Represents an OpenAI-compatible model provider endpoint.
+    Represents a model provider endpoint (Ollama native, OpenAI-compatible, xAI, etc.).
     UI manages hosts; debate execution references them.
     """
     __tablename__ = "model_hosts"
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(100), nullable=False, unique=True, index=True)
-    provider = Column(String(50), nullable=False, default="openai_compatible")
+    provider_type = Column(String(30), nullable=False, default="ollama_native")  # ollama_native, openai_compatible, xai, other
+    provider = Column(String(50), nullable=False, default="openai_compatible")  # Legacy field, kept for compatibility
     base_url = Column(String(500), nullable=False)
     api_key = Column(String(500), nullable=True)
     enabled = Column(Boolean, nullable=False, default=True)
     allow_cloud_endpoints = Column(Boolean, nullable=False, default=False)
 
+    # Capability flags
+    supports_native_ollama = Column(Boolean, nullable=True)  # /api/tags, /api/chat
+    supports_openai_chat_completions = Column(Boolean, nullable=True)  # /v1/chat/completions
+    supports_model_list = Column(Boolean, nullable=True)
+    supports_loaded_models = Column(Boolean, nullable=True)  # /api/ps
+    preferred_generation_api = Column(String(30), nullable=True)  # ollama_native, openai_chat_completions
+
     # Test/refresh status
-    last_test_status = Column(String(20), nullable=True)  # success, failed, unknown
+    last_test_status = Column(String(20), nullable=True)  # success, warning, failed, unknown
     last_test_message = Column(Text, nullable=True)
     last_tested_at = Column(DateTime, nullable=True)
     last_models_refresh_at = Column(DateTime, nullable=True)
     last_error = Column(Text, nullable=True)
+    last_capability_result = Column(Text, nullable=True)  # JSON safe capability test result
 
     # Hermes sync metadata
     source = Column(String(20), nullable=False, default="manual")  # manual | hermes

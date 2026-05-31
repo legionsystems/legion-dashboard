@@ -577,9 +577,119 @@ class ModelWarmupResponse(BaseModel):
     provider: Optional[str] = None
     base_url_host: Optional[str] = None
     model: str
-    warmup_method: str  # ollama_native | openai_compatible_ping
     latency_ms: Optional[int] = None
+    warmup_method: Optional[str] = None  # ollama_native, openai_compatible_ping, skipped
     error: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Model host schemas
+# ---------------------------------------------------------------------------
+
+
+class ModelHostModelResponse(BaseModel):
+    """Model in a host's catalog."""
+    model_config = ConfigDict(from_attributes=True)
+    
+    id: int
+    model_id: str
+    display_name: Optional[str] = None
+    is_available: bool = True
+    discovered_at: datetime
+
+
+class ModelHostResponse(BaseModel):
+    """Model host configuration response — masks secrets."""
+    model_config = ConfigDict(from_attributes=True)
+    
+    id: int
+    name: str
+    provider_type: str  # ollama_native, openai_compatible, xai, other
+    provider: str  # Legacy field
+    base_url: str
+    enabled: bool
+    allow_cloud_endpoints: bool
+    api_key_configured: bool
+    
+    # Capability flags
+    supports_native_ollama: Optional[bool] = None
+    supports_openai_chat_completions: Optional[bool] = None
+    supports_model_list: Optional[bool] = None
+    supports_loaded_models: Optional[bool] = None
+    preferred_generation_api: Optional[str] = None
+    
+    # Test status
+    last_test_status: Optional[str] = None
+    last_test_message: Optional[str] = None
+    last_tested_at: Optional[datetime] = None
+    last_models_refresh_at: Optional[datetime] = None
+    last_error: Optional[str] = None
+    
+    # Models (eager loaded)
+    models: List[ModelHostModelResponse] = []
+    
+    # Hermes sync metadata
+    source: str = "manual"
+    source_key: Optional[str] = None
+    profile_name: Optional[str] = None
+    provider_name: Optional[str] = None
+    sync_enabled: bool = True
+    last_synced_at: Optional[datetime] = None
+    last_sync_status: Optional[str] = None
+    last_sync_error: Optional[str] = None
+    
+    created_at: datetime
+    updated_at: datetime
+
+
+class ModelHostCreate(BaseModel):
+    """Create a new model host."""
+    name: str
+    provider_type: str = "ollama_native"
+    provider: str = "openai_compatible"  # Legacy
+    base_url: str
+    api_key: Optional[str] = None
+    enabled: bool = True
+    allow_cloud_endpoints: bool = False
+
+
+class ModelHostUpdate(BaseModel):
+    """Update a model host."""
+    name: Optional[str] = None
+    provider_type: Optional[str] = None
+    provider: Optional[str] = None
+    base_url: Optional[str] = None
+    api_key: Optional[str] = None
+    clear_api_key: bool = False
+    enabled: Optional[bool] = None
+    allow_cloud_endpoints: Optional[bool] = None
+    supports_native_ollama: Optional[bool] = None
+    supports_openai_chat_completions: Optional[bool] = None
+    supports_model_list: Optional[bool] = None
+    supports_loaded_models: Optional[bool] = None
+    preferred_generation_api: Optional[str] = None
+
+
+class CapabilityCheckResult(BaseModel):
+    """Result of a single capability check."""
+    name: str
+    status: str  # success, failed, skipped
+    endpoint: Optional[str] = None
+    latency_ms: Optional[int] = None
+    message: Optional[str] = None
+
+
+class ModelHostCapabilityTestResponse(BaseModel):
+    """Structured capability test result for a model host."""
+    provider_id: int
+    provider_type: str
+    enabled: bool
+    overall_status: str  # success, warning, failed
+    checks: List[CapabilityCheckResult] = []
+    recommended_generation_api: Optional[str] = None  # ollama_native, openai_chat_completions
+    safe_error: Optional[str] = None
+    selected_model_available: Optional[bool] = None
+    selected_model: Optional[str] = None
 
 
 # Resolve the forward reference from WorkItemResponse -> DebateRunSummary now

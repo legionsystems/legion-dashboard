@@ -16,9 +16,115 @@ from ..schemas import (
     DebateExecutionTestResponse,
     ModelWarmupRequest,
     ModelWarmupResponse,
+    ModelHostResponse,
+    ModelHostCreate,
+    ModelHostUpdate,
+    ModelHostCapabilityTestResponse,
+    CapabilityCheckResult,
 )
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
+
+
+@router.get("/model-hosts", response_model=List[ModelHostResponse])
+def list_model_hosts(db: Session = Depends(get_db)):
+    """List all model hosts with their models.
+    
+    Disabled hosts are included but marked. API keys are never returned.
+    """
+    hosts = db.query(ModelHost).order_by(ModelHost.name).all()
+    return hosts
+
+
+@router.get("/model-hosts/{host_id}", response_model=ModelHostResponse)
+def get_model_host(host_id: int, db: Session = Depends(get_db)):
+    """Get a specific model host."""
+    host = db.query(ModelHost).filter(ModelHost.id == host_id).first()
+    if host is None:
+        raise HTTPException(status_code=404, detail="Model host not found")
+    return host
+
+
+@router.post("/model-hosts", response_model=ModelHostResponse, status_code=status.HTTP_201_CREATED)
+def create_model_host(payload: ModelHostCreate, db: Session = Depends(get_db)):
+    """Create a new model host."""
+    # Check for duplicate name
+    existing = db.query(ModelHost).filter(ModelHost.name == payload.name).first()
+    if existing:
+        raise HTTPException(status_code=400, detail=f"Model host '{payload.name}' already exists")
+    
+    host = ModelHost(
+        name=payload.name,
+        provider_type=payload.provider_type,
+        provider=payload.provider,
+        base_url=payload.base_url,
+        api_key=payload.api_key,
+        enabled=payload.enabled,
+        allow_cloud_endpoints=payload.allow_cloud_endpoints,
+    )
+    db.add(host)
+    db.commit()
+    db.refresh(host)
+    return host
+
+
+@router.put("/model-hosts/{host_id}", response_model=ModelHostResponse)
+def update_model_host(host_id: int, payload: ModelHostUpdate, db: Session = Depends(get_db)):
+    """Update a model host."""
+    host = db.query(ModelHost).filter(ModelHost.id == host_id).first()
+    if host is None:
+        raise HTTPException(status_code=404, detail="Model host not found")
+    
+    if payload.name is not None:
+        # Check for duplicate name (excluding self)
+        existing = db.query(ModelHost).filter(
+            ModelHost.name == payload.name,
+            ModelHost.id != host_id
+        ).first()
+        if existing:
+            raise HTTPException(status_code=400, detail=f"Model host '{payload.name}' already exists")
+        host.name = payload.name
+    
+    if payload.provider_type is not None:
+        host.provider_type = payload.provider_type
+    if payload.provider is not None:
+        host.provider = payload.provider
+    if payload.base_url is not None:
+        host.base_url = payload.base_url
+    if payload.api_key is not None:
+        host.api_key = payload.api_key
+    if payload.clear_api_key:
+        host.api_key = None
+    if payload.enabled is not None:
+        host.enabled = payload.enabled
+    if payload.allow_cloud_endpoints is not None:
+        host.allow_cloud_endpoints = payload.allow_cloud_endpoints
+    if payload.supports_native_ollama is not None:
+        host.supports_native_ollama = payload.supports_native_ollama
+    if payload.supports_openai_chat_completions is not None:
+        host.supports_openai_chat_completions = payload.supports_openai_chat_completions
+    if payload.supports_model_list is not None:
+        host.supports_model_list = payload.supports_model_list
+    if payload.supports_loaded_models is not None:
+        host.supports_loaded_models = payload.supports_loaded_models
+    if payload.preferred_generation_api is not None:
+        host.preferred_generation_api = payload.preferred_generation_api
+    
+    db.commit()
+    db.refresh(host)
+    return host
+
+
+@router.delete("/model-hosts/{host_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_model_host(host_id: int, db: Session = Depends(get_db)):
+    """Delete a model host."""
+    host = db.query(ModelHost).filter(ModelHost.id == host_id).first()
+    if host is None:
+        raise HTTPException(status_code=404, detail="Model host not found")
+    
+    db.delete(host)
+    db.commit()
+    return None
 
 
 def _get_config(db: Session) -> DebateExecutionConfig:
@@ -354,7 +460,28 @@ def _derive_ollama_native_url(base_url: str) -> str:
     return url
 
 
-@router.post("/model-hosts/{host_id}/models/{model_id}/warm", response_model=ModelWarmupResponse)
+@router.post("/model-hosts/{host_id}/test-capability", response_model=ModelHostCapabilityTestResponse)
+def test_model_host_capability(
+    host_id: int,
+    selected_model: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """Test all capabilities of a model host.
+    
+    Returns structured result showing which APIs work:
+    - Ollama native (/api/tags, /api/chat, /api/ps)
+    - OpenAI-compatible (/v1/models, /v1/chat/completions)
+    - Selected model availability
+    
+    Updates host capability flags in database.
+    """
+    from ..capability_test import test_host_capabilities
+    
+    host = db.query(ModelHost).filter(ModelHost.id == host_id).first()
+    if host is None:
+        raise HTTPException(status_code=404, detail="Model host not found")
+    
+    return test_host_capabilities(host, db, selected_model)
 def warm_model(
     host_id: int,
     model_id: str,
