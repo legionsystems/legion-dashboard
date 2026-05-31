@@ -986,8 +986,8 @@ def _execute_arbiter_turn(
     """Execute Final Arbiter turn."""
     print(f"[ARBITER] Starting with {len(all_arguments)} arguments...", flush=True)
     
-    # Truncate arguments for arbiter to avoid timeout - use last 6 only
-    truncated_args = all_arguments[-6:] if len(all_arguments) > 6 else all_arguments
+    # Truncate arguments for arbiter to avoid timeout - use last 4 only for faster response
+    truncated_args = all_arguments[-4:] if len(all_arguments) > 4 else all_arguments
     print(f"[ARBITER] Using {len(truncated_args)} arguments (truncated from {len(all_arguments)})", flush=True)
     
     arbiter_prompt = build_debate_prompt(
@@ -1005,12 +1005,32 @@ def _execute_arbiter_turn(
     print(f"[ARBITER] Prompt length: {len(arbiter_prompt)} chars", flush=True)
 
     messages = [
-        {"role": "system", "content": "You are the Final Arbiter. Produce valid JSON only."},
+        {"role": "system", "content": "You are the Final Arbiter. Produce valid JSON only. Be concise."},
         {"role": "user", "content": arbiter_prompt},
     ]
 
-    print(f"[ARBITER] Calling model (timeout={config.timeout_seconds}s)...", flush=True)
-    arbiter_content = call_model(config, messages)
+    # Arbiter needs more time - use 180s timeout
+    print(f"[ARBITER] Calling model (timeout=180s for arbiter)...", flush=True)
+    import httpx
+    with httpx.Client(timeout=180) as client:
+        url = config.base_url.rstrip("/") + "/api/chat" if config.provider == "ollama_native" else config.base_url.rstrip("/") + "/chat/completions"
+        headers = {"Content-Type": "application/json"}
+        if config.api_key:
+            headers["Authorization"] = f"Bearer {config.api_key}"
+        payload = {"model": config.model, "messages": messages, "stream": False}
+        if config.provider != "ollama_native":
+            payload["temperature"] = 0.7
+            payload["max_tokens"] = 2048
+        
+        response = client.post(url, headers=headers, json=payload)
+        response.raise_for_status()
+        data = response.json()
+        
+        if config.provider == "ollama_native":
+            arbiter_content = data.get("message", {}).get("content", "")
+        else:
+            arbiter_content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+    
     print(f"[ARBITER] Response length: {len(arbiter_content) if arbiter_content else 0} chars", flush=True)
     
     arbiter_data = parse_arbiter_json(arbiter_content)
