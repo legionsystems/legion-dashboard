@@ -33,6 +33,7 @@ def warm_model_ollama_native(
     
     # Derive native URL
     native_url = derive_ollama_native_url(base_url)
+    print(f"[WARMUP-OLLAMA] base_url={base_url} -> native_url={native_url}")
     
     # Build warmup request - NO work item data, just empty messages
     payload = {
@@ -41,6 +42,8 @@ def warm_model_ollama_native(
         "keep_alive": keep_alive,
         "stream": False,
     }
+    
+    print(f"[WARMUP-OLLAMA] POST {native_url} with model={model}")
     
     start_time = datetime.utcnow()
     
