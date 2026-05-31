@@ -482,7 +482,9 @@ def test_model_host_capability(
         raise HTTPException(status_code=404, detail="Model host not found")
     
     return test_host_capabilities(host, db, selected_model)
-def warm_model(
+
+
+@router.post("/model-hosts/{host_id}/models/{model_id}/warm", response_model=ModelWarmupResponse)
     host_id: int,
     model_id: str,
     payload: ModelWarmupRequest,
