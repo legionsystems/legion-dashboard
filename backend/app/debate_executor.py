@@ -682,10 +682,10 @@ def execute_debate_run(
         # Round 2+: PRO responds to CON -> CON responds to PRO -> PRO final reply
         turns_per_round = 3  # pro_opening, con_response, pro_reply
 
-        print(f"[EXECUTE] Starting {run.rounds_requested} rounds with {turns_per_round} turns each")
+        print(f"[EXECUTE] Starting {run.rounds_requested} rounds with {turns_per_round} turns each", flush=True)
         
         for round_num in range(1, run.rounds_requested + 1):
-            print(f"[EXECUTE] === Starting Round {round_num}/{run.rounds_requested} ===")
+            print(f"[EXECUTE] === Starting Round {round_num}/{run.rounds_requested} ===", flush=True)
             # Get arguments from prior rounds for context
             prior_args = all_arguments.copy()
             
@@ -698,6 +698,8 @@ def execute_debate_run(
             run.last_progress_at = datetime.utcnow()
             run.progress_message = f"Round {round_num}: PRO opening argument"
             db_session.flush()
+            
+            print(f"[TURN] Round {round_num} Turn 1: PRO side", flush=True)
 
             # Turn 1: PRO side opening (or response in round 2+)
             pro_roles = ["Product Owner", "Builder"]
@@ -714,10 +716,13 @@ def execute_debate_run(
                 roles=pro_roles,
                 prior_arguments=prior_args,
             )
+            print(f"[TURN] PRO content result: {pro_content is not None}", flush=True)
             if pro_content:
                 all_arguments.append(pro_content)
+                print(f"[TURN] Added PRO argument, total args: {len(all_arguments)}", flush=True)
 
             # Turn 2: CON side response
+            print(f"[TURN] Round {round_num} Turn 2: CON side", flush=True)
             con_roles = ["UX/Design Reviewer", "Technical Architect", "Security/Privacy Reviewer", "Skeptic/Red Team"]
             # CON sees PRO's argument from this round
             prior_args_with_pro = all_arguments.copy()
@@ -734,10 +739,13 @@ def execute_debate_run(
                 roles=con_roles,
                 prior_arguments=prior_args_with_pro,
             )
+            print(f"[TURN] CON content result: {con_content is not None}", flush=True)
             if con_content:
                 all_arguments.append(con_content)
+                print(f"[TURN] Added CON argument, total args: {len(all_arguments)}", flush=True)
 
             # Turn 3: PRO side reply to CON
+            print(f"[TURN] Round {round_num} Turn 3: PRO reply", flush=True)
             prior_args_with_con = all_arguments.copy()
             pro_reply_content = _execute_debate_turn(
                 db_session=db_session,
@@ -753,12 +761,15 @@ def execute_debate_run(
                 prior_arguments=prior_args_with_con,
                 is_reply=True,
             )
+            print(f"[TURN] PRO reply result: {pro_reply_content is not None}", flush=True)
             if pro_reply_content:
                 all_arguments.append(pro_reply_content)
+                print(f"[TURN] Added PRO reply argument, total args: {len(all_arguments)}", flush=True)
 
             # End of round
             db_session.flush()
             run.rounds_completed = round_num
+            print(f"[EXECUTE] Round {round_num} complete, rounds_completed={run.rounds_completed}", flush=True)
 
         # Final Arbiter round - sees all arguments
         arbiter_data = _execute_arbiter_turn(
