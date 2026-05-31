@@ -268,6 +268,10 @@ class DebateWorker:
         # Use existing execute_debate_run which persists progress
         try:
             execute_debate_run(db, run, work_item, exec_config)
+            print(f"[WORKER] execute_debate_run completed for run {run.id}")
+            # Refresh run state after execution
+            db.refresh(run)
+            print(f"[WORKER] Run {run.id} state after execution: status={run.status}, error_type={run.error_type}")
         except Exception as e:
             print(f"[WORKER] Error executing run {run.id}: {e}")
             run.worker_status = "failed"
@@ -279,6 +283,7 @@ class DebateWorker:
     
     def _complete_run(self, db: Session, run: DebateRun):
         """Mark run as completed."""
+        print(f"[WORKER] Completing run {run.id}...")
         run.worker_status = "completed"
         run.status = "completed"
         run.completed_at = datetime.now(timezone.utc)
