@@ -166,13 +166,19 @@ function DebateRunCard({ run, expanded, onToggle, onExecute, onRerun, onCancel, 
   const [error, setError] = useState(null);
 
   useEffect(() => {
-    if (!expanded || detail !== null) return;
+    if (!expanded) {
+      // Collapse: clear detail to free memory
+      setDetail(null);
+      return;
+    }
+    // Expanded: fetch detail if not already loaded
+    if (detail !== null) return;
     setLoading(true);
     getJson(`/work-items/${run.work_item_id}/debates/${run.id}`)
       .then(setDetail)
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
-  }, [expanded, detail, run.id, run.work_item_id]);
+  }, [expanded, run.id, run.work_item_id]);
 
   const canExecute = run.status === "queued" && !executingId;
   const canRerun = (run.status === "failed" || run.provenance === "execution-bridge-unconfigured" || run.provenance === "execution-disabled") && !rerunningId;
