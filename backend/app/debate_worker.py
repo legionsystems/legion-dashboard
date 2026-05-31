@@ -284,15 +284,20 @@ class DebateWorker:
     def _complete_run(self, db: Session, run: DebateRun):
         """Mark run as completed."""
         print(f"[WORKER] Completing run {run.id}...")
+        now = datetime.now(timezone.utc)
         run.worker_status = "completed"
         run.status = "completed"
-        run.completed_at = datetime.now(timezone.utc)
+        run.completed_at = now
         run.execution_stage = "completed"
         if run.generation_started_at:
-            run.generation_completed_at = run.completed_at
-            run.generation_duration_ms = int(
-                (run.generation_completed_at - run.generation_started_at).total_seconds() * 1000
-            )
+            run.generation_completed_at = now
+            # Handle both timezone-aware and naive datetimes
+            gen_start = run.generation_started_at
+            if gen_start.tzinfo is None:
+                # Make it timezone-aware assuming UTC
+                from datetime import timezone
+                gen_start = gen_start.replace(tzinfo=timezone.utc)
+            run.generation_duration_ms = int((now - gen_start).total_seconds() * 1000)
         db.commit()
         print(f"[WORKER] Run {run.id} completed")
     
