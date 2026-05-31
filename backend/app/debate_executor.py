@@ -252,9 +252,11 @@ def warm_model_if_enabled(
             "error": "Cloud endpoints require allow_cloud_endpoints=true",
         }
     
-    # Derive native Ollama URL if applicable - use provider_type if available
+    # Derive native Ollama URL if applicable
     is_ollama = "ollama" in base_url.lower() or "11434" in base_url
-    print(f"[WARMUP] is_ollama={is_ollama}, warmup_url will be: {derive_ollama_native_url(base_url) if is_ollama else base_url}")
+    warmup_url = derive_ollama_native_url(base_url) if is_ollama else base_url.rstrip("/") + "/chat/completions"
+    
+    print(f"[WARMUP] is_ollama={is_ollama}, warmup_url={warmup_url}")
     
     timeout = config_row.warmup_timeout_seconds
     keep_alive = config_row.keep_model_loaded_for
