@@ -143,8 +143,25 @@ class DebateRun(Base):
     # later edited (which the API allows).
     work_item_type_snapshot = Column(String(30), nullable=False)
 
-    # queued | running | completed | failed
+    # Status: queued | claimed | warming | generating | running | completed | failed | cancelled
     status = Column(String(20), nullable=False, default="queued")
+    
+    # Worker/queue fields for durable execution
+    worker_status = Column(String(20), nullable=False, default="queued")  # queued | claimed | warming | running | completed | failed | cancelled
+    worker_id = Column(String(100), nullable=True)  # Worker that claimed this run
+    lease_until = Column(DateTime, nullable=True)  # Lease expiration time
+    claimed_at = Column(DateTime, nullable=True)
+    heartbeat_at = Column(DateTime, nullable=True)
+    queued_at = Column(DateTime, server_default=func.now(), nullable=False)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    cancelled_at = Column(DateTime, nullable=True)
+    cancelled_by = Column(String(100), nullable=True)
+    cancel_requested = Column(Boolean, nullable=False, default=False)
+    retry_of_run_id = Column(Integer, nullable=True)  # Link to previous run if this is a retry
+    retry_from_turn_id = Column(Integer, nullable=True)  # Retry from specific turn
+    attempt_number = Column(Integer, nullable=False, default=1)
+    max_attempts = Column(Integer, nullable=False, default=1)
 
     # Operator-controlled (1..5, default 2). The router enforces the clamp;
     # the column trusts the router and the model layer's pre-write validation.
@@ -341,6 +358,18 @@ class DebateExecutionConfig(Base):
     
     # Failed run display settings
     visible_failed_runs_limit = Column(Integer, nullable=False, default=2)
+    
+    # Worker configuration
+    execution_backend = Column(String(20), nullable=False, default="worker")  # worker | sync
+    worker_enabled = Column(Boolean, nullable=False, default=True)
+    worker_poll_interval_seconds = Column(Integer, nullable=False, default=3)
+    worker_lease_seconds = Column(Integer, nullable=False, default=300)
+    worker_heartbeat_seconds = Column(Integer, nullable=False, default=10)
+    worker_max_concurrent_runs = Column(Integer, nullable=False, default=1)
+    turn_timeout_seconds = Column(Integer, nullable=True)  # Per-turn timeout (defaults to timeout_seconds)
+    whole_run_timeout_seconds = Column(Integer, nullable=True)  # Whole-run max duration
+    retry_failed_turn_enabled = Column(Boolean, nullable=False, default=True)
+    max_turn_retries = Column(Integer, nullable=False, default=1)
 
     # Metadata
     notes = Column(Text, nullable=True)
