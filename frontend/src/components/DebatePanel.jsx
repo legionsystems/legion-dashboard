@@ -454,7 +454,7 @@ export default function DebatePanel({ workItemId }) {
       .then(([rs, is]) => {
         setRuns(rs);
         setInputs(is);
-        // Latest run expanded by default.
+        // Expand latest run only if no run is currently expanded
         if (rs.length > 0 && expandedId === null) {
           setExpandedId(rs[0].id);
         }
@@ -465,7 +465,7 @@ export default function DebatePanel({ workItemId }) {
           const interval = setInterval(refresh, 2000);
           setPollingInterval(interval);
         } else if (!hasRunning && pollingInterval) {
-          // Stop polling
+          // Stop polling but DON'T reset expandedId
           clearInterval(pollingInterval);
           setPollingInterval(null);
           setExecutingId(null);
