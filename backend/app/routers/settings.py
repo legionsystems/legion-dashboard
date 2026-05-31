@@ -485,6 +485,7 @@ def test_model_host_capability(
 
 
 @router.post("/model-hosts/{host_id}/models/{model_id}/warm", response_model=ModelWarmupResponse)
+def warm_model(
     host_id: int,
     model_id: str,
     payload: ModelWarmupRequest,
