@@ -788,6 +788,10 @@ def execute_debate_run(
             run.rounds_completed = round_num
             print(f"[EXECUTE] Round {round_num} complete, rounds_completed={run.rounds_completed}", flush=True)
 
+        # ===== FINAL ARBITER PHASE =====
+        print(f"[EXECUTE] All rounds complete, calling Final Arbiter...", flush=True)
+        print(f"[EXECUTE] Total arguments for arbiter: {len(all_arguments)}", flush=True)
+        
         # Final Arbiter round - sees all arguments
         arbiter_data = _execute_arbiter_turn(
             db_session=db_session,
@@ -796,8 +800,10 @@ def execute_debate_run(
             config=config,
             all_arguments=all_arguments,
         )
+        print(f"[ARBITER] Result: {arbiter_data is not None}", flush=True)
 
         if arbiter_data:
+            print(f"[ARBITER] Recommendation: {arbiter_data.get('recommendation')}", flush=True)
             run.final_recommendation = arbiter_data.get("recommendation")
             run.implementation_readiness = arbiter_data.get("implementation_readiness")
             run.summary = arbiter_data.get("rationale")
@@ -805,6 +811,8 @@ def execute_debate_run(
             run.suggested_title = arbiter_data.get("suggested_title")
             run.suggested_description = arbiter_data.get("suggested_description")
             run.suggested_acceptance_notes = arbiter_data.get("suggested_acceptance_notes")
+        else:
+            print(f"[ARBITER] No data returned!", flush=True)
 
         # Mark operator inputs as considered
         for inp in operator_inputs:
