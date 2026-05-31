@@ -619,46 +619,26 @@ def execute_debate_run(
         run.warmup_started_at = datetime.now(timezone.utc)
         db_session.flush()
         
-        # Call warmup helper - uses config_row settings
-        base_url = config_row.base_url
-        model_to_warm = config_row.default_model
-        api_key = config_row.api_key
-        keep_alive = config_row.keep_model_loaded_for
-        warmup_timeout = config_row.warmup_timeout_seconds
+        # Use the resolved config (which has correct provider routing) instead of config_row
+        print(f"[WARMUP-PHASE] Using config.provider={config.provider}, config.base_url={config.base_url}", flush=True)
         
-        # Resolve host if selected
-        if config_row.default_host_id:
-            from .models import ModelHost
-            host = db_session.query(ModelHost).filter(ModelHost.id == config_row.default_host_id).first()
-            if host and host.enabled:
-                base_url = host.base_url
-                api_key = host.api_key or api_key
-        
-        # Determine warmup method
-        is_ollama = base_url.rstrip("/").endswith("/v1") or "ollama" in base_url.lower()
-        run.warmup_method = "ollama_native" if is_ollama else "openai_compatible_ping"
-        
-        # Check cloud guard
-        is_cloud = not is_local_endpoint(base_url)
-        if is_cloud and not config_row.allow_cloud_endpoints:
-            warmup_result = {"success": False, "error": "Cloud endpoints not allowed", "warmup_method": "cloud_blocked", "duration_ms": 0}
+        # Perform warmup using the correct provider routing
+        if config.provider == "ollama_native":
+            success, error, latency_ms = warm_model_ollama_native(
+                base_url=config.base_url,
+                model=config.model,
+                keep_alive=config_row.keep_model_loaded_for,
+                timeout_seconds=config_row.warmup_timeout_seconds,
+            )
+            warmup_result = {"success": success, "error": error, "warmup_method": "ollama_native", "duration_ms": latency_ms}
         else:
-            # Perform warmup
-            if is_ollama:
-                success, error, latency_ms = warm_model_ollama_native(
-                    base_url=base_url,
-                    model=model_to_warm,
-                    keep_alive=keep_alive,
-                    timeout_seconds=warmup_timeout,
-                )
-            else:
-                success, error, latency_ms = warm_model_openai_compatible(
-                    base_url=base_url,
-                    model=model_to_warm,
-                    api_key=api_key,
-                    timeout_seconds=warmup_timeout,
-                )
-            warmup_result = {"success": success, "error": error, "warmup_method": run.warmup_method, "duration_ms": latency_ms}
+            success, error, latency_ms = warm_model_openai_compatible(
+                base_url=config.base_url,
+                model=config.model,
+                api_key=config.api_key,
+                timeout_seconds=config_row.warmup_timeout_seconds,
+            )
+            warmup_result = {"success": success, "error": error, "warmup_method": "openai_compatible", "duration_ms": latency_ms}
         
         if warmup_result["success"]:
             run.warmup_completed_at = datetime.now(timezone.utc)
