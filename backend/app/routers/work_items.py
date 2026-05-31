@@ -405,7 +405,7 @@ async def execute_debate(
         return run
 
     # Already running — return current status
-    if run.status == "running":
+    if run.status in ("running", "warming", "generating"):
         return run
 
     # Mark as running immediately so UI shows progress
@@ -419,6 +419,80 @@ async def execute_debate(
     
     db.refresh(run)
     return run
+
+
+@router.post(
+    "/{work_item_id}/debates/{run_id}/cancel",
+    response_model=DebateRunDetail,
+)
+def cancel_debate_run(
+    work_item_id: int,
+    run_id: int,
+    db: Session = Depends(get_db),
+):
+    """Request cancellation of a running debate run.
+    
+    Sets cancel_requested flag. Worker will stop at next safe point.
+    """
+    _get_or_404(db, work_item_id)
+    run = (
+        db.query(DebateRun)
+        .filter(DebateRun.id == run_id, DebateRun.work_item_id == work_item_id)
+        .first()
+    )
+    if run is None:
+        raise HTTPException(status_code=404, detail="Debate run not found")
+    
+    # Can only cancel active runs
+    if run.status not in ("queued", "running", "warming", "generating", "claimed"):
+        raise HTTPException(status_code=400, detail=f"Cannot cancel run with status '{run.status}'")
+    
+    run.cancel_requested = True
+    db.commit()
+    db.refresh(run)
+    return run
+
+
+@router.post(
+    "/{work_item_id}/debates/{run_id}/retry",
+    response_model=DebateRunDetail,
+    status_code=status.HTTP_201_CREATED,
+)
+def retry_debate_run(
+    work_item_id: int,
+    run_id: int,
+    db: Session = Depends(get_db),
+):
+    """Create a new debate run that retries a failed run.
+    
+    Links to original via retry_of_run_id.
+    """
+    item = _get_or_404(db, work_item_id)
+    original_run = (
+        db.query(DebateRun)
+        .filter(DebateRun.id == run_id, DebateRun.work_item_id == work_item_id)
+        .first()
+    )
+    if original_run is None:
+        raise HTTPException(status_code=404, detail="Debate run not found")
+    
+    # Create retry run
+    from datetime import datetime, timezone
+    retry_run = DebateRun(
+        work_item_id=work_item_id,
+        work_item_type_snapshot=original_run.work_item_type_snapshot,
+        status="queued",
+        worker_status="queued",
+        rounds_requested=original_run.rounds_requested,
+        trigger="manual_rerun",
+        retry_of_run_id=original_run.id,
+        attempt_number=original_run.attempt_number + 1,
+        queued_at=datetime.now(timezone.utc)
+    )
+    db.add(retry_run)
+    db.commit()
+    db.refresh(retry_run)
+    return retry_run
 
 
 def _execute_debate_bg(run_id: int, work_item_id: int, provider: str, base_url: str, model: str, api_key: str, timeout_seconds: int, max_output_chars: int):

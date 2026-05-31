@@ -181,6 +181,17 @@ export default function Settings() {
     fail_debate_if_warmup_fails: true,
     // Failed run display
     visible_failed_runs_limit: 2,
+    // Worker configuration
+    execution_backend: "worker",
+    worker_enabled: true,
+    worker_poll_interval_seconds: 3,
+    worker_lease_seconds: 300,
+    worker_heartbeat_seconds: 10,
+    worker_max_concurrent_runs: 1,
+    turn_timeout_seconds: null,
+    whole_run_timeout_seconds: null,
+    retry_failed_turn_enabled: true,
+    max_turn_retries: 1,
   });
 
   useEffect(() => {
@@ -455,6 +466,43 @@ export default function Settings() {
               ]}
             />
           </Field>
+        </div>
+
+        <div className="border border-edge bg-canvas rounded p-3 mt-4">
+          <p className="font-mono uppercase tracking-telemetry text-[10px] text-fg-primary mb-2">Worker Execution</p>
+          <p className="font-mono text-[9px] text-fg-muted mb-3">Worker mode queues debates and processes them in the background. The browser can be closed while the worker continues. Partial turns are saved as they complete.</p>
+          <div className="grid grid-cols-2 gap-3 mb-3">
+            <div className="flex items-center justify-between p-2 border border-edge rounded">
+              <div>
+                <p className="font-mono text-[10px] text-fg-primary">Worker Enabled</p>
+                <p className="font-mono text-[9px] text-fg-muted mt-0.5">Process debates in background</p>
+              </div>
+              <Toggle checked={config.worker_enabled} onChange={(v) => updateField("worker_enabled", v)} />
+            </div>
+            <div className="flex items-center justify-between p-2 border border-edge rounded">
+              <div>
+                <p className="font-mono text-[10px] text-fg-primary">Retry Failed Turn</p>
+                <p className="font-mono text-[9px] text-fg-muted mt-0.5">Auto-retry failed turns</p>
+              </div>
+              <Toggle checked={config.retry_failed_turn_enabled} onChange={(v) => updateField("retry_failed_turn_enabled", v)} />
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Poll Interval (seconds)" hint="How often worker checks for jobs">
+              <TextInput type="number" value={config.worker_poll_interval_seconds} onChange={(v) => updateField("worker_poll_interval_seconds", parseInt(v) || 3)} />
+            </Field>
+            <Field label="Lease Duration (seconds)" hint="Job lock timeout">
+              <TextInput type="number" value={config.worker_lease_seconds} onChange={(v) => updateField("worker_lease_seconds", parseInt(v) || 300)} />
+            </Field>
+          </div>
+          <div className="grid grid-cols-2 gap-3 mt-3">
+            <Field label="Per-Turn Timeout (seconds)" hint="Max time per debate turn">
+              <TextInput type="number" value={config.turn_timeout_seconds || ""} onChange={(v) => updateField("turn_timeout_seconds", parseInt(v) || null)} placeholder="Uses generation timeout" />
+            </Field>
+            <Field label="Max Turn Retries" hint="Retry attempts per turn">
+              <TextInput type="number" value={config.max_turn_retries} onChange={(v) => updateField("max_turn_retries", parseInt(v) || 1)} />
+            </Field>
+          </div>
         </div>
 
         <Field label="API Key" hint={config.api_key_configured ? "Currently configured — enter new value to replace, or check clear" : "Optional for local models"}>

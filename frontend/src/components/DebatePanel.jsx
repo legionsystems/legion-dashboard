@@ -138,7 +138,7 @@ function ArgumentBlock({ argument, showChronological }) {
   );
 }
 
-function DebateRunCard({ run, expanded, onToggle, onExecute, onRerun, executingId, rerunningId }) {
+function DebateRunCard({ run, expanded, onToggle, onExecute, onRerun, onCancel, onRetry, executingId, rerunningId }) {
   const [detail, setDetail] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -208,6 +208,28 @@ function DebateRunCard({ run, expanded, onToggle, onExecute, onRerun, executingI
               title="Rerun this debate with current settings"
             >
               ↻ RERUN
+            </button>
+          )}
+          {/* Cancel button for active runs */}
+          {(run.status === "running" || run.status === "warming" || run.status === "generating" || run.worker_status === "claimed") && (
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onCancel(run.id); }}
+              className="px-2 py-0.5 text-[10px] font-mono uppercase tracking-telemetry font-semibold border border-red-500 text-red-400 bg-red-500/14 hover:bg-red-500/22 rounded"
+              title="Cancel this debate run"
+            >
+              ⏹ CANCEL
+            </button>
+          )}
+          {/* Retry button for failed runs */}
+          {run.status === "failed" && (
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onRetry(run.id); }}
+              className="px-2 py-0.5 text-[10px] font-mono uppercase tracking-telemetry font-semibold border border-[#10B981] text-[#10B981] bg-[#10B981]14 hover:bg-[#10B981]22 rounded"
+              title="Retry this failed debate run"
+            >
+              ↻ RETRY
             </button>
           )}
           <span className="font-mono text-[10px] tracking-telemetry text-fg-muted">
@@ -465,6 +487,29 @@ export default function DebatePanel({ workItemId }) {
       .finally(() => setExecutingId(null));
   }
 
+  function cancelRun(runId) {
+    if (!confirm("Cancel this debate run? The worker will stop at the next safe point.")) return;
+    postJson(`/work-items/${workItemId}/debates/${runId}/cancel`, {})
+      .then(() => {
+        refresh();
+      })
+      .catch((err) => setError(err.message));
+  }
+
+  function retryRun(runId) {
+    postJson(`/work-items/${workItemId}/debates/${runId}/retry`, {})
+      .then((created) => {
+        setExpandedId(created.id);
+        // Auto-execute the retry
+        return postJson(`/work-items/${workItemId}/debates/${created.id}/execute`, {});
+      })
+      .then(() => {
+        setExecutingId(true);
+        refresh();
+      })
+      .catch((err) => setError(err.message));
+  }
+
   function rerunRun(runId) {
     setRerunningId(runId);
     // Get the original run's round count
@@ -539,6 +584,8 @@ export default function DebatePanel({ workItemId }) {
               onToggle={() => setExpandedId(expandedId === run.id ? null : run.id)}
               onExecute={executeRun}
               onRerun={rerunRun}
+              onCancel={cancelRun}
+              onRetry={retryRun}
               executingId={executingId === true || executingId === run.id}
               rerunningId={rerunningId === true || rerunningId === run.id}
             />
@@ -566,6 +613,8 @@ export default function DebatePanel({ workItemId }) {
                     onToggle={() => setExpandedId(expandedId === run.id ? null : run.id)}
                     onExecute={executeRun}
                     onRerun={rerunRun}
+                    onCancel={cancelRun}
+                    onRetry={retryRun}
                     executingId={executingId === true || executingId === run.id}
                     rerunningId={rerunningId === true || rerunningId === run.id}
                   />

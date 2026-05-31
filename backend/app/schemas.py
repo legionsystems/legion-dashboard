@@ -268,6 +268,13 @@ class DebateRunSummary(BaseModel):
     completed_at: Optional[datetime] = None
     # Execution stage tracking
     execution_stage: Optional[str] = None
+    current_round: Optional[int] = None
+    current_turn: Optional[str] = None
+    current_side: Optional[str] = None
+    current_role: Optional[str] = None
+    current_model: Optional[str] = None
+    last_progress_at: Optional[datetime] = None
+    progress_message: Optional[str] = None
     warmup_started_at: Optional[datetime] = None
     warmup_completed_at: Optional[datetime] = None
     warmup_duration_ms: Optional[int] = None
@@ -277,6 +284,16 @@ class DebateRunSummary(BaseModel):
     generation_completed_at: Optional[datetime] = None
     generation_duration_ms: Optional[int] = None
     error_type: Optional[str] = None
+    error_stage: Optional[str] = None
+    error_round: Optional[int] = None
+    error_turn: Optional[str] = None
+    error_elapsed_ms: Optional[int] = None
+    # Worker fields
+    worker_status: Optional[str] = None
+    worker_id: Optional[str] = None
+    heartbeat_at: Optional[datetime] = None
+    lease_until: Optional[datetime] = None
+    cancel_requested: bool = False
     # Cleanup/visibility controls
     hidden_at: Optional[datetime] = None
     hidden_by: Optional[str] = None
@@ -398,6 +415,17 @@ class DebateExecutionConfigResponse(BaseModel):
     fail_debate_if_warmup_fails: bool = True
     # Failed run display
     visible_failed_runs_limit: int = 2
+    # Worker configuration
+    execution_backend: str = "worker"
+    worker_enabled: bool = True
+    worker_poll_interval_seconds: int = 3
+    worker_lease_seconds: int = 300
+    worker_heartbeat_seconds: int = 10
+    worker_max_concurrent_runs: int = 1
+    turn_timeout_seconds: Optional[int] = None
+    whole_run_timeout_seconds: Optional[int] = None
+    retry_failed_turn_enabled: bool = True
+    max_turn_retries: int = 1
     notes: Optional[str] = None
     updated_at: datetime
 
@@ -436,6 +464,17 @@ class DebateExecutionConfigUpdate(BaseModel):
     fail_debate_if_warmup_fails: Optional[bool] = None
     # Failed run display
     visible_failed_runs_limit: Optional[int] = None
+    # Worker configuration
+    execution_backend: Optional[str] = None
+    worker_enabled: Optional[bool] = None
+    worker_poll_interval_seconds: Optional[int] = None
+    worker_lease_seconds: Optional[int] = None
+    worker_heartbeat_seconds: Optional[int] = None
+    worker_max_concurrent_runs: Optional[int] = None
+    turn_timeout_seconds: Optional[int] = None
+    whole_run_timeout_seconds: Optional[int] = None
+    retry_failed_turn_enabled: Optional[bool] = None
+    max_turn_retries: Optional[int] = None
     notes: Optional[str] = None
 
     @field_validator("model_mode")
