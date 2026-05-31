@@ -240,6 +240,21 @@ class DebateArgumentResponse(BaseModel):
     revised_position: Optional[str] = None
     created_at: datetime
 
+    @field_validator('responds_to_claim_ids', mode='before')
+    @classmethod
+    def parse_responds_to_claim_ids(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, list):
+            return v
+        if isinstance(v, str):
+            import json
+            try:
+                return json.loads(v)
+            except (json.JSONDecodeError, TypeError):
+                return None
+        return None
+
 
 class DebateRunSummary(BaseModel):
     """Run metadata without the (potentially large) argument list — used in
