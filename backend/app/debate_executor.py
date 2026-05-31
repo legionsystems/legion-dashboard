@@ -26,7 +26,7 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 from urllib.parse import urlparse
 
@@ -591,7 +591,7 @@ def execute_debate_run(
     warmup_result = None
     if config_row and config_row.warm_model_before_debate:
         run.execution_stage = "warming"
-        run.warmup_started_at = datetime.utcnow()
+        run.warmup_started_at = datetime.now(timezone.utc)
         db_session.flush()
         
         # Call warmup helper - uses config_row settings
@@ -636,7 +636,7 @@ def execute_debate_run(
             warmup_result = {"success": success, "error": error, "warmup_method": run.warmup_method, "duration_ms": latency_ms}
         
         if warmup_result["success"]:
-            run.warmup_completed_at = datetime.utcnow()
+            run.warmup_completed_at = datetime.now(timezone.utc)
             run.warmup_duration_ms = warmup_result.get("duration_ms", 0)
             run.warmup_method = warmup_result.get("warmup_method", "unknown")
             run.execution_stage = "running"
@@ -645,7 +645,7 @@ def execute_debate_run(
             # Warmup failed
             run.warmup_error = warmup_result.get("error", "Unknown warmup error")
             run.warmup_method = warmup_result.get("warmup_method", "unknown")
-            run.warmup_completed_at = datetime.utcnow()
+            run.warmup_completed_at = datetime.now(timezone.utc)
             
             if config_row and config_row.fail_debate_if_warmup_fails:
                 run.status = "failed"
