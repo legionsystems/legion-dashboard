@@ -75,14 +75,13 @@ class DebateWorker:
             db.refresh(config)
         return config
     
-    def _claim_run(self, db: Session, config: DebateExecutionConfig) -> Optional[DebateRun]:
+    def _claim_run(self, db: Session, config: DebateExecutionConfig) -> Optional[int]:
         """Atomically claim a queued debate run with lease.
         
-        Returns the claimed run or None if no runs available.
+        Returns the run ID or None if no runs available.
         """
         # Find queued runs (not cancelled, not claimed by another worker)
         now = datetime.now(timezone.utc)
-        stale_lease_cutoff = now - timedelta(seconds=config.worker_lease_seconds * 2)
         
         # Claim new queued runs or reclaim stale runs
         run = (
@@ -110,7 +109,7 @@ class DebateWorker:
             return None
         
         # Claim the run
-        lease_until = now + timedelta(seconds=config.worker_lease_seconds)
+        lease_until = now + timedelta(seconds=int(config.worker_lease_seconds))
         run.worker_status = "claimed"
         run.worker_id = self.worker_id
         run.lease_until = lease_until
@@ -118,10 +117,10 @@ class DebateWorker:
         run.heartbeat_at = now
         run.started_at = now
         db.commit()
-        db.refresh(run)
         
-        print(f"[WORKER] Claimed run {run.id} (lease until {lease_until})")
-        return run
+        run_id = run.id
+        print(f"[WORKER] Claimed run {run_id} (lease until {lease_until})")
+        return run_id
     
     def _heartbeat(self, db: Session, run: DebateRun, config: DebateExecutionConfig):
         """Extend lease and update heartbeat."""
@@ -276,12 +275,18 @@ class DebateWorker:
         db.commit()
         print(f"[WORKER] Run {run.id} completed")
     
-    def process_run(self, run: DebateRun):
+    def process_run(self, run_id: int):
         """Process a single debate run through completion."""
-        self.current_run_id = run.id
+        self.current_run_id = run_id
         db = self._get_db()
         
         try:
+            # Fetch fresh run from this session
+            run = db.query(DebateRun).filter(DebateRun.id == run_id).first()
+            if not run:
+                print(f"[WORKER] Run {run_id} not found")
+                return
+            
             config = self._get_config(db)
             
             # Check cancel before starting
@@ -304,13 +309,19 @@ class DebateWorker:
                 self._complete_run(db, run)
                 
         except Exception as e:
-            print(f"[WORKER] Fatal error processing run {run.id}: {e}")
-            run.worker_status = "failed"
-            run.status = "failed"
-            run.error_type = "worker_fatal"
-            run.error_message = f"Worker fatal error: {type(e).__name__}"
-            run.completed_at = datetime.now(timezone.utc)
-            db.commit()
+            print(f"[WORKER] Fatal error processing run {run_id}: {e}")
+            # Try to mark as failed
+            try:
+                run = db.query(DebateRun).filter(DebateRun.id == run_id).first()
+                if run:
+                    run.worker_status = "failed"
+                    run.status = "failed"
+                    run.error_type = "worker_fatal"
+                    run.error_message = f"Worker fatal error: {type(e).__name__}"
+                    run.completed_at = datetime.now(timezone.utc)
+                    db.commit()
+            except:
+                pass
         finally:
             self.current_run_id = None
             db.close()
@@ -331,10 +342,11 @@ class DebateWorker:
                     continue
                 
                 # Try to claim a run
-                run = self._claim_run(db, config)
+                run_id = self._claim_run(db, config)
                 
-                if run:
-                    self.process_run(run)
+                if run_id:
+                    db.close()  # Close claiming session, process in new session
+                    self.process_run(run_id)
                 else:
                     # No runs available, sleep
                     db.close()
