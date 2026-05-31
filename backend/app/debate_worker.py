@@ -295,7 +295,6 @@ class DebateWorker:
             gen_start = run.generation_started_at
             if gen_start.tzinfo is None:
                 # Make it timezone-aware assuming UTC
-                from datetime import timezone
                 gen_start = gen_start.replace(tzinfo=timezone.utc)
             run.generation_duration_ms = int((now - gen_start).total_seconds() * 1000)
         db.commit()
