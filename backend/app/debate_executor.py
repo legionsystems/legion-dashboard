@@ -689,6 +689,9 @@ def execute_debate_run(
     run.execution_stage = "generating"
     db_session.flush()
     
+    print(f"[EXECUTE] Starting generation phase for run {run.id}")
+    print(f"[EXECUTE] Config: provider={config.provider}, base_url={config.base_url}, model={config.model}")
+    
     # Track all arguments for dialectic context
     all_arguments = []  # List of dicts with claim_id, side, role, content
     generation_error = None
@@ -699,7 +702,10 @@ def execute_debate_run(
         # Round 2+: PRO responds to CON -> CON responds to PRO -> PRO final reply
         turns_per_round = 3  # pro_opening, con_response, pro_reply
 
+        print(f"[EXECUTE] Starting {run.rounds_requested} rounds with {turns_per_round} turns each")
+        
         for round_num in range(1, run.rounds_requested + 1):
+            print(f"[EXECUTE] === Starting Round {round_num}/{run.rounds_requested} ===")
             # Get arguments from prior rounds for context
             prior_args = all_arguments.copy()
             
