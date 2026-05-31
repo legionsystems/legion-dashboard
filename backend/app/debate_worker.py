@@ -261,9 +261,13 @@ class DebateWorker:
             db.commit()
             return
         
+        # Convert DebateExecutionConfig to ExecutionConfig for execute_debate_run
+        from .debate_executor import ExecutionConfig, get_execution_config
+        exec_config = get_execution_config(db)
+        
         # Use existing execute_debate_run which persists progress
         try:
-            execute_debate_run(db, run, work_item, config)
+            execute_debate_run(db, run, work_item, exec_config)
         except Exception as e:
             print(f"[WORKER] Error executing run {run.id}: {e}")
             run.worker_status = "failed"
