@@ -4,13 +4,14 @@ Checks which APIs are available for a given provider.
 """
 import json
 import time
+from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
 from sqlalchemy.orm import Session
 
-from ..models import ModelHost
-from ..schemas import CapabilityCheckResult, ModelHostCapabilityTestResponse
+from app.models import ModelHost
+from app.schemas import CapabilityCheckResult, ModelHostCapabilityTestResponse
 
 
 def test_host_capabilities(host: ModelHost, db: Session, selected_model: Optional[str] = None) -> ModelHostCapabilityTestResponse:
