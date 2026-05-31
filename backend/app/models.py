@@ -176,6 +176,27 @@ class DebateRun(Base):
 
     error_message = Column(Text, nullable=True)
 
+    # Execution stage tracking (warming, running, etc.)
+    execution_stage = Column(String(20), nullable=True)  # queued | warming | running | completed | failed
+    warmup_started_at = Column(DateTime, nullable=True)
+    warmup_completed_at = Column(DateTime, nullable=True)
+    warmup_duration_ms = Column(Integer, nullable=True)
+    warmup_method = Column(String(50), nullable=True)  # ollama_native | openai_compatible_ping
+    warmup_error = Column(Text, nullable=True)
+    generation_started_at = Column(DateTime, nullable=True)
+    generation_completed_at = Column(DateTime, nullable=True)
+    generation_duration_ms = Column(Integer, nullable=True)
+    error_type = Column(String(50), nullable=True)  # model_warmup_timeout | model_warmup_failed | model_generation_timeout | model_read_timeout | model_provider_unreachable
+
+    # Cleanup/visibility controls
+    hidden_at = Column(DateTime, nullable=True)
+    hidden_by = Column(String(100), nullable=True)
+    hidden_reason = Column(Text, nullable=True)
+    hidden_category = Column(String(50), nullable=True)  # repeated_timeout | setup_failure | superseded | operator_cleanup | test_run
+    is_test_run = Column(Boolean, nullable=False, default=False)
+    superseded_by_run_id = Column(Integer, nullable=True)
+    cleanup_note = Column(Text, nullable=True)
+
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     completed_at = Column(DateTime, nullable=True)
 
@@ -202,7 +223,7 @@ class DebateArgument(Base):
     # Role names follow the spec: Product Owner, UX/Design Reviewer,
     # Technical Architect, Security/Privacy Reviewer, Builder,
     # Skeptic/Red Team, Final Arbiter, Operator (for operator-attached args).
-    role = Column(String(60), nullable=False)
+    role = Column(String(200), nullable=False)
     # pro | con | neutral | arbiter
     side = Column(String(20), nullable=False, default="neutral")
     content = Column(Text, nullable=False)
@@ -300,6 +321,15 @@ class DebateExecutionConfig(Base):
 
     # Security guards
     allow_cloud_endpoints = Column(Boolean, nullable=False, default=False)
+
+    # Model warmup settings
+    warm_model_before_debate = Column(Boolean, nullable=False, default=True)
+    warmup_timeout_seconds = Column(Integer, nullable=False, default=300)
+    keep_model_loaded_for = Column(String(20), nullable=False, default="1h")
+    fail_debate_if_warmup_fails = Column(Boolean, nullable=False, default=True)
+    
+    # Failed run display settings
+    visible_failed_runs_limit = Column(Integer, nullable=False, default=2)
 
     # Metadata
     notes = Column(Text, nullable=True)

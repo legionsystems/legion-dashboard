@@ -174,6 +174,13 @@ export default function Settings() {
     default_rounds: 2,
     allow_cloud_endpoints: false,
     notes: "",
+    // Warmup settings
+    warm_model_before_debate: true,
+    warmup_timeout_seconds: 300,
+    keep_model_loaded_for: "1h",
+    fail_debate_if_warmup_fails: true,
+    // Failed run display
+    visible_failed_runs_limit: 2,
   });
 
   useEffect(() => {
@@ -393,6 +400,58 @@ export default function Settings() {
           </Field>
           <Field label="Default Rounds" hint="1-5">
             <TextInput type="number" value={config.default_rounds} onChange={(v) => updateField("default_rounds", parseInt(v) || 0)} />
+          </Field>
+        </div>
+
+        <div className="border border-edge bg-canvas rounded p-3 mt-4">
+          <p className="font-mono uppercase tracking-telemetry text-[10px] text-fg-primary mb-2">Model Warmup</p>
+          <div className="grid grid-cols-2 gap-3 mb-3">
+            <div className="flex items-center justify-between p-2 border border-edge rounded">
+              <div>
+                <p className="font-mono text-[10px] text-fg-primary">Warm model before debate</p>
+                <p className="font-mono text-[9px] text-fg-muted mt-0.5">Load model first, then start debate timer</p>
+              </div>
+              <Toggle checked={config.warm_model_before_debate} onChange={(v) => updateField("warm_model_before_debate", v)} />
+            </div>
+            <div className="flex items-center justify-between p-2 border border-edge rounded">
+              <div>
+                <p className="font-mono text-[10px] text-fg-primary">Fail if warmup fails</p>
+                <p className="font-mono text-[9px] text-fg-muted mt-0.5">Stop debate if model won't load</p>
+              </div>
+              <Toggle checked={config.fail_debate_if_warmup_fails} onChange={(v) => updateField("fail_debate_if_warmup_fails", v)} />
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Warmup Timeout (seconds)" hint="Max time to wait for model load">
+              <TextInput type="number" value={config.warmup_timeout_seconds} onChange={(v) => updateField("warmup_timeout_seconds", parseInt(v) || 0)} />
+            </Field>
+            <Field label="Keep Model Loaded For" hint="How long to keep model resident">
+              <SelectInput
+                value={config.keep_model_loaded_for}
+                onChange={(v) => updateField("keep_model_loaded_for", v)}
+                options={[
+                  { value: "5m", label: "5 minutes" },
+                  { value: "30m", label: "30 minutes" },
+                  { value: "1h", label: "1 hour" },
+                  { value: "4h", label: "4 hours" },
+                ]}
+              />
+            </Field>
+          </div>
+        </div>
+
+        <div className="border border-edge bg-canvas rounded p-3 mt-4">
+          <p className="font-mono uppercase tracking-telemetry text-[10px] text-fg-primary mb-2">Failed Run Display</p>
+          <Field label="Visible failed debate attempts" hint="Show latest N failures, collapse older ones">
+            <SelectInput
+              value={config.visible_failed_runs_limit}
+              onChange={(v) => updateField("visible_failed_runs_limit", parseInt(v) || 2)}
+              options={[
+                { value: "1", label: "1 (show latest only)" },
+                { value: "2", label: "2 (recommended)" },
+                { value: "3", label: "3" },
+              ]}
+            />
           </Field>
         </div>
 

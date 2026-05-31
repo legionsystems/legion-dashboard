@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from ..database import get_db
@@ -28,8 +28,11 @@ from ..schemas import (
     BlockRequest,
     BulkArchiveRequest,
     BulkArchiveTestItemsRequest,
+    DebateRunBulkHideRequest,
     DebateRunCreate,
     DebateRunDetail,
+    DebateRunHideRequest,
+    DebateRunHideResponse,
     DebateRunSummary,
     FollowUpCreate,
     FollowUpResponse,
@@ -242,20 +245,6 @@ def create_follow_up(
 # ---------------------------------------------------------------------------
 
 
-@router.get(
-    "/{work_item_id}/debates",
-    response_model=List[DebateRunSummary],
-)
-def list_debate_runs(work_item_id: int, db: Session = Depends(get_db)):
-    _get_or_404(db, work_item_id)
-    return (
-        db.query(DebateRun)
-        .filter(DebateRun.work_item_id == work_item_id)
-        .order_by(DebateRun.id.desc())
-        .all()
-    )
-
-
 @router.post(
     "/{work_item_id}/debates",
     response_model=DebateRunDetail,
@@ -373,9 +362,10 @@ def get_debate_run(
     "/{work_item_id}/debates/{run_id}/execute",
     response_model=DebateRunDetail,
 )
-def execute_debate(
+async def execute_debate(
     work_item_id: int,
     run_id: int,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
     """Execute a queued or failed debate run.
@@ -385,6 +375,8 @@ def execute_debate(
 
     If already running, returns current status.
     If completed, returns existing result (does not re-execute).
+    
+    Execution happens in background - returns immediately with status='running'.
     """
     item = _get_or_404(db, work_item_id)
     run = (
@@ -416,11 +408,57 @@ def execute_debate(
     if run.status == "running":
         return run
 
-    # Execute the debate
-    execute_debate_run(db, run, item, config)
+    # Mark as running immediately so UI shows progress
+    run.status = "running"
+    run.model_route = f"{config.provider}:{config.model}"
+    run.provenance = f"executed via {config.redacted_base_url()}"
     db.commit()
+    
+    # Execute in background - pass only IDs and config values, not the session
+    background_tasks.add_task(_execute_debate_bg, run.id, item.id, config.provider, config.base_url, config.model, config.api_key, config.timeout_seconds, config.max_output_chars)
+    
     db.refresh(run)
     return run
+
+
+def _execute_debate_bg(run_id: int, work_item_id: int, provider: str, base_url: str, model: str, api_key: str, timeout_seconds: int, max_output_chars: int):
+    """Background task to execute debate run."""
+    from app.database import SessionLocal
+    from app.debate_executor import ExecutionConfig
+    from app.models import DebateRun, WorkItem
+    
+    # Fresh session for background task
+    db_session = SessionLocal()
+    try:
+        run = db_session.query(DebateRun).filter(DebateRun.id == run_id).first()
+        item = db_session.query(WorkItem).filter(WorkItem.id == work_item_id).first()
+        
+        if not run or not item:
+            return
+        
+        config = ExecutionConfig(
+            enabled=True,
+            provider=provider,
+            base_url=base_url,
+            model=model,
+            api_key=api_key,
+            timeout_seconds=timeout_seconds,
+            max_output_chars=max_output_chars,
+        )
+        
+        execute_debate_run(db_session, run, item, config)
+        db_session.commit()
+    except Exception as e:
+        db_session.rollback()
+        # Mark run as failed
+        run = db_session.query(DebateRun).filter(DebateRun.id == run_id).first()
+        if run:
+            run.status = "failed"
+            run.error_message = f"Background execution error: {type(e).__name__}: {str(e)[:500]}"
+            run.completed_at = datetime.utcnow()
+            db_session.commit()
+    finally:
+        db_session.close()
 
 
 @router.get(
@@ -435,6 +473,191 @@ def list_debate_inputs(work_item_id: int, db: Session = Depends(get_db)):
         .order_by(OperatorDebateInput.id.desc())
         .all()
     )
+
+
+# ---------------------------------------------------------------------------
+# Debate run cleanup/visibility endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/{work_item_id}/debates/{run_id}/hide",
+    response_model=DebateRunHideResponse,
+)
+def hide_debate_run(
+    work_item_id: int,
+    run_id: int,
+    payload: Optional[DebateRunHideRequest] = None,
+    db: Session = Depends(get_db),
+):
+    """Hide a debate run from default view.
+    
+    The run remains in the database and can be restored later.
+    Hidden runs are excluded from default list views.
+    """
+    _get_or_404(db, work_item_id)
+    run = db.query(DebateRun).filter(DebateRun.id == run_id, DebateRun.work_item_id == work_item_id).first()
+    if run is None:
+        raise HTTPException(status_code=404, detail="Debate run not found")
+    
+    if run.hidden_at:
+        raise HTTPException(status_code=400, detail="Debate run is already hidden")
+    
+    run.hidden_at = datetime.utcnow()
+    run.hidden_by = "operator"  # Could be extended to track actual user
+    if payload:
+        run.hidden_reason = payload.reason
+        run.hidden_category = payload.category
+    else:
+        run.hidden_category = "operator_cleanup"
+    
+    db.commit()
+    db.refresh(run)
+    
+    return DebateRunHideResponse(
+        id=run.id,
+        work_item_id=run.work_item_id,
+        status=run.status,
+        hidden_at=run.hidden_at,
+        hidden_by=run.hidden_by,
+        hidden_reason=run.hidden_reason,
+        hidden_category=run.hidden_category,
+    )
+
+
+@router.post(
+    "/{work_item_id}/debates/{run_id}/restore",
+    response_model=DebateRunHideResponse,
+)
+def restore_debate_run(
+    work_item_id: int,
+    run_id: int,
+    db: Session = Depends(get_db),
+):
+    """Restore a hidden debate run to default view."""
+    _get_or_404(db, work_item_id)
+    run = db.query(DebateRun).filter(DebateRun.id == run_id, DebateRun.work_item_id == work_item_id).first()
+    if run is None:
+        raise HTTPException(status_code=404, detail="Debate run not found")
+    
+    if not run.hidden_at:
+        raise HTTPException(status_code=400, detail="Debate run is not hidden")
+    
+    run.hidden_at = None
+    run.hidden_by = None
+    run.hidden_reason = None
+    run.hidden_category = None
+    
+    db.commit()
+    db.refresh(run)
+    
+    return DebateRunHideResponse(
+        id=run.id,
+        work_item_id=run.work_item_id,
+        status=run.status,
+        hidden_at=None,
+        hidden_by=None,
+        hidden_reason=None,
+        hidden_category=None,
+    )
+
+
+@router.post(
+    "/{work_item_id}/debates/bulk/hide-failed",
+    response_model=dict,
+)
+def bulk_hide_failed_debates(
+    work_item_id: int,
+    payload: Optional[DebateRunBulkHideRequest] = None,
+    db: Session = Depends(get_db),
+):
+    """Bulk hide failed debate runs for a work item.
+    
+    By default, keeps the latest failed run visible for reference.
+    Use older_than_run_id to hide only runs older than a specific run.
+    """
+    _get_or_404(db, work_item_id)
+    
+    # Get all failed runs for this work item
+    query = db.query(DebateRun).filter(
+        DebateRun.work_item_id == work_item_id,
+        DebateRun.status == "failed",
+        DebateRun.hidden_at.is_(None),  # Only hide non-hidden runs
+    )
+    
+    if payload and payload.older_than_run_id:
+        query = query.filter(DebateRun.id < payload.older_than_run_id)
+    
+    failed_runs = query.order_by(DebateRun.id.desc()).all()
+    
+    if not failed_runs:
+        return {
+            "hidden_count": 0,
+            "message": "No failed runs to hide",
+        }
+    
+    # Keep latest failed run if requested
+    keep_latest = payload.keep_latest_failed if payload else True
+    if keep_latest and len(failed_runs) > 1:
+        failed_runs = failed_runs[1:]  # Skip the most recent
+    
+    if not failed_runs:
+        return {
+            "hidden_count": 0,
+            "message": "No runs to hide after keeping latest",
+        }
+    
+    # Hide them
+    reason = payload.reason if payload and payload.reason else "Bulk hide of failed attempts"
+    for run in failed_runs:
+        run.hidden_at = datetime.utcnow()
+        run.hidden_by = "operator"
+        run.hidden_reason = reason
+        run.hidden_category = "repeated_timeout" if "timeout" in (run.error_message or "").lower() else "setup_failure"
+    
+    db.commit()
+    
+    return {
+        "hidden_count": len(failed_runs),
+        "hidden_run_ids": [r.id for r in failed_runs],
+        "message": f"Hidden {len(failed_runs)} failed debate runs",
+    }
+
+
+@router.get(
+    "/{work_item_id}/debates",
+    response_model=List[DebateRunSummary],
+)
+def list_debate_runs(
+    work_item_id: int,
+    view: str = Query("active", description="active|hidden|all"),
+    status: str = Query("all", description="queued|running|completed|failed|all"),
+    db: Session = Depends(get_db),
+):
+    """List debate runs for a work item with visibility filtering.
+    
+    view=active (default): Shows non-hidden runs
+    view=hidden: Shows only hidden runs
+    view=all: Shows all runs regardless of hidden status
+    
+    status filters by run status (all by default)
+    """
+    _get_or_404(db, work_item_id)
+    
+    query = db.query(DebateRun).filter(DebateRun.work_item_id == work_item_id)
+    
+    # Apply visibility filter
+    if view == "active":
+        query = query.filter(DebateRun.hidden_at.is_(None))
+    elif view == "hidden":
+        query = query.filter(DebateRun.hidden_at.is_not(None))
+    # view == "all" includes everything
+    
+    # Apply status filter
+    if status != "all":
+        query = query.filter(DebateRun.status == status)
+    
+    return query.order_by(DebateRun.id.desc()).all()
 
 
 @router.post(

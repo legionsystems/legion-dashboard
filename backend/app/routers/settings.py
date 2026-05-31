@@ -1,18 +1,21 @@
 """Debate execution settings router — UI-managed configuration."""
+import time
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..models import DebateExecutionConfig
+from ..models import DebateExecutionConfig, ModelHost
 from ..schemas import (
     DebateExecutionConfigResponse,
     DebateExecutionConfigUpdate,
     DebateExecutionTestRequest,
     DebateExecutionTestResponse,
+    ModelWarmupRequest,
+    ModelWarmupResponse,
 )
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
@@ -103,6 +106,10 @@ def get_debate_execution_config(db: Session = Depends(get_db)):
         max_output_chars=config.max_output_chars,
         default_rounds=config.default_rounds,
         allow_cloud_endpoints=config.allow_cloud_endpoints,
+        warm_model_before_debate=config.warm_model_before_debate,
+        warmup_timeout_seconds=config.warmup_timeout_seconds,
+        keep_model_loaded_for=config.keep_model_loaded_for,
+        fail_debate_if_warmup_fails=config.fail_debate_if_warmup_fails,
         notes=config.notes,
         updated_at=config.updated_at,
     )
@@ -188,6 +195,16 @@ def update_debate_execution_config(
         config.default_rounds = payload.default_rounds
     if payload.allow_cloud_endpoints is not None:
         config.allow_cloud_endpoints = payload.allow_cloud_endpoints
+    if payload.warm_model_before_debate is not None:
+        config.warm_model_before_debate = payload.warm_model_before_debate
+    if payload.warmup_timeout_seconds is not None:
+        config.warmup_timeout_seconds = payload.warmup_timeout_seconds
+    if payload.keep_model_loaded_for is not None:
+        config.keep_model_loaded_for = payload.keep_model_loaded_for
+    if payload.fail_debate_if_warmup_fails is not None:
+        config.fail_debate_if_warmup_fails = payload.fail_debate_if_warmup_fails
+    if payload.visible_failed_runs_limit is not None:
+        config.visible_failed_runs_limit = payload.visible_failed_runs_limit
     if payload.notes is not None:
         config.notes = payload.notes
 
@@ -216,6 +233,11 @@ def update_debate_execution_config(
         max_output_chars=config.max_output_chars,
         default_rounds=config.default_rounds,
         allow_cloud_endpoints=config.allow_cloud_endpoints,
+        warm_model_before_debate=bool(config.warm_model_before_debate),
+        warmup_timeout_seconds=int(config.warmup_timeout_seconds),
+        keep_model_loaded_for=str(config.keep_model_loaded_for),
+        fail_debate_if_warmup_fails=bool(config.fail_debate_if_warmup_fails),
+        visible_failed_runs_limit=int(config.visible_failed_runs_limit),
         notes=config.notes,
         updated_at=config.updated_at,
     )
@@ -314,3 +336,193 @@ def test_debate_execution_connection(
             model=model,
             error=f"Unexpected error: {type(e).__name__}",
         )
+
+
+# ---------------------------------------------------------------------------
+# Model warmup endpoints
+# ---------------------------------------------------------------------------
+
+
+def _derive_ollama_native_url(base_url: str) -> str:
+    """Derive native Ollama API URL from OpenAI-compatible base.
+    
+    http://ai-4080:11434/v1 -> http://ai-4080:11434/api/chat
+    """
+    url = base_url.rstrip("/")
+    if url.endswith("/v1"):
+        return url[:-3] + "/api/chat"
+    return url
+
+
+@router.post("/model-hosts/{host_id}/models/{model_id}/warm", response_model=ModelWarmupResponse)
+def warm_model(
+    host_id: int,
+    model_id: str,
+    payload: ModelWarmupRequest,
+    db: Session = Depends(get_db),
+):
+    """Warm up a specific model on a model host.
+    
+    For Ollama endpoints, uses native /api/chat with empty messages.
+    For other OpenAI-compatible endpoints, uses a minimal completion ping.
+    """
+    import httpx
+    
+    host = db.query(ModelHost).filter(ModelHost.id == host_id).first()
+    if host is None:
+        raise HTTPException(status_code=404, detail="Model host not found")
+    
+    if not host.enabled:
+        return ModelWarmupResponse(
+            success=False,
+            model=model_id,
+            warmup_method="skipped",
+            error="Host is disabled",
+        )
+    
+    # Cloud endpoint guard
+    is_cloud = not _is_local_endpoint(host.base_url)
+    if is_cloud and not host.allow_cloud_endpoints:
+        return ModelWarmupResponse(
+            success=False,
+            model=model_id,
+            warmup_method="skipped",
+            error="Cloud endpoints require allow_cloud_endpoints=true",
+        )
+    
+    base_url = host.base_url
+    timeout = payload.timeout_seconds or 300
+    keep_alive = payload.keep_alive or "1h"
+    
+    # Derive native Ollama URL if applicable
+    is_ollama_native = "ollama" in host.provider.lower() or "11434" in base_url
+    
+    try:
+        start = time.time()
+        
+        if is_ollama_native:
+            # Native Ollama warmup: POST /api/chat with empty messages
+            warmup_url = _derive_ollama_native_url(base_url)
+            warmup_payload = {
+                "model": model_id,
+                "messages": [],
+                "keep_alive": keep_alive,
+            }
+            headers = {"Content-Type": "application/json"}
+            if host.api_key:
+                headers["Authorization"] = f"Bearer {host.api_key}"
+            
+            with httpx.Client(timeout=timeout) as client:
+                response = client.post(warmup_url, headers=headers, json=warmup_payload)
+                response.raise_for_status()
+            
+            warmup_method = "ollama_native"
+        else:
+            # OpenAI-compatible ping
+            warmup_url = base_url.rstrip("/") + "/chat/completions"
+            warmup_payload = {
+                "model": model_id,
+                "messages": [{"role": "user", "content": "OK"}],
+                "max_tokens": 1,
+            }
+            headers = {"Content-Type": "application/json"}
+            if host.api_key:
+                headers["Authorization"] = f"Bearer {host.api_key}"
+            
+            with httpx.Client(timeout=timeout) as client:
+                response = client.post(warmup_url, headers=headers, json=warmup_payload)
+                response.raise_for_status()
+            
+            warmup_method = "openai_compatible_ping"
+        
+        latency_ms = int((time.time() - start) * 1000)
+        
+        return ModelWarmupResponse(
+            success=True,
+            provider=host.provider,
+            base_url_host=_redact_url_host(base_url),
+            model=model_id,
+            warmup_method=warmup_method,
+            latency_ms=latency_ms,
+        )
+        
+    except httpx.TimeoutException:
+        return ModelWarmupResponse(
+            success=False,
+            provider=host.provider,
+            base_url_host=_redact_url_host(base_url),
+            model=model_id,
+            warmup_method="ollama_native" if is_ollama_native else "openai_compatible_ping",
+            error="Warmup timeout",
+        )
+    except httpx.ConnectError as e:
+        return ModelWarmupResponse(
+            success=False,
+            provider=host.provider,
+            base_url_host=_redact_url_host(base_url),
+            model=model_id,
+            warmup_method="ollama_native" if is_ollama_native else "openai_compatible_ping",
+            error=f"Connection failed: {str(e)[:100]}",
+        )
+    except httpx.HTTPStatusError as e:
+        return ModelWarmupResponse(
+            success=False,
+            provider=host.provider,
+            base_url_host=_redact_url_host(base_url),
+            model=model_id,
+            warmup_method="ollama_native" if is_ollama_native else "openai_compatible_ping",
+            error=f"HTTP {e.response.status_code}: {str(e)[:100]}",
+        )
+    except Exception as e:
+        return ModelWarmupResponse(
+            success=False,
+            provider=host.provider,
+            base_url_host=_redact_url_host(base_url),
+            model=model_id,
+            warmup_method="ollama_native" if is_ollama_native else "openai_compatible_ping",
+            error=f"Unexpected error: {type(e).__name__}",
+        )
+
+
+@router.get("/model-hosts/{host_id}/loaded-models", response_model=List[str])
+def get_loaded_models(
+    host_id: int,
+    db: Session = Depends(get_db),
+):
+    """Get currently loaded models on an Ollama host.
+    
+    Calls GET /api/ps on Ollama native endpoints.
+    Returns empty list for non-Ollama endpoints or on error.
+    """
+    import httpx
+    
+    host = db.query(ModelHost).filter(ModelHost.id == host_id).first()
+    if host is None:
+        raise HTTPException(status_code=404, detail="Model host not found")
+    
+    if not host.enabled:
+        return []
+    
+    # Only works for Ollama native
+    is_ollama = "ollama" in host.provider.lower() or "11434" in host.base_url
+    if not is_ollama:
+        return []
+    
+    # Derive base URL (strip /v1 if present)
+    base_url = host.base_url.rstrip("/")
+    if base_url.endswith("/v1"):
+        base_url = base_url[:-3]
+    
+    ps_url = base_url + "/api/ps"
+    
+    try:
+        with httpx.Client(timeout=10) as client:
+            response = client.get(ps_url)
+            response.raise_for_status()
+            data = response.json()
+        
+        # Ollama /api/ps returns {"models": [{"name": "...", ...}, ...]}
+        models = data.get("models", [])
+        return [m.get("name", "") for m in models if m.get("name")]
+    except Exception:
+        return []

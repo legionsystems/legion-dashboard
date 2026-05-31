@@ -11,6 +11,7 @@ from .config import settings
 from .database import Base, SessionLocal, engine
 from .models import App
 from .routers import apps, model_hosts as model_hosts_router, settings as settings_router, stats, work_items
+from .routers import debate_cleanup
 
 Base.metadata.create_all(bind=engine)
 
@@ -65,6 +66,7 @@ app.include_router(stats.router)
 app.include_router(apps.router)
 app.include_router(settings_router.router)
 app.include_router(model_hosts_router.router)
+app.include_router(debate_cleanup.router)
 
 # Serve built frontend SPA from /app/frontend/dist in container
 # In dev, this path may not exist; in Docker, it's copied from the build stage

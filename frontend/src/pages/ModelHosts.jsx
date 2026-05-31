@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { getJson, postJson, putJson } from "../api/client.js";
 
 function Section({ title, children }) {
@@ -208,6 +209,7 @@ function HostCard({ host, onEdit, onTest, onRefresh, onDelete }) {
 }
 
 export default function ModelHosts({ onBack }) {
+  const navigate = useNavigate();
   const [hosts, setHosts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(null);
@@ -429,7 +431,7 @@ export default function ModelHosts({ onBack }) {
       </Section>
 
       <div className="mt-4">
-        <Button onClick={onBack} variant="secondary">Back to Settings</Button>
+        <Button onClick={() => navigate("/settings")} variant="secondary">Back to Settings</Button>
       </div>
     </div>
   );
