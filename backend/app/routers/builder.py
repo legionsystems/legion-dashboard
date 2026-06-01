@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from ..database import get_db
+from ..builder_status_projection import sync_work_item_status_from_builder
 from ..models import BuilderTask, WorkItem
 from ..schemas_builder import BuilderTaskResponse, SendToBuilderRequest
 
@@ -283,6 +284,13 @@ def _create_builder_task(db: Session, work_item_id: int, request: SendToBuilderR
     db.commit()
     db.refresh(builder_task)
     
+    # Project Hermes status to Work Item status (reusable lifecycle transition)
+    sync_work_item_status_from_builder(
+        db,
+        builder_task.work_item_id,  # type: ignore[arg-type]
+        builder_task.hermes_status,  # type: ignore[arg-type]
+    )
+    
     return builder_task
 
 
@@ -426,5 +434,12 @@ def sync_builder_task(
     
     db.commit()
     db.refresh(builder_task)
+    
+    # Project Hermes status to Work Item status (reusable lifecycle transition)
+    sync_work_item_status_from_builder(
+        db,
+        builder_task.work_item_id,  # type: ignore[arg-type]
+        builder_task.hermes_status,  # type: ignore[arg-type]
+    )
     
     return builder_task
