@@ -200,18 +200,19 @@ def list_work_items(
     type: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
     view: str = Query("active", description="active|archived|all"),
-    generated: str = Query("human", description="human|system|test|all"),
+    generated: str = Query("all", description="human|system|test|all"),
+    app: Optional[str] = Query(None, description="Filter by target app (app_id value)"),
     db: Session = Depends(get_db),
 ):
     query = db.query(WorkItem)
-    
+
     # Archive view filter
     if view == "active":
         query = query.filter(WorkItem.archived == False)
     elif view == "archived":
         query = query.filter(WorkItem.archived == True)
     # view == "all" includes both
-    
+
     # Generated/test filter
     if generated == "human":
         query = query.filter(WorkItem.is_system_generated == False, WorkItem.is_test_item == False)
@@ -220,13 +221,31 @@ def list_work_items(
     elif generated == "test":
         query = query.filter(WorkItem.is_test_item == True)
     # generated == "all" includes everything
-    
+
     if type is not None:
         query = query.filter(WorkItem.type == type)
     if status is not None:
         query = query.filter(WorkItem.status == status)
+    if app is not None:
+        if app == "__unassigned__":
+            query = query.filter(WorkItem.target_app.is_(None))
+        else:
+            query = query.filter(WorkItem.target_app == app)
     items = query.order_by(WorkItem.id.desc()).all()
     return _serialize_many_with_debate(db, items)
+
+
+@router.get("/apps", response_model=List[str])
+def list_work_item_apps(db: Session = Depends(get_db)):
+    """Return distinct non-null target_app values from work items."""
+    rows = (
+        db.query(WorkItem.target_app)
+        .filter(WorkItem.target_app.isnot(None))
+        .distinct()
+        .order_by(WorkItem.target_app)
+        .all()
+    )
+    return [row[0] for row in rows]
 
 
 @router.post("", response_model=WorkItemResponse, status_code=status.HTTP_201_CREATED)
