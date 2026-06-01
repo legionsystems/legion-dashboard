@@ -44,25 +44,26 @@ from sqlalchemy.orm import Session
 from .models import BuilderTask, WorkItem
 
 # Hermes status → Work Item status projection map
+# Maps to statuses that exist in frontend/src/components/badges.jsx STATUS_META
 HERMES_TO_WORK_ITEM_STATUS: Dict[str, str] = {
     "triage": "approved",      # Awaiting builder start
     "todo": "approved",        # Queued for builder
     "ready": "approved",       # Ready to build
     "scheduled": "approved",   # Scheduled for build
-    "running": "building",     # Implementation in progress
-    "review": "review",        # Implementation complete, awaiting review
-    "done": "implemented",     # Fully complete
+    "running": "active",       # Implementation in progress (something is being done)
+    "review": "review_needed", # Implementation complete, awaiting review
+    "done": "completed",       # Fully complete
     "blocked": "blocked",      # Blocked during build
-    "archived": "archived",    # Archived
+    "archived": "blocked",     # Archived (closest existing status)
 }
 
 # Work Item statuses that indicate build lifecycle
+# These must match statuses defined in frontend/src/components/badges.jsx STATUS_META
 BUILD_LIFECYCLE_STATUSES = frozenset({
-    "building",
-    "review",
-    "implemented",
+    "active",
+    "review_needed",
+    "completed",
     "blocked",
-    "archived",
 })
 
 
