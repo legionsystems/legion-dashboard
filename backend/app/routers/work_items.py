@@ -362,7 +362,7 @@ import uuid
 from pathlib import Path
 
 # Configurable via env vars with sensible defaults
-ATTACHMENT_STORAGE_PATH = Path(os.environ.get("ATTACHMENT_STORAGE_PATH", "/var/lib/legion-dashboard/attachments"))
+ATTACHMENT_STORAGE_PATH = Path(os.environ.get("ATTACHMENT_STORAGE_PATH", "/app/attachments"))
 ATTACHMENT_MAX_FILE_SIZE = int(os.environ.get("ATTACHMENT_MAX_FILE_SIZE", str(10 * 1024 * 1024)))  # 10 MB
 ATTACHMENT_ALLOWED_TYPES = {
     "image/png": ".png",
@@ -422,13 +422,27 @@ async def upload_attachment(
 
     # Validate file size
     file_size = len(content)
+    if file_size == 0:
+        raise HTTPException(status_code=400, detail="Empty file")
     if file_size > ATTACHMENT_MAX_FILE_SIZE:
         raise HTTPException(
             status_code=413,
             detail=f"File too large: {file_size} bytes. Maximum: {ATTACHMENT_MAX_FILE_SIZE} bytes ({ATTACHMENT_MAX_FILE_SIZE // (1024*1024)} MB).",
         )
-    if file_size == 0:
-        raise HTTPException(status_code=400, detail="Empty file")
+
+    # Magic-byte validation: ensure the file's actual bytes match the declared content type.
+    # Defends against clients spoofing content_type to slip disallowed payloads past the
+    # MIME-only check above.
+    _MAGIC_BYTES = {
+        "image/png": (0, bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])),
+        "image/jpeg": (0, bytes([0xFF, 0xD8, 0xFF])),
+        "image/gif": (0, bytes([0x47, 0x49, 0x46])),
+        "image/webp": (4, bytes([0x57, 0x45, 0x42, 0x50])),
+        "application/pdf": (0, bytes([0x25, 0x50, 0x44, 0x46, 0x2D])),
+    }
+    offset, signature = _MAGIC_BYTES[content_type]
+    if len(content) < offset + len(signature) or content[offset:offset + len(signature)] != signature:
+        raise HTTPException(status_code=400, detail="File content does not match declared type")
 
     # Sanitize filename: strip path components, limit length
     original_filename = os.path.basename(file.filename or "attachment")
@@ -458,7 +472,17 @@ async def upload_attachment(
         storage_path=str(storage_path),
     )
     db.add(attachment)
-    db.commit()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        # Roll back the filesystem side too so we don't leave an orphan blob.
+        try:
+            if storage_path.exists():
+                storage_path.unlink()
+        except OSError:
+            pass
+        raise HTTPException(status_code=500, detail="Failed to save attachment record")
     db.refresh(attachment)
     return attachment
 

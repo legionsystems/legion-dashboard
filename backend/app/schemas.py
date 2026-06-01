@@ -121,7 +121,6 @@ class AttachmentResponse(BaseModel):
     original_filename: str
     content_type: str
     file_size: int
-    storage_path: str
     created_at: datetime
 
 

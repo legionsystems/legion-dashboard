@@ -189,7 +189,9 @@ def test_delete_attachment(client):
             files={"file": ("delete_me.png", io.BytesIO(png_bytes), "image/png")},
         )
     att_id = upload_resp.json()["id"]
-    storage_path = upload_resp.json()["storage_path"]
+    files = list(storage_dir.iterdir())
+    assert len(files) == 1
+    storage_path = str(files[0])
 
     # Verify file exists
     assert os.path.exists(storage_path)
@@ -231,9 +233,6 @@ def test_upload_attachment_sanitizes_path_traversal(client):
     data = response.json()
     # Should be sanitized to just the filename portion
     assert data["original_filename"] == "passwd.png"
-    # Storage path should be within the attachment directory
-    storage_path = Path(data["storage_path"])
-    assert "passwd.png" not in str(storage_path.parent)
 
 
 def test_work_item_creation_still_works(client):
