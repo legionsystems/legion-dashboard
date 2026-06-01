@@ -107,6 +107,23 @@ class WorkItemClassificationUpdate(BaseModel):
     tags: Optional[str] = None
 
 
+# ---------------------------------------------------------------------------
+# Attachment schemas
+# ---------------------------------------------------------------------------
+
+
+class AttachmentResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    work_item_id: int
+    filename: str
+    original_filename: str
+    content_type: str
+    file_size: int
+    created_at: datetime
+
+
 class BulkArchiveRequest(BaseModel):
     """Request body for bulk archiving work items."""
     ids: List[int]

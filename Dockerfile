@@ -40,6 +40,8 @@ COPY backend/ ./backend/
 COPY --from=frontend-build /build/frontend/dist ./frontend/dist
 
 RUN chown -R app:app /app
+RUN mkdir -p /app/attachments && chown app:app /app/attachments
+VOLUME ["/app/attachments"]
 USER app
 
 WORKDIR /app/backend

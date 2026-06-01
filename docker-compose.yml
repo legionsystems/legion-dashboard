@@ -26,6 +26,7 @@ services:
       - /srv/repo:/srv/repo:ro
       - /var/run/docker.sock:/var/run/docker.sock
       - /srv/repo/legion-dashboard/.hermes-config.yaml:/app/.hermes/config.yaml:ro  # Hermes config (copied for container access)
+      - app-attachments:/app/attachments
     group_add:
       - docker
     environment:
@@ -57,3 +58,4 @@ services:
 
 volumes:
   db-data:
+  app-attachments:

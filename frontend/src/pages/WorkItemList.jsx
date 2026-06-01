@@ -94,10 +94,18 @@ export default function WorkItemList() {
   const [type, setType] = useState("");
   const [status, setStatus] = useState("");
   const [view, setView] = useState("active"); // active | archived | all
-  const [generated, setGenerated] = useState("human"); // human | system | test | all
+  const [generated, setGenerated] = useState("all"); // human | system | test | all
+  const [app, setApp] = useState(""); // "" = All | app_id | __unassigned__
   const [query, setQuery] = useState("");
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [apps, setApps] = useState([]);
+
+  useEffect(() => {
+    getJson("/work-items/apps")
+      .then((data) => setApps(data))
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     const params = new URLSearchParams();
@@ -105,6 +113,7 @@ export default function WorkItemList() {
     if (status) params.set("status", status);
     if (view) params.set("view", view);
     if (generated) params.set("generated", generated);
+    if (app) params.set("app", app);
     const qs = params.toString();
     setLoading(true);
     let cancelled = false;
@@ -120,7 +129,7 @@ export default function WorkItemList() {
     return () => {
       cancelled = true;
     };
-  }, [type, status, view, generated]);
+  }, [type, status, view, generated, app]);
 
   const statusCounts = useMemo(() => {
     // counts reflect currently-loaded set (server already filtered by status if applied)
@@ -317,6 +326,20 @@ export default function WorkItemList() {
               />
             ))}
           </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="label-tel">APP:</span>
+          <select
+            value={app}
+            onChange={(e) => setApp(e.target.value)}
+            className="bg-surface border border-edge font-mono uppercase tracking-telemetry text-[11px] text-fg-secondary px-2 py-1 outline-none"
+          >
+            <option value="">ALL</option>
+            <option value="__unassigned__">NO APP</option>
+            {apps.map((a) => (
+              <option key={a} value={a}>{a.toUpperCase()}</option>
+            ))}
+          </select>
         </div>
       </div>
 

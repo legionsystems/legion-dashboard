@@ -49,6 +49,7 @@ class BuilderTask(Base):
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
     completed_at = Column(DateTime, nullable=True)
+    is_valid = Column(Boolean, nullable=True, default=True)  # Marks contaminated/test records invalid
     
     # Work item relationship
     work_item = relationship("WorkItem", back_populates="builder_tasks")

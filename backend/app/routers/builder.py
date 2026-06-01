@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from ..database import get_db
+from ..builder_status_projection import sync_work_item_status_from_builder
 from ..models import BuilderTask, WorkItem
 from ..schemas_builder import BuilderTaskResponse, SendToBuilderRequest
 
@@ -283,6 +284,13 @@ def _create_builder_task(db: Session, work_item_id: int, request: SendToBuilderR
     db.commit()
     db.refresh(builder_task)
     
+    # Project Hermes status to Work Item status (reusable lifecycle transition)
+    sync_work_item_status_from_builder(
+        db,
+        builder_task.work_item_id,  # type: ignore[arg-type]
+        builder_task.hermes_status,  # type: ignore[arg-type]
+    )
+    
     return builder_task
 
 
@@ -388,7 +396,16 @@ def sync_builder_task(
             return builder_task  # Keep existing data
     
     # Update local record with all available Hermes task fields
-    task = hermes_data.get("task", hermes_data)
+    # Bridge returns: {"task": {"task": {...}, "latest_summary": ..., "events": ..., "runs": ...}}
+    # The inner "task" object contains the actual task fields (id, status, assignee, etc.)
+    outer_task = hermes_data.get("task", hermes_data)
+    if isinstance(outer_task, dict):
+        # Check if this is the nested structure from the bridge
+        if "task" in outer_task and isinstance(outer_task["task"], dict):
+            task = outer_task["task"]  # Inner task object with status, assignee, etc.
+        else:
+            task = outer_task
+    
     if isinstance(task, dict):
         builder_task.hermes_status = task.get("status", builder_task.hermes_status)
         builder_task.last_known_hermes_status = task.get("status")
@@ -417,5 +434,12 @@ def sync_builder_task(
     
     db.commit()
     db.refresh(builder_task)
+    
+    # Project Hermes status to Work Item status (reusable lifecycle transition)
+    sync_work_item_status_from_builder(
+        db,
+        builder_task.work_item_id,  # type: ignore[arg-type]
+        builder_task.hermes_status,  # type: ignore[arg-type]
+    )
     
     return builder_task

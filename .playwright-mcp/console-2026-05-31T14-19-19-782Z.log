@@ -1,0 +1,87 @@
+[     257ms] [LOG] [DebatePanel] Refresh completed, runs: 16 expandedId: null @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[     257ms] [LOG] [DebatePanel] Auto-expanding latest run: 40 @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[     257ms] [LOG] [DebatePanel] hasActiveExecution: true pollingInterval: none @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[     258ms] [LOG] [DebatePanel] Started polling @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[     263ms] [LOG] [DebateRunCard] useEffect - expanded: false run.id: 39 detail: null @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[     263ms] [LOG] [DebateRunCard] Collapsing, clearing detail @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[     264ms] [LOG] [DebateRunCard] useEffect - expanded: true run.id: 40 detail: null @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[     264ms] [LOG] [DebateRunCard] Fetching detail for run 40 @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[     265ms] [LOG] [DebateRunCard] useEffect - expanded: false run.id: 38 detail: null @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[     265ms] [LOG] [DebateRunCard] Collapsing, clearing detail @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[     277ms] [LOG] [DebateRunCard] Detail fetched successfully, arguments: 0 @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[    2266ms] [LOG] [DebatePanel] Refresh completed, runs: 16 expandedId: null @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[    2267ms] [LOG] [DebatePanel] Auto-expanding latest run: 40 @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[    2267ms] [LOG] [DebatePanel] hasActiveExecution: true pollingInterval: none @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[    2267ms] [LOG] [DebatePanel] Started polling @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[    4276ms] [LOG] [DebatePanel] Refresh completed, runs: 16 expandedId: null @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[    4276ms] [LOG] [DebatePanel] Auto-expanding latest run: 40 @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[    4276ms] [LOG] [DebatePanel] hasActiveExecution: true pollingInterval: none @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[    4276ms] [LOG] [DebatePanel] Started polling @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[    6284ms] [LOG] [DebatePanel] Refresh completed, runs: 16 expandedId: null @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[    6284ms] [LOG] [DebatePanel] Auto-expanding latest run: 40 @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[    6284ms] [LOG] [DebatePanel] hasActiveExecution: true pollingInterval: none @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[    6284ms] [LOG] [DebatePanel] Started polling @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[    8293ms] [LOG] [DebatePanel] Refresh completed, runs: 16 expandedId: null @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[    8294ms] [LOG] [DebatePanel] Auto-expanding latest run: 40 @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[    8294ms] [LOG] [DebatePanel] hasActiveExecution: true pollingInterval: none @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[    8294ms] [LOG] [DebatePanel] Started polling @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   10302ms] [LOG] [DebatePanel] Refresh completed, runs: 16 expandedId: null @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   10302ms] [LOG] [DebatePanel] Auto-expanding latest run: 40 @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   10302ms] [LOG] [DebatePanel] hasActiveExecution: true pollingInterval: none @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   10303ms] [LOG] [DebatePanel] Started polling @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   12312ms] [LOG] [DebatePanel] Refresh completed, runs: 16 expandedId: null @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   12312ms] [LOG] [DebatePanel] Auto-expanding latest run: 40 @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   12312ms] [LOG] [DebatePanel] hasActiveExecution: true pollingInterval: none @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   12312ms] [LOG] [DebatePanel] Started polling @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   14323ms] [LOG] [DebatePanel] Refresh completed, runs: 16 expandedId: null @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   14323ms] [LOG] [DebatePanel] Auto-expanding latest run: 40 @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   14323ms] [LOG] [DebatePanel] hasActiveExecution: true pollingInterval: none @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   14324ms] [LOG] [DebatePanel] Started polling @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   16331ms] [LOG] [DebatePanel] Refresh completed, runs: 16 expandedId: null @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   16331ms] [LOG] [DebatePanel] Auto-expanding latest run: 40 @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   16331ms] [LOG] [DebatePanel] hasActiveExecution: true pollingInterval: none @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   16331ms] [LOG] [DebatePanel] Started polling @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   18340ms] [LOG] [DebatePanel] Refresh completed, runs: 16 expandedId: null @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   18340ms] [LOG] [DebatePanel] Auto-expanding latest run: 40 @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   18340ms] [LOG] [DebatePanel] hasActiveExecution: true pollingInterval: none @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   18340ms] [LOG] [DebatePanel] Started polling @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   20348ms] [LOG] [DebatePanel] Refresh completed, runs: 16 expandedId: null @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   20348ms] [LOG] [DebatePanel] Auto-expanding latest run: 40 @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   20349ms] [LOG] [DebatePanel] hasActiveExecution: true pollingInterval: none @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   20349ms] [LOG] [DebatePanel] Started polling @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   22357ms] [LOG] [DebatePanel] Refresh completed, runs: 16 expandedId: null @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   22357ms] [LOG] [DebatePanel] Auto-expanding latest run: 40 @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   22357ms] [LOG] [DebatePanel] hasActiveExecution: true pollingInterval: none @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   22357ms] [LOG] [DebatePanel] Started polling @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   24367ms] [LOG] [DebatePanel] Refresh completed, runs: 16 expandedId: null @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   24367ms] [LOG] [DebatePanel] Auto-expanding latest run: 40 @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   24367ms] [LOG] [DebatePanel] hasActiveExecution: true pollingInterval: none @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   24367ms] [LOG] [DebatePanel] Started polling @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   26374ms] [LOG] [DebatePanel] Refresh completed, runs: 16 expandedId: null @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   26374ms] [LOG] [DebatePanel] Auto-expanding latest run: 40 @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   26374ms] [LOG] [DebatePanel] hasActiveExecution: true pollingInterval: none @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   26374ms] [LOG] [DebatePanel] Started polling @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   28383ms] [LOG] [DebatePanel] Refresh completed, runs: 16 expandedId: null @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   28383ms] [LOG] [DebatePanel] Auto-expanding latest run: 40 @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   28383ms] [LOG] [DebatePanel] hasActiveExecution: true pollingInterval: none @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   28383ms] [LOG] [DebatePanel] Started polling @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   30393ms] [LOG] [DebatePanel] Refresh completed, runs: 16 expandedId: null @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   30393ms] [LOG] [DebatePanel] Auto-expanding latest run: 40 @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   30393ms] [LOG] [DebatePanel] hasActiveExecution: true pollingInterval: none @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   30393ms] [LOG] [DebatePanel] Started polling @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   32401ms] [LOG] [DebatePanel] Refresh completed, runs: 16 expandedId: null @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   32401ms] [LOG] [DebatePanel] Auto-expanding latest run: 40 @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   32401ms] [LOG] [DebatePanel] hasActiveExecution: true pollingInterval: none @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   32401ms] [LOG] [DebatePanel] Started polling @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   34408ms] [LOG] [DebatePanel] Refresh completed, runs: 16 expandedId: null @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   34408ms] [LOG] [DebatePanel] Auto-expanding latest run: 40 @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   34408ms] [LOG] [DebatePanel] hasActiveExecution: true pollingInterval: none @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   34408ms] [LOG] [DebatePanel] Started polling @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   36418ms] [LOG] [DebatePanel] Refresh completed, runs: 16 expandedId: null @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   36418ms] [LOG] [DebatePanel] Auto-expanding latest run: 40 @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   36418ms] [LOG] [DebatePanel] hasActiveExecution: true pollingInterval: none @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   36418ms] [LOG] [DebatePanel] Started polling @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   38428ms] [LOG] [DebatePanel] Refresh completed, runs: 16 expandedId: null @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   38428ms] [LOG] [DebatePanel] Auto-expanding latest run: 40 @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   38428ms] [LOG] [DebatePanel] hasActiveExecution: true pollingInterval: none @ http://localhost:8720/assets/index-DH_gySZr.js:66
+[   38428ms] [LOG] [DebatePanel] Started polling @ http://localhost:8720/assets/index-DH_gySZr.js:66

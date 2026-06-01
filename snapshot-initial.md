@@ -1,0 +1,237 @@
+- generic [ref=e3]:
+  - complementary [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e6]:
+        - generic [ref=e7]: LEGION
+        - generic [ref=e8]: ®
+      - generic [ref=e9]: CONTROL PLANE / v0.1
+    - navigation [ref=e10]:
+      - link "> DASHBOARD" [ref=e11] [cursor=pointer]:
+        - /url: /
+        - generic [ref=e12]: ">"
+        - generic [ref=e13]: DASHBOARD
+      - link "# WORK ITEMS" [ref=e14] [cursor=pointer]:
+        - /url: /work-items
+        - generic [ref=e15]: "#"
+        - generic [ref=e16]: WORK ITEMS
+      - link "◉ APPS" [ref=e17] [cursor=pointer]:
+        - /url: /apps
+        - generic [ref=e18]: ◉
+        - generic [ref=e19]: APPS
+      - link "⚙ SETTINGS" [ref=e20] [cursor=pointer]:
+        - /url: /settings
+        - generic [ref=e21]: ⚙
+        - generic [ref=e22]: SETTINGS
+    - generic [ref=e23]:
+      - generic [ref=e24]: UNIT / D-01
+      - generic [ref=e25]: REV 0.1.0
+  - generic [ref=e26]:
+    - banner [ref=e27]:
+      - generic [ref=e28]:
+        - generic [ref=e29]: "["
+        - list [ref=e30]:
+          - listitem [ref=e31]:
+            - generic [ref=e32]: WORK ITEMS
+          - listitem [ref=e33]:
+            - generic [ref=e34]: /
+            - generic [ref=e35]: "#2"
+        - generic [ref=e36]: "]"
+      - generic [ref=e37]:
+        - generic [ref=e38]: 2026-05-31 14:19:22Z
+        - generic [ref=e41]: ONLINE
+    - main [ref=e42]:
+      - generic [ref=e44]:
+        - link "← BACK TO REGISTRY" [ref=e56] [cursor=pointer]:
+          - /url: /work-items
+        - generic [ref=e57]:
+          - generic [ref=e59]:
+            - generic [ref=e60]:
+              - generic [ref=e61]:
+                - generic [ref=e62]: WORK ITEM
+                - generic [ref=e63]: "#0002"
+                - generic [ref=e64]:
+                  - generic [ref=e65]: ~
+                  - text: CHANGE
+                - generic [ref=e66]: DRAFT
+              - heading "LEGION-DASHBOARD — Add attachments/screenshots to work items (Ability to paste multiple images to Description / Notes fields)" [level=1] [ref=e68]
+            - generic [ref=e69]:
+              - link "EDIT" [ref=e70] [cursor=pointer]:
+                - /url: /work-items/2/edit
+                - button "EDIT" [ref=e71]
+              - button "ARCHIVE" [ref=e72] [cursor=pointer]
+              - button "APPROVE" [ref=e73] [cursor=pointer]
+          - generic [ref=e74]:
+            - generic [ref=e75]:
+              - generic [ref=e76]: CREATED
+              - generic [ref=e77]: 30/05/2026 15:03:16
+            - generic [ref=e78]:
+              - generic [ref=e79]: LAST UPDATED
+              - generic [ref=e80]: 30/05/2026 15:03:16
+            - generic [ref=e81]:
+              - generic [ref=e82]: APPROVAL TIMESTAMP
+              - generic [ref=e83]: —
+        - generic [ref=e84]:
+          - generic [ref=e86]:
+            - heading "[ BODY ]" [level=3] [ref=e87]
+            - generic [ref=e88]: // narrative payload
+          - paragraph [ref=e90]: "Expected behavior: - Add attachments to Ideas, Bugs, Changes, Tasks, and Slices. - Allow screenshots/images to be uploaded or attached. - Show attachment thumbnails or file links on the work item detail page. - Store attachment metadata in SQL. - Store files in a safe local storage path or configured volume. - Keep attachment paths tied to the work item. - Do not store files in Git. - Do not expose arbitrary filesystem paths."
+        - generic [ref=e91]:
+          - generic [ref=e92]:
+            - generic [ref=e94]:
+              - heading "[ PROVENANCE ]" [level=3] [ref=e95]
+              - generic [ref=e96]: // builder & reviewer
+            - generic [ref=e97]:
+              - generic [ref=e98]:
+                - generic [ref=e99]: BUILDER PROFILE
+                - generic [ref=e100]: —
+              - generic [ref=e101]:
+                - generic [ref=e102]: BUILDER MODEL
+                - generic [ref=e103]: —
+              - generic [ref=e104]:
+                - generic [ref=e105]: BUILDER PROVIDER
+                - generic [ref=e106]: —
+              - generic [ref=e107]:
+                - generic [ref=e108]: REVIEWER PROFILE
+                - generic [ref=e109]: —
+              - generic [ref=e110]:
+                - generic [ref=e111]: REVIEWER MODEL
+                - generic [ref=e112]: —
+              - generic [ref=e113]:
+                - generic [ref=e114]: REVIEWER PROVIDER
+                - generic [ref=e115]: —
+              - generic [ref=e116]:
+                - generic [ref=e117]: SAME-MODEL BLOCKED
+                - generic [ref=e118]: "NO"
+          - generic [ref=e119]:
+            - generic [ref=e121]:
+              - heading "[ DELIVERY ]" [level=3] [ref=e122]
+              - generic [ref=e123]: // PR & merge
+            - generic [ref=e124]:
+              - generic [ref=e125]:
+                - generic [ref=e126]: PR URL
+                - generic [ref=e127]: —
+              - generic [ref=e128]:
+                - generic [ref=e129]: MERGE COMMIT
+                - generic [ref=e130]: —
+              - generic [ref=e131]:
+                - generic [ref=e132]: OVERRIDE REASON
+                - generic [ref=e133]: —
+              - generic [ref=e134]:
+                - generic [ref=e135]: OVERRIDE STAMP
+                - generic [ref=e136]: —
+        - generic [ref=e137]:
+          - generic [ref=e139]:
+            - heading "[ BLOCK / OVERRIDE ]" [level=3] [ref=e140]
+            - generic [ref=e141]: // operator stop
+          - generic [ref=e142]:
+            - paragraph [ref=e143]: Blocks this work item and records an override reason. Stamped with the current operator timestamp.
+            - textbox "// describe why this work item must be halted" [ref=e144]
+            - generic [ref=e145]:
+              - generic [ref=e146]: READY
+              - button "[!] BLOCK WORK ITEM" [ref=e147] [cursor=pointer]
+        - generic [ref=e148]:
+          - generic [ref=e149]:
+            - generic [ref=e150]:
+              - generic [ref=e151]:
+                - heading "[ DEBATE ]" [level=3] [ref=e152]
+                - generic [ref=e153]: // advisory · operator must approve manually
+              - generic [ref=e155]:
+                - generic [ref=e156]: "ROUNDS:"
+                - spinbutton [ref=e157]: "2"
+                - button "[▶] RUN DEBATE" [ref=e158] [cursor=pointer]
+            - paragraph [ref=e160]: "Rounds clamped to 1–5. Each run produces a recommendation: APPROVE AS IS, APPROVE WITH EDITS, SPLIT FIRST, NEEDS MORE DETAIL, or DO NOT BUILD NOW. The operator retains final say."
+          - generic [ref=e161]:
+            - generic [ref=e163]:
+              - heading "[ OPERATOR ARGUMENTS ]" [level=3] [ref=e164]
+              - generic [ref=e165]: // 0 records
+            - generic [ref=e166]:
+              - generic [ref=e167]:
+                - textbox "// argument or counter-argument the debate should consider" [ref=e168]
+                - generic [ref=e169]:
+                  - generic [ref=e170]: "STANCE:"
+                  - generic [ref=e171]:
+                    - button "AUTO-ASSIGN" [ref=e172] [cursor=pointer]
+                    - button "PRO" [ref=e173] [cursor=pointer]
+                    - button "CON" [ref=e174] [cursor=pointer]
+                    - button "NEUTRAL" [ref=e175] [cursor=pointer]
+                  - button "+ ADD ARGUMENT" [disabled] [ref=e176]
+              - generic [ref=e177]:
+                - generic [ref=e178]: "[ ∅ ]"
+                - generic [ref=e179]: NO OPERATOR ARGUMENTS
+                - paragraph [ref=e180]: Add a pro/con/neutral argument the debate should weigh.
+          - generic [ref=e181]:
+            - generic [ref=e183]:
+              - heading "[ DEBATE RUNS ]" [level=3] [ref=e184]
+              - generic [ref=e185]: // 16 runs
+            - generic [ref=e187]:
+              - generic [ref=e188]:
+                - 'button "RUN #039 COMPLETED APPROVE WITH EDITS READY AFTER EDITS MANUAL_RERUN · 2R · 01/06/2026 06:47:24 → 01/06/2026 08:34:28 · 9m 33s · phi4 [ + ]" [ref=e190] [cursor=pointer]':
+                  - generic [ref=e191]:
+                    - generic [ref=e192]: "RUN #039"
+                    - generic [ref=e193]: COMPLETED
+                    - generic [ref=e195]: APPROVE WITH EDITS
+                    - generic [ref=e197]: READY AFTER EDITS
+                    - generic [ref=e199]: MANUAL_RERUN · 2R
+                    - generic [ref=e200]: · 01/06/2026 06:47:24 → 01/06/2026 08:34:28 · 9m 33s
+                    - generic "ollama_native:phi4:latest" [ref=e201]: · phi4
+                  - generic [ref=e203]: "[ + ]"
+                - generic [ref=e204]:
+                  - 'button "RUN #040 FAILED MANUAL_RERUN · 2R · 01/06/2026 07:02:35 → 01/06/2026 07:02:37 · phi4 ↻ RERUN ↻ RETRY [ − ]" [ref=e205] [cursor=pointer]':
+                    - generic [ref=e206]:
+                      - generic [ref=e207]: "RUN #040"
+                      - generic [ref=e208]: FAILED
+                      - generic [ref=e210]: MANUAL_RERUN · 2R
+                      - generic [ref=e211]: · 01/06/2026 07:02:35 → 01/06/2026 07:02:37
+                      - generic "ollama_native:phi4:latest" [ref=e212]: · phi4
+                    - generic [ref=e213]:
+                      - button "↻ RERUN" [ref=e214]
+                      - button "↻ RETRY" [ref=e215]
+                      - generic [ref=e216]: "[ − ]"
+                  - generic [ref=e217]:
+                    - generic [ref=e218]:
+                      - generic [ref=e219]:
+                        - generic [ref=e220]: CREATED
+                        - generic [ref=e221]: 01/06/2026 07:02:35
+                      - generic [ref=e222]:
+                        - generic [ref=e223]: COMPLETED
+                        - generic [ref=e224]: 01/06/2026 07:02:37
+                      - generic [ref=e225]:
+                        - generic [ref=e226]: PROVENANCE
+                        - generic [ref=e227]: executed via http://ai-4080:11434
+                    - generic [ref=e228]:
+                      - generic [ref=e229]: "!!"
+                      - generic [ref=e230]:
+                        - generic [ref=e231]: ERROR
+                        - generic [ref=e232]: "Model warmup failed: Model endpoint returned HTTP 404"
+                    - generic [ref=e233]: ADVISORY ONLY · OPERATOR MUST APPROVE MANUALLY
+                    - generic [ref=e234]:
+                      - generic [ref=e236]: CHRONOLOGICAL FLOW
+                      - generic [ref=e237]:
+                        - generic [ref=e238]: BY SIDE
+                        - generic [ref=e239]:
+                          - generic [ref=e240]:
+                            - generic [ref=e241]: PRO
+                            - paragraph [ref=e242]: "[ none ]"
+                          - generic [ref=e243]:
+                            - generic [ref=e244]: CON
+                            - paragraph [ref=e245]: "[ none ]"
+                - 'button "RUN #038 FAILED MANUAL_RERUN · 2R · 01/06/2026 06:44:29 → 31/05/2026 20:44:31 · phi4 ↻ RERUN ↻ RETRY [ + ]" [ref=e247] [cursor=pointer]':
+                  - generic [ref=e248]:
+                    - generic [ref=e249]: "RUN #038"
+                    - generic [ref=e250]: FAILED
+                    - generic [ref=e252]: MANUAL_RERUN · 2R
+                    - generic [ref=e253]: · 01/06/2026 06:44:29 → 31/05/2026 20:44:31
+                    - generic "ollama_native:phi4:latest" [ref=e254]: · phi4
+                  - generic [ref=e255]:
+                    - button "↻ RERUN" [ref=e256]
+                    - button "↻ RETRY" [ref=e257]
+                    - generic [ref=e258]: "[ + ]"
+              - button "▼13 older failed attempts — Show" [ref=e260] [cursor=pointer]
+        - generic [ref=e261]:
+          - generic [ref=e263]:
+            - heading "[ FOLLOW-UPS ]" [level=3] [ref=e264]
+            - generic [ref=e265]: // 0 records
+          - generic [ref=e267]:
+            - generic [ref=e268]: "[ ∅ ]"
+            - generic [ref=e269]: NO FOLLOW-UPS
+            - paragraph [ref=e270]: Reviewer findings and post-delivery notes will appear here.
