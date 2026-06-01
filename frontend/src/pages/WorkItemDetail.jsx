@@ -46,7 +46,7 @@ export default function WorkItemDetail() {
     getJson(`/work-items/${id}/follow-ups`)
       .then(setFollowUps)
       .catch(() => undefined);
-    getJson(`/api/builder/work-items/${id}/builder`)
+    getJson(`/builder/work-items/${id}/builder`)
       .then(setBuilderTask)
       .catch(() => undefined);
   }
@@ -96,7 +96,7 @@ export default function WorkItemDetail() {
 
   function startBuild() {
     setBuilderBusy(true);
-    postJson(`/api/builder/work-items/${id}/start-build`, {})
+    postJson(`/builder/work-items/${id}/start-build`, {})
       .then((data) => {
         setBuilderTask(data);
         refresh();
@@ -108,7 +108,7 @@ export default function WorkItemDetail() {
   function syncBuilder() {
     if (!builderTask) return;
     setBuilderBusy(true);
-    postJson(`/api/builder/tasks/${builderTask.id}/sync`, {})
+    postJson(`/builder/tasks/${builderTask.id}/sync`, {})
       .then((data) => setBuilderTask(data))
       .catch((err) => setError(err.message))
       .finally(() => setBuilderBusy(false));
