@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { getJson, postJson } from "../api/client.js";
+import { getJson, postJson, deleteRequest, getAttachmentDownloadUrl } from "../api/client.js";
 import { StatusBadge, TypeBadge } from "../components/badges.jsx";
 import { Panel, FieldRow } from "../components/panel.jsx";
 import { Button, OperatorButton } from "../components/buttons.jsx";
@@ -37,6 +37,7 @@ export default function WorkItemDetail() {
   const [archiveReason, setArchiveReason] = useState("");
   const [builderTask, setBuilderTask] = useState(null);
   const [builderBusy, setBuilderBusy] = useState(false);
+  const [attachments, setAttachments] = useState([]);
 
   function refresh() {
     setError(null);
@@ -48,6 +49,9 @@ export default function WorkItemDetail() {
       .catch(() => undefined);
     getJson(`/builder/work-items/${id}/builder`)
       .then(setBuilderTask)
+      .catch(() => undefined);
+    getJson(`/work-items/${id}/attachments`)
+      .then(setAttachments)
       .catch(() => undefined);
   }
 
@@ -306,6 +310,57 @@ export default function WorkItemDetail() {
           </p>
         ) : (
           <p className="text-sm text-fg-muted italic">[ no body provided ]</p>
+        )}
+      </Panel>
+
+      <Panel title="ATTACHMENTS" subtitle={`// ${attachments.length} file(s)`}>
+        {attachments.length === 0 ? (
+          <p className="text-sm text-fg-muted italic">[ no attachments ]</p>
+        ) : (
+          <div className="space-y-2">
+            {attachments.map((att) => {
+              const isImage = att.content_type.startsWith("image/");
+              const downloadUrl = getAttachmentDownloadUrl(id, att.id);
+              return (
+                <div
+                  key={att.id}
+                  className="flex items-center justify-between px-3 py-2 bg-canvas border border-edge"
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="text-fg-secondary text-sm">
+                      {isImage ? "🖼️" : "📎"}
+                    </span>
+                    <a
+                      href={downloadUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-sm font-mono text-fg-primary hover:text-accent truncate"
+                    >
+                      {att.original_filename}
+                    </a>
+                    <span className="text-xs text-fg-muted font-mono">
+                      ({att.content_type})
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs text-fg-muted font-mono tabular-nums">
+                      {att.file_size > 1024 * 1024
+                        ? `${(att.file_size / (1024 * 1024)).toFixed(1)} MB`
+                        : `${Math.round(att.file_size / 1024)} KB`}
+                    </span>
+                    <a
+                      href={downloadUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-xs font-mono uppercase tracking-telemetry text-fg-secondary hover:text-fg-primary"
+                    >
+                      DOWNLOAD
+                    </a>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         )}
       </Panel>
 

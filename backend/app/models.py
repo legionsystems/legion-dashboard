@@ -89,6 +89,29 @@ class WorkItem(Base):
     builder_tasks = relationship(
         "BuilderTask", back_populates="work_item", cascade="all, delete-orphan"
     )
+    attachments = relationship(
+        "WorkItemAttachment", back_populates="work_item", cascade="all, delete-orphan"
+    )
+
+
+class WorkItemAttachment(Base):
+    __tablename__ = "work_item_attachments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    work_item_id = Column(
+        Integer,
+        ForeignKey("work_items.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    filename = Column(String(255), nullable=False)
+    original_filename = Column(String(255), nullable=False)
+    content_type = Column(String(100), nullable=False)
+    file_size = Column(Integer, nullable=False)
+    storage_path = Column(String(500), nullable=False)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+
+    work_item = relationship("WorkItem", back_populates="attachments")
 
 
 class FollowUp(Base):

@@ -1,7 +1,8 @@
 from datetime import datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from ..database import get_db
@@ -23,8 +24,10 @@ from ..models import (
     FollowUp,
     OperatorDebateInput,
     WorkItem,
+    WorkItemAttachment,
 )
 from ..schemas import (
+    AttachmentResponse,
     BlockRequest,
     BulkArchiveRequest,
     BulkArchiveTestItemsRequest,
@@ -348,6 +351,183 @@ def create_follow_up(
     db.commit()
     db.refresh(follow_up)
     return follow_up
+
+
+# ---------------------------------------------------------------------------
+# Attachment endpoints
+# ---------------------------------------------------------------------------
+
+import os
+import uuid
+from pathlib import Path
+
+# Configurable via env vars with sensible defaults
+ATTACHMENT_STORAGE_PATH = Path(os.environ.get("ATTACHMENT_STORAGE_PATH", "/var/lib/legion-dashboard/attachments"))
+ATTACHMENT_MAX_FILE_SIZE = int(os.environ.get("ATTACHMENT_MAX_FILE_SIZE", str(10 * 1024 * 1024)))  # 10 MB
+ATTACHMENT_ALLOWED_TYPES = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "application/pdf": ".pdf",
+}
+
+
+def _ensure_storage_dir() -> None:
+    ATTACHMENT_STORAGE_PATH.mkdir(parents=True, exist_ok=True)
+
+
+@router.get(
+    "/{work_item_id}/attachments",
+    response_model=List[AttachmentResponse],
+)
+def list_attachments(work_item_id: int, db: Session = Depends(get_db)):
+    _get_or_404(db, work_item_id)
+    attachments = (
+        db.query(WorkItemAttachment)
+        .filter(WorkItemAttachment.work_item_id == work_item_id)
+        .order_by(WorkItemAttachment.created_at.desc())
+        .all()
+    )
+    return attachments
+
+
+@router.post(
+    "/{work_item_id}/attachments",
+    response_model=AttachmentResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def upload_attachment(
+    work_item_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    """Upload an attachment to a work item.
+
+    Accepts PNG, JPG, GIF, WEBP images and PDF files.
+    Max file size: 10 MB (configurable via ATTACHMENT_MAX_FILE_SIZE env var).
+    """
+    item = _get_or_404(db, work_item_id)
+
+    # Validate content type
+    content_type = file.content_type or "application/octet-stream"
+    if content_type not in ATTACHMENT_ALLOWED_TYPES:
+        raise HTTPException(
+            status_code=415,
+            detail=f"Unsupported file type: {content_type}. Allowed: {', '.join(sorted(ATTACHMENT_ALLOWED_TYPES.keys()))}",
+        )
+
+    # Read file content
+    content = await file.read()
+
+    # Validate file size
+    file_size = len(content)
+    if file_size > ATTACHMENT_MAX_FILE_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large: {file_size} bytes. Maximum: {ATTACHMENT_MAX_FILE_SIZE} bytes ({ATTACHMENT_MAX_FILE_SIZE // (1024*1024)} MB).",
+        )
+    if file_size == 0:
+        raise HTTPException(status_code=400, detail="Empty file")
+
+    # Sanitize filename: strip path components, limit length
+    original_filename = os.path.basename(file.filename or "attachment")
+    if len(original_filename) > 200:
+        original_filename = original_filename[-200:]
+
+    # Generate unique storage filename
+    ext = ATTACHMENT_ALLOWED_TYPES[content_type]
+    storage_filename = f"{uuid.uuid4().hex}{ext}"
+    storage_path = ATTACHMENT_STORAGE_PATH / storage_filename
+
+    # Write file to disk
+    _ensure_storage_dir()
+    try:
+        with open(storage_path, "wb") as f:
+            f.write(content)
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save file: {type(e).__name__}")
+
+    # Create DB record
+    attachment = WorkItemAttachment(
+        work_item_id=work_item_id,
+        filename=storage_filename,
+        original_filename=original_filename,
+        content_type=content_type,
+        file_size=file_size,
+        storage_path=str(storage_path),
+    )
+    db.add(attachment)
+    db.commit()
+    db.refresh(attachment)
+    return attachment
+
+
+@router.get(
+    "/{work_item_id}/attachments/{attachment_id}",
+    response_class=FileResponse,
+)
+def download_attachment(
+    work_item_id: int,
+    attachment_id: int,
+    db: Session = Depends(get_db),
+):
+    """Download an attachment by ID. Validates that the attachment belongs to the specified work item."""
+    _get_or_404(db, work_item_id)
+    attachment = (
+        db.query(WorkItemAttachment)
+        .filter(
+            WorkItemAttachment.id == attachment_id,
+            WorkItemAttachment.work_item_id == work_item_id,
+        )
+        .first()
+    )
+    if attachment is None:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+
+    file_path = Path(attachment.storage_path)
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Attachment file missing from storage")
+
+    return FileResponse(
+        path=str(file_path),
+        filename=attachment.original_filename,
+        media_type=attachment.content_type,
+    )
+
+
+@router.delete(
+    "/{work_item_id}/attachments/{attachment_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_attachment(
+    work_item_id: int,
+    attachment_id: int,
+    db: Session = Depends(get_db),
+):
+    """Delete an attachment. Removes both the DB record and the stored file."""
+    _get_or_404(db, work_item_id)
+    attachment = (
+        db.query(WorkItemAttachment)
+        .filter(
+            WorkItemAttachment.id == attachment_id,
+            WorkItemAttachment.work_item_id == work_item_id,
+        )
+        .first()
+    )
+    if attachment is None:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+
+    # Remove file from disk (best-effort)
+    try:
+        file_path = Path(attachment.storage_path)
+        if file_path.exists():
+            file_path.unlink()
+    except OSError:
+        pass  # Continue even if file deletion fails
+
+    db.delete(attachment)
+    db.commit()
 
 
 # ---------------------------------------------------------------------------
