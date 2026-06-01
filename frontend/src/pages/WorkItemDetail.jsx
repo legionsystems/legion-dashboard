@@ -3,7 +3,7 @@ import { Link, useParams } from "react-router-dom";
 import { getJson, postJson } from "../api/client.js";
 import { StatusBadge, TypeBadge } from "../components/badges.jsx";
 import { Panel, FieldRow } from "../components/panel.jsx";
-import { Button } from "../components/buttons.jsx";
+import { Button, OperatorButton } from "../components/buttons.jsx";
 import {
   ErrorBanner,
   SkeletonBlock,
@@ -13,7 +13,6 @@ import DebatePanel from "../components/DebatePanel.jsx";
 
 function formatTime(iso) {
   if (!iso) return null;
-  // Display in user's local timezone (Sydney: Australia/Sydney)
   const date = new Date(iso);
   return date.toLocaleString('en-AU', {
     timeZone: 'Australia/Sydney',
@@ -36,6 +35,8 @@ export default function WorkItemDetail() {
   const [busy, setBusy] = useState(null);
   const [showArchiveInput, setShowArchiveInput] = useState(false);
   const [archiveReason, setArchiveReason] = useState("");
+  const [builderTask, setBuilderTask] = useState(null);
+  const [builderBusy, setBuilderBusy] = useState(false);
 
   function refresh() {
     setError(null);
@@ -45,11 +46,13 @@ export default function WorkItemDetail() {
     getJson(`/work-items/${id}/follow-ups`)
       .then(setFollowUps)
       .catch(() => undefined);
+    getJson(`/api/builder/work-items/${id}/builder`)
+      .then(setBuilderTask)
+      .catch(() => undefined);
   }
 
   useEffect(() => {
     refresh();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
   function approve() {
@@ -91,6 +94,30 @@ export default function WorkItemDetail() {
       .finally(() => setBusy(null));
   }
 
+  function startBuild() {
+    setBuilderBusy(true);
+    postJson(`/api/builder/work-items/${id}/start-build`, {})
+      .then((data) => {
+        setBuilderTask(data);
+        refresh();
+      })
+      .catch((err) => setError(err.message))
+      .finally(() => setBuilderBusy(false));
+  }
+
+  function syncBuilder() {
+    if (!builderTask) return;
+    setBuilderBusy(true);
+    postJson(`/api/builder/tasks/${builderTask.id}/sync`, {})
+      .then((data) => setBuilderTask(data))
+      .catch((err) => setError(err.message))
+      .finally(() => setBuilderBusy(false));
+  }
+
+  const canStartBuild = item?.approved_by_operator && !builderTask;
+  const blockedTypes = new Set(["note"]);
+  const canStartBuildType = !blockedTypes.has(item?.type?.toLowerCase());
+
   if (error && !item) {
     return (
       <div className="space-y-4">
@@ -99,61 +126,77 @@ export default function WorkItemDetail() {
           to="/work-items"
           className="font-mono uppercase tracking-telemetry text-xs text-fg-secondary hover:text-fg-primary"
         >
-          ← BACK TO REGISTRY
+          ← BACK TO WORK ITEMS
         </Link>
       </div>
     );
   }
 
   if (!item) {
-    return (
-      <div className="space-y-4">
-        <div className="skeleton h-10 w-2/3" />
-        <Panel title="LOADING">
-          <SkeletonBlock rows={4} />
-        </Panel>
-      </div>
-    );
+    return <SkeletonBlock lines={8} />;
   }
 
-  const isBlocked = item.status === "blocked";
-
   return (
-    <div className="space-y-5">
-      <div>
-        <Link
-          to="/work-items"
-          className="font-mono uppercase tracking-telemetry text-[11px] text-fg-secondary hover:text-fg-primary"
-        >
-          ← BACK TO REGISTRY
-        </Link>
-      </div>
-
-      <ErrorBanner message={error} />
-
-      {item.archived && (
-        <div
-          className="border border-fg-muted/60 bg-fg-muted/10 px-4 py-3"
-          style={{ borderLeft: "3px solid #8A8A8A" }}
-        >
-          <div className="flex items-center justify-between gap-3 flex-wrap">
-            <div>
-              <div className="label-tel" style={{ color: "#8A8A8A" }}>
-                ARCHIVED
-              </div>
-              <div className="text-sm text-fg-secondary mt-0.5">
-                {item.archived_at && (
-                  <span>
-                    Archived: {new Date(item.archived_at).toISOString().replace("T", " ").split(".")[0]}Z
-                  </span>
-                )}
-                {item.archive_reason && (
-                  <span className="ml-4">
-                    Reason: {item.archive_reason}
-                  </span>
-                )}
-              </div>
-            </div>
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div className="space-y-1">
+          <div className="flex items-center gap-2">
+            <Link
+              to="/work-items"
+              className="font-mono uppercase tracking-telemetry text-xs text-fg-secondary hover:text-fg-primary"
+            >
+              ← BACK
+            </Link>
+            <TypeBadge type={item.type} />
+            <StatusBadge status={item.status} />
+            {item.approved_by_operator && (
+              <span className="text-xs text-st-completed font-mono">✓ APPROVED</span>
+            )}
+          </div>
+          <h1 className="text-xl font-semibold text-fg-primary">{item.title}</h1>
+        </div>
+        <div className="flex items-center gap-2">
+          <Link to={`/work-items/${id}/edit`}>
+            <Button variant="ghost">EDIT</Button>
+          </Link>
+          {!item.archived ? (
+            <>
+              {!showArchiveInput ? (
+                <Button
+                  variant="danger"
+                  onClick={() => setShowArchiveInput(true)}
+                >
+                  ARCHIVE
+                </Button>
+              ) : (
+                <div className="flex gap-2 items-center">
+                  <input
+                    type="text"
+                    value={archiveReason}
+                    onChange={(e) => setArchiveReason(e.target.value)}
+                    placeholder="Archive reason (optional)"
+                    className="px-2 py-1 text-sm bg-canvas border border-edge outline-none"
+                  />
+                  <Button
+                    variant="danger"
+                    onClick={archive}
+                    disabled={busy === "archive"}
+                  >
+                    {busy === "archive" ? "ARCHIVING…" : "CONFIRM"}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    onClick={() => {
+                      setShowArchiveInput(false);
+                      setArchiveReason("");
+                    }}
+                  >
+                    CANCEL
+                  </Button>
+                </div>
+              )}
+            </>
+          ) : (
             <Button
               variant="success"
               onClick={restore}
@@ -161,203 +204,97 @@ export default function WorkItemDetail() {
             >
               {busy === "restore" ? "RESTORING…" : "RESTORE"}
             </Button>
-          </div>
+          )}
+          {canStartBuild && canStartBuildType && (
+            <OperatorButton
+              onClick={startBuild}
+              disabled={builderBusy}
+              title={!canStartBuildType ? "Note type cannot start build" : "Create Hermes Kanban task and start build"}
+            >
+              {builderBusy ? "STARTING BUILD…" : "START BUILD"}
+            </OperatorButton>
+          )}
+          {!canStartBuildType && (
+            <span className="text-xs text-fg-muted" title="Note type cannot start build">
+              BUILD N/A
+            </span>
+          )}
+          {!item.approved_by_operator && (
+            <Button
+              variant="success"
+              disabled={busy === "approve"}
+              onClick={approve}
+            >
+              {busy === "approve" ? "APPROVING…" : "APPROVE"}
+            </Button>
+          )}
         </div>
-      )}
+      </div>
 
-      {(item.is_system_generated || item.is_test_item || item.generated_by) && (
-        <Panel title="CLASSIFICATION" subtitle="// origin metadata">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            {item.is_system_generated && (
-              <div className="flex items-center gap-2">
-                <span
-                  className="inline-flex items-center gap-1 border px-1.5 py-0.5 text-[10px] font-mono uppercase tracking-telemetry font-semibold"
-                  style={{
-                    color: "#A855F7",
-                    borderColor: "#A855F766",
-                    backgroundColor: "#A855F714",
-                  }}
-                >
-                  SYSTEM-GENERATED
-                </span>
-                {item.generated_by && (
-                  <span className="text-xs text-fg-secondary font-mono">
-                    by: {item.generated_by}
-                  </span>
-                )}
+      {builderTask && (
+        <Panel title="BUILDER" subtitle="// Hermes Kanban bridge">
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-3">
+              <FieldRow label="HERMES TASK" value={builderTask.hermes_task_id} mono />
+              <FieldRow label="BOARD" value={builderTask.hermes_board} mono />
+              <FieldRow label="STATUS" value={builderTask.hermes_status?.toUpperCase()} mono />
+              <FieldRow label="ASSIGNEE" value={builderTask.hermes_assignee || "—"} mono />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <FieldRow label="CREATED" value={formatTime(builderTask.created_at)} mono />
+              <FieldRow label="LAST SYNC" value={formatTime(builderTask.last_sync_at)} mono />
+              <FieldRow label="HERMES STATUS" value={builderTask.last_known_hermes_status?.toUpperCase() || "—"} mono />
+              <FieldRow label="PR URL" value={builderTask.pr_url || "—"} mono />
+            </div>
+            {builderTask.branch_name && (
+              <div className="grid grid-cols-2 gap-3">
+                <FieldRow label="BRANCH" value={builderTask.branch_name} mono />
+                <FieldRow label="MERGE SHA" value={builderTask.merge_commit_sha || "—"} mono />
               </div>
             )}
-            {item.is_test_item && (
-              <div className="flex items-center gap-2">
-                <span
-                  className="inline-flex items-center gap-1 border px-1.5 py-0.5 text-[10px] font-mono uppercase tracking-telemetry font-semibold"
-                  style={{
-                    color: "#F59E0B",
-                    borderColor: "#F59E0B66",
-                    backgroundColor: "#F59E0B14",
-                  }}
-                >
-                  TEST ITEM
-                </span>
+            {builderTask.hermes_result && (
+              <div className="text-xs text-fg-muted border border-edge bg-canvas/50 p-3">
+                <div className="label-tel mb-1">RESULT</div>
+                <p className="whitespace-pre-wrap">{builderTask.hermes_result}</p>
               </div>
             )}
-            {item.source_kind && (
-              <div>
-                <span className="label-tel">SOURCE KIND:</span>
-                <span className="text-xs text-fg-secondary font-mono ml-2">{item.source_kind}</span>
-              </div>
-            )}
-            {item.source_run_id && (
-              <div>
-                <span className="label-tel">SOURCE RUN ID:</span>
-                <span className="text-xs text-fg-secondary font-mono ml-2">#{item.source_run_id}</span>
-              </div>
-            )}
-            {item.generated_by_prompt_id && (
-              <div>
-                <span className="label-tel">PROMPT ID:</span>
-                <span className="text-xs text-fg-secondary font-mono ml-2">{item.generated_by_prompt_id}</span>
-              </div>
-            )}
+            <div className="flex gap-2 items-center">
+              <Button variant="ghost" onClick={syncBuilder} disabled={builderBusy}>
+                {builderBusy ? "SYNCING…" : "SYNC"}
+              </Button>
+              {builderTask.generated_prompt_snapshot && (
+                <details className="text-xs">
+                  <summary className="cursor-pointer text-fg-secondary hover:text-fg-primary font-mono uppercase tracking-telemetry text-xs">VIEW PROMPT</summary>
+                  <pre className="mt-2 p-3 bg-canvas text-fg-primary text-xs overflow-auto max-h-96 whitespace-pre-wrap font-mono border border-edge">
+                    {builderTask.generated_prompt_snapshot}
+                  </pre>
+                </details>
+              )}
+            </div>
+            <p className="text-xs text-fg-muted italic">
+              Warning: Ready + assigned tasks may auto-start via Hermes orchestration.
+            </p>
           </div>
         </Panel>
       )}
 
-      <div className="border border-edge bg-surface">
-        <div className="border-b border-edge px-5 py-4">
-          <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
-            <div className="min-w-0">
-              <div className="flex items-center gap-3 mb-2">
-                <span className="font-mono text-[11px] tracking-telemetry text-fg-muted">
-                  WORK ITEM
-                </span>
-                <span className="font-mono text-[11px] tracking-telemetry text-fg-secondary tabular-nums">
-                  #{String(item.id).padStart(4, "0")}
-                </span>
-                <TypeBadge type={item.type} />
-                <StatusBadge status={item.status} />
-                {item.approved_by_operator && (
-                  <span className="font-mono text-[10px] tracking-telemetry text-st-completed border border-st-completed/60 bg-st-completed/10 px-1.5 py-0.5">
-                    ✓ OPERATOR APPROVED
-                  </span>
-                )}
-                {item.archived && (
-                  <span className="font-mono text-[10px] tracking-telemetry text-fg-muted border border-fg-muted/60 bg-fg-muted/10 px-1.5 py-0.5">
-                    ARCHIVED
-                  </span>
-                )}
-                {item.is_system_generated && (
-                  <span
-                    className="font-mono text-[10px] tracking-telemetry border px-1.5 py-0.5"
-                    style={{
-                      color: "#A855F7",
-                      borderColor: "#A855F766",
-                      backgroundColor: "#A855F714",
-                    }}
-                  >
-                    SYSTEM
-                  </span>
-                )}
-                {item.is_test_item && (
-                  <span
-                    className="font-mono text-[10px] tracking-telemetry border px-1.5 py-0.5"
-                    style={{
-                      color: "#F59E0B",
-                      borderColor: "#F59E0B66",
-                      backgroundColor: "#F59E0B14",
-                    }}
-                  >
-                    TEST
-                  </span>
-                )}
-              </div>
-              <h1 className="font-display font-extrabold tracking-tighter-display text-fg-primary text-2xl md:text-3xl leading-tight break-words">
-                {item.title}
-              </h1>
-            </div>
-            <div className="flex gap-2 shrink-0">
-              <Link to={`/work-items/${item.id}/edit`}>
-                <Button variant="ghost">EDIT</Button>
-              </Link>
-              {!item.archived ? (
-                <>
-                  {!showArchiveInput ? (
-                    <Button
-                      variant="danger"
-                      onClick={() => setShowArchiveInput(true)}
-                    >
-                      ARCHIVE
-                    </Button>
-                  ) : (
-                    <div className="flex gap-2 items-center">
-                      <input
-                        type="text"
-                        value={archiveReason}
-                        onChange={(e) => setArchiveReason(e.target.value)}
-                        placeholder="Archive reason (optional)"
-                        className="px-2 py-1 text-sm bg-canvas border border-edge outline-none"
-                      />
-                      <Button
-                        variant="danger"
-                        onClick={archive}
-                        disabled={busy === "archive"}
-                      >
-                        {busy === "archive" ? "ARCHIVING…" : "CONFIRM"}
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        onClick={() => {
-                          setShowArchiveInput(false);
-                          setArchiveReason("");
-                        }}
-                      >
-                        CANCEL
-                      </Button>
-                    </div>
-                  )}
-                </>
-              ) : (
-                <Button
-                  variant="success"
-                  onClick={restore}
-                  disabled={busy === "restore"}
-                >
-                  {busy === "restore" ? "RESTORING…" : "RESTORE"}
-                </Button>
-              )}
-              <Button
-                variant="success"
-                disabled={item.approved_by_operator || busy === "approve"}
-                onClick={approve}
-              >
-                {item.approved_by_operator
-                  ? "✓ APPROVED"
-                  : busy === "approve"
-                  ? "APPROVING…"
-                  : "APPROVE"}
-              </Button>
-            </div>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-px bg-edge">
+        <div className="bg-surface px-5 py-3">
+          <div className="label-tel">CREATED</div>
+          <div className="font-mono text-sm mt-1 tabular-nums">
+            {formatTime(item.created_at) || "—"}
           </div>
         </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-px bg-edge">
-          <div className="bg-surface px-5 py-3">
-            <div className="label-tel">CREATED</div>
-            <div className="font-mono text-sm mt-1 tabular-nums">
-              {formatTime(item.created_at) || "—"}
-            </div>
+        <div className="bg-surface px-5 py-3">
+          <div className="label-tel">LAST UPDATED</div>
+          <div className="font-mono text-sm mt-1 tabular-nums">
+            {formatTime(item.updated_at) || "—"}
           </div>
-          <div className="bg-surface px-5 py-3">
-            <div className="label-tel">LAST UPDATED</div>
-            <div className="font-mono text-sm mt-1 tabular-nums">
-              {formatTime(item.updated_at) || "—"}
-            </div>
-          </div>
-          <div className="bg-surface px-5 py-3">
-            <div className="label-tel">APPROVAL TIMESTAMP</div>
-            <div className="font-mono text-sm mt-1 tabular-nums">
-              {formatTime(item.approval_timestamp) || "—"}
-            </div>
+        </div>
+        <div className="bg-surface px-5 py-3">
+          <div className="label-tel">APPROVAL TIMESTAMP</div>
+          <div className="font-mono text-sm mt-1 tabular-nums">
+            {formatTime(item.approval_timestamp) || "—"}
           </div>
         </div>
       </div>
@@ -372,130 +309,7 @@ export default function WorkItemDetail() {
         )}
       </Panel>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <Panel title="PROVENANCE" subtitle="// builder & reviewer">
-          <FieldRow label="BUILDER PROFILE" value={item.builder_profile} mono />
-          <FieldRow label="BUILDER MODEL" value={item.builder_model} mono />
-          <FieldRow
-            label="BUILDER PROVIDER"
-            value={item.builder_provider}
-            mono
-          />
-          <FieldRow
-            label="REVIEWER PROFILE"
-            value={item.reviewer_profile}
-            mono
-          />
-          <FieldRow label="REVIEWER MODEL" value={item.reviewer_model} mono />
-          <FieldRow
-            label="REVIEWER PROVIDER"
-            value={item.reviewer_provider}
-            mono
-          />
-          <FieldRow
-            label="SAME-MODEL BLOCKED"
-            value={
-              item.same_model_blocked ? (
-                <span className="text-alert">YES</span>
-              ) : (
-                "NO"
-              )
-            }
-            mono
-          />
-        </Panel>
-
-        <Panel title="DELIVERY" subtitle="// PR & merge">
-          <FieldRow label="PR URL" value={item.pr_url} mono />
-          <FieldRow label="MERGE COMMIT" value={item.merge_commit_sha} mono />
-          <FieldRow
-            label="OVERRIDE REASON"
-            value={item.override_reason}
-            mono
-          />
-          <FieldRow
-            label="OVERRIDE STAMP"
-            value={formatTime(item.override_timestamp)}
-            mono
-          />
-        </Panel>
-      </div>
-
-      <Panel
-        title="BLOCK / OVERRIDE"
-        subtitle="// operator stop"
-      >
-        <p className="text-xs text-fg-secondary mb-2">
-          Blocks this work item and records an override reason. Stamped with
-          the current operator timestamp.
-        </p>
-        <textarea
-          value={reason}
-          onChange={(e) => setReason(e.target.value)}
-          rows={3}
-          placeholder="// describe why this work item must be halted"
-          className="w-full px-3 py-2 text-sm font-mono bg-canvas border border-edge-strong focus:border-alert outline-none"
-        />
-        <div className="mt-2 flex items-center justify-between gap-3 flex-wrap">
-          <span className="label-tel">
-            {isBlocked ? "STATUS: ALREADY BLOCKED" : "READY"}
-          </span>
-          <Button
-            variant="danger"
-            onClick={block}
-            disabled={busy === "block"}
-          >
-            {busy === "block" ? "BLOCKING…" : "[!] BLOCK WORK ITEM"}
-          </Button>
-        </div>
-      </Panel>
-
       <DebatePanel workItemId={item.id} />
-
-      <Panel
-        title="FOLLOW-UPS"
-        subtitle={`// ${followUps.length} record${followUps.length === 1 ? "" : "s"}`}
-      >
-        {followUps.length === 0 ? (
-          <EmptyState
-            title="NO FOLLOW-UPS"
-            hint="Reviewer findings and post-delivery notes will appear here."
-            glyph="[ ∅ ]"
-          />
-        ) : (
-          <ul className="divide-y divide-edge/60">
-            {followUps.map((fu) => (
-              <li
-                key={fu.id}
-                className="grid grid-cols-[110px_1fr_110px] gap-3 py-3 items-start"
-              >
-                <span
-                  className={`font-mono text-[11px] uppercase tracking-telemetry font-semibold px-2 py-0.5 border ${
-                    fu.severity === "blocking"
-                      ? "border-alert/60 text-alert bg-alert/10"
-                      : "border-edge text-fg-secondary bg-canvas"
-                  } w-fit`}
-                >
-                  {fu.severity || "—"}
-                </span>
-                <div className="min-w-0">
-                  <div className="text-sm text-fg-primary font-semibold">
-                    {fu.title || "(untitled)"}
-                  </div>
-                  {fu.body && (
-                    <p className="text-sm text-fg-secondary mt-1 whitespace-pre-wrap">
-                      {fu.body}
-                    </p>
-                  )}
-                </div>
-                <span className="font-mono text-[10px] tracking-telemetry text-fg-muted text-right">
-                  {fu.status?.toUpperCase()}
-                </span>
-              </li>
-            ))}
-          </ul>
-        )}
-      </Panel>
     </div>
   );
 }

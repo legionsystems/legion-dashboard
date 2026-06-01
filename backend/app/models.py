@@ -86,6 +86,9 @@ class WorkItem(Base):
     follow_ups = relationship(
         "FollowUp", back_populates="work_item", cascade="all, delete-orphan"
     )
+    builder_tasks = relationship(
+        "BuilderTask", back_populates="work_item", cascade="all, delete-orphan"
+    )
 
 
 class FollowUp(Base):
@@ -370,7 +373,10 @@ class DebateExecutionConfig(Base):
     whole_run_timeout_seconds = Column(Integer, nullable=True)  # Whole-run max duration
     retry_failed_turn_enabled = Column(Boolean, nullable=False, default=True)
     max_turn_retries = Column(Integer, nullable=False, default=1)
-
+    
+    # Display settings
+    display_timezone = Column(String(50), nullable=False, default="Australia/Sydney")  # IANA timezone name
+    
     # Metadata
     notes = Column(Text, nullable=True)
     updated_at = Column(
@@ -510,3 +516,10 @@ class AppActionLog(Base):
     elapsed_seconds = Column(Integer, nullable=True)
 
     app = relationship("App", back_populates="action_logs")
+
+
+# BuilderTask is defined in models_builder.py - import after all Base classes are defined
+from .models_builder import BuilderTask
+
+# Now backfill the relationship on WorkItem (already defined above)
+# The relationship string reference works because BuilderTask is now imported

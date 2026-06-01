@@ -33,6 +33,9 @@ services:
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg2://legion:legion@db:5432/legion_dashboard}
       LEGION_DOCKER_CONTROL_ENABLED: ${LEGION_DOCKER_CONTROL_ENABLED:-true}
       HERMES_HOME: /app/.hermes  # Point to mounted config location
+      HERMES_KANBAN_BRIDGE_URL: http://host.docker.internal:8765
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "${APP_HOST_PORT:-8720}:8080"
 

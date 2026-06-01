@@ -154,31 +154,65 @@ def _redact_url_host(url: str) -> str:
 
 
 def _is_local_endpoint(url: str) -> bool:
-    """Check if URL is a local/private endpoint."""
+    """Check if URL is a local/private endpoint.
+    
+    Local/private includes:
+    - localhost, 127.0.0.0/8, ::1
+    - RFC1918 private IPv4 (10.x.x.x, 172.16-31.x.x, 192.168.x.x)
+    - Tailscale CGNAT (100.64.0.0/10)
+    - .ts.net domains (Tailscale)
+    - Known local hostnames: ai-4080, legion, lgn-remote, lgn-local, ollama
+    """
     try:
         parsed = urlparse(url)
-        host = (parsed.hostname or "").lower()
-
-        # Local/private patterns
-        local_patterns = [
+        hostname = (parsed.hostname or "").lower()
+        
+        # Exact local hostname matches
+        local_hosts = {
             "localhost",
-            "127.0.0.1",
-            "0.0.0.0",
             "ai-4080",
+            "legion",
             "lgn-remote",
             "lgn-local",
-        ]
-        if any(p in host for p in local_patterns):
+            "ollama",
+        }
+        if hostname in local_hosts:
             return True
-
-        # RFC1918 private ranges (simplified check)
-        if host.startswith("192.168.") or host.startswith("10.") or host.startswith("172."):
+        
+        # Loopback
+        if hostname == "127.0.0.1" or hostname == "::1" or hostname == "0.0.0.0":
             return True
-
-        # Tailscale pattern (100.x.y.z)
-        if host.startswith("100."):
+        
+        # RFC1918 private IPv4
+        if hostname.startswith("10."):
             return True
-
+        if hostname.startswith("192.168."):
+            return True
+        if hostname.startswith("172."):
+            parts = hostname.split(".")
+            if len(parts) >= 2:
+                try:
+                    second = int(parts[1])
+                    if 16 <= second <= 31:
+                        return True
+                except ValueError:
+                    pass
+        
+        # Tailscale CGNAT (100.64.0.0/10)
+        if hostname.startswith("100."):
+            parts = hostname.split(".")
+            if len(parts) >= 2:
+                try:
+                    second = int(parts[1])
+                    if 64 <= second <= 127:
+                        return True
+                except ValueError:
+                    pass
+        
+        # Tailscale .ts.net domains
+        if hostname.endswith(".ts.net"):
+            return True
+        
         return False
     except Exception:
         return False
@@ -245,8 +279,10 @@ def update_debate_execution_config(
                 status_code=400,
                 detail=(
                     "Cloud/public endpoints require allow_cloud_endpoints=true. "
-                    "Local/private endpoints (localhost, 127.0.0.1, ai-4080, "
-                    "192.168.x.x, 10.x.x.x, Tailscale) are allowed by default."
+                    "Local/private providers are allowed when they use localhost, "
+                    "private RFC1918 addresses (10.x.x.x, 172.16-31.x.x, 192.168.x.x), "
+                    "Tailscale addresses (100.64.0.0/10), .ts.net domains, or configured "
+                    "local Ollama providers (ai-4080, legion, etc.)."
                 ),
             )
 
@@ -567,6 +603,26 @@ def warm_model(
         
         latency_ms = int((time.time() - start) * 1000)
         
+        # Verify residency with /api/ps for Ollama native
+        model_resident = None
+        expires_at = None
+        if is_ollama_native:
+            try:
+                with httpx.Client(timeout=5) as check_client:
+                    ps_response = check_client.get(warmup_url.replace("/api/chat", "/api/ps"))
+                    if ps_response.status_code == 200:
+                        ps_data = ps_response.json()
+                        models = ps_data.get("models", [])
+                        for m in models:
+                            if m.get("name") == model_id or m.get("model") == model_id:
+                                model_resident = True
+                                expires_at = m.get("expires_at")
+                                break
+                        if model_resident is None:
+                            model_resident = False
+            except Exception:
+                model_resident = None  # Unknown if check failed
+        
         return ModelWarmupResponse(
             success=True,
             provider=host.provider,
@@ -574,6 +630,8 @@ def warm_model(
             model=model_id,
             warmup_method=warmup_method,
             latency_ms=latency_ms,
+            model_resident=model_resident,
+            expires_at=expires_at,
         )
         
     except httpx.TimeoutException:

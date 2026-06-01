@@ -441,6 +441,8 @@ class DebateExecutionConfigResponse(BaseModel):
     whole_run_timeout_seconds: Optional[int] = None
     retry_failed_turn_enabled: bool = True
     max_turn_retries: int = 1
+    # Display settings
+    display_timezone: str = "Australia/Sydney"
     notes: Optional[str] = None
     updated_at: datetime
 
@@ -472,6 +474,8 @@ class DebateExecutionConfigUpdate(BaseModel):
     max_output_chars: Optional[int] = None
     default_rounds: Optional[int] = None
     allow_cloud_endpoints: Optional[bool] = None
+    # Display settings
+    display_timezone: Optional[str] = None
     # Warmup settings
     warm_model_before_debate: Optional[bool] = None
     warmup_timeout_seconds: Optional[int] = None
@@ -595,6 +599,9 @@ class ModelWarmupResponse(BaseModel):
     latency_ms: Optional[int] = None
     warmup_method: Optional[str] = None  # ollama_native, openai_compatible_ping, skipped
     error: Optional[str] = None
+    # Residency verification (Ollama native only)
+    model_resident: Optional[bool] = None  # true/false/unknown
+    expires_at: Optional[str] = None  # ISO timestamp if resident
 
 
 # ---------------------------------------------------------------------------

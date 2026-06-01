@@ -1,0 +1,28 @@
+[Unit]
+Description=Hermes Kanban Bridge for LEGION Dashboard
+Documentation=https://github.com/legionsystems/legion-dashboard/tree/main/ops/hermes-bridge
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/legion-dashboard/hermes-bridge/hermes_kanban_bridge.py 8765
+Restart=on-failure
+RestartSec=5
+
+# Logging
+StandardOutput=append:/var/log/hermes-kanban-bridge.log
+StandardError=append:/var/log/hermes-kanban-bridge.log
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/log /root/.hermes
+PrivateTmp=false
+
+# Resource limits
+MemoryMax=256M
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target

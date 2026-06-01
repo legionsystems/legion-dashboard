@@ -194,18 +194,5 @@ def bulk_hide_failed_runs(
     return results
 
 
-@router.get("/{run_id}", response_model=DebateRunSummary)
-def get_debate_run(
-    work_item_id: int,
-    run_id: int,
-    db: Session = Depends(get_db),
-):
-    """Get a specific debate run (includes hidden runs)."""
-    work_item = _get_work_item_or_404(db, work_item_id)
-    run = _get_debate_run_or_404(db, run_id)
-    
-    # Verify run belongs to work item
-    if run.work_item_id != work_item_id:
-        raise HTTPException(status_code=400, detail="Debate run does not belong to this work item")
-    
-    return DebateRunSummary.model_validate(run)
+# Note: Individual debate run detail is served by work_items router
+# at /api/work-items/{work_item_id}/debates/{run_id} with DebateRunDetail response

@@ -469,6 +469,17 @@ export default function Settings() {
         </div>
 
         <div className="border border-edge bg-canvas rounded p-3 mt-4">
+          <p className="font-mono uppercase tracking-telemetry text-[10px] text-fg-primary mb-2">Display Settings</p>
+          <Field label="Display Timezone" hint="IANA timezone name for timestamp display">
+            <TextInput
+              value={config.display_timezone || "Australia/Sydney"}
+              onChange={(v) => updateField("display_timezone", v)}
+              placeholder="Australia/Sydney"
+            />
+          </Field>
+        </div>
+
+        <div className="border border-edge bg-canvas rounded p-3 mt-4">
           <p className="font-mono uppercase tracking-telemetry text-[10px] text-fg-primary mb-2">Worker Execution</p>
           <p className="font-mono text-[9px] text-fg-muted mb-3">Worker mode queues debates and processes them in the background. The browser can be closed while the worker continues. Partial turns are saved as they complete.</p>
           <div className="grid grid-cols-2 gap-3 mb-3">

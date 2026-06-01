@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { getJson, postJson } from "../api/client.js";
 import { Panel } from "./panel.jsx";
 import { Button } from "./buttons.jsx";
@@ -44,18 +44,24 @@ const STANCE_OPTIONS = [
 
 function formatTime(iso) {
   if (!iso) return null;
-  // Display in user's local timezone (Sydney: Australia/Sydney)
-  const date = new Date(iso);
-  return date.toLocaleString('en-AU', {
-    timeZone: 'Australia/Sydney',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false
-  }).replace(',', '');
+  // Use configured display timezone (defaults to Australia/Sydney)
+  const tz = window.LEGION_DISPLAY_TIMEZONE || 'Australia/Sydney';
+  try {
+    const date = new Date(iso);
+    return date.toLocaleString('en-AU', {
+      timeZone: tz,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false
+    }).replace(',', '');
+  } catch (e) {
+    // Fallback to local timezone if configured TZ is invalid
+    return date.toLocaleString('en-AU');
+  }
 }
 
 function formatDuration(ms) {
@@ -100,7 +106,28 @@ function StatusChip({ kind, value }) {
 }
 
 function ArgumentBlock({ argument, showChronological }) {
-  const respondsTo = argument.responds_to_claim_ids ? JSON.parse(argument.responds_to_claim_ids) : [];
+  // Defensive parsing: handles JSON array strings, plain strings, or already-parsed arrays
+  let respondsTo = [];
+  if (argument.responds_to_claim_ids) {
+    if (Array.isArray(argument.responds_to_claim_ids)) {
+      respondsTo = argument.responds_to_claim_ids;
+    } else if (typeof argument.responds_to_claim_ids === 'string') {
+      try {
+        const parsed = JSON.parse(argument.responds_to_claim_ids);
+        respondsTo = Array.isArray(parsed) ? parsed : [parsed];
+      } catch (e) {
+        // Plain string like "R1-PRO-UNK-001" - wrap in array
+        console.warn('[ArgumentBlock] Plain string responds_to_claim_ids:', argument.responds_to_claim_ids);
+        respondsTo = [argument.responds_to_claim_ids];
+      }
+    }
+  }
+  
+  // Safety check: ensure respondsTo is always an array
+  if (!Array.isArray(respondsTo)) {
+    console.error('[ArgumentBlock] respondsTo is not an array:', respondsTo);
+    respondsTo = [];
+  }
   
   return (
     <div className="border border-edge/60 bg-canvas px-3 py-2">
@@ -166,17 +193,29 @@ function DebateRunCard({ run, expanded, onToggle, onExecute, onRerun, onCancel, 
   const [error, setError] = useState(null);
 
   useEffect(() => {
+    console.log('[DebateRunCard] useEffect - expanded:', expanded, 'run.id:', run.id, 'detail:', detail ? 'loaded' : 'null');
     if (!expanded) {
       // Collapse: clear detail to free memory
+      console.log('[DebateRunCard] Collapsing, clearing detail');
       setDetail(null);
       return;
     }
     // Expanded: fetch detail if not already loaded
-    if (detail !== null) return;
+    if (detail !== null) {
+      console.log('[DebateRunCard] Already has detail, skipping fetch');
+      return;
+    }
+    console.log('[DebateRunCard] Fetching detail for run', run.id);
     setLoading(true);
     getJson(`/work-items/${run.work_item_id}/debates/${run.id}`)
-      .then(setDetail)
-      .catch((err) => setError(err.message))
+      .then((data) => {
+        console.log('[DebateRunCard] Detail fetched successfully, arguments:', data?.arguments?.length || 0);
+        setDetail(data);
+      })
+      .catch((err) => {
+        console.error('[DebateRunCard] Detail fetch error:', err);
+        setError(err.message);
+      })
       .finally(() => setLoading(false));
   }, [expanded, run.id, run.work_item_id]);
 
@@ -184,13 +223,15 @@ function DebateRunCard({ run, expanded, onToggle, onExecute, onRerun, onCancel, 
   const canRerun = (run.status === "failed" || run.provenance === "execution-bridge-unconfigured" || run.provenance === "execution-disabled") && !rerunningId;
 
   const grouped = useMemo(() => {
-    if (!detail?.arguments) return null;
+    if (!detail?.arguments || detail.arguments.length === 0) return null;
     const by = { pro: [], con: [], neutral: [], arbiter: [] };
     for (const arg of detail.arguments) {
-      (by[arg.side] || by.neutral).push(arg);
+      // Normalize side to lowercase for consistent grouping
+      const side = (arg.side || "neutral").toLowerCase();
+      (by[side] || by.neutral).push(arg);
     }
     return by;
-  }, [detail]);
+  }, [detail?.arguments]);
 
   const hasEdits =
     run.suggested_title || run.suggested_description || run.suggested_acceptance_notes;
@@ -226,8 +267,8 @@ function DebateRunCard({ run, expanded, onToggle, onExecute, onRerun, onCancel, 
           )}
           {/* Provider/model if available */}
           {run.model_route && (
-            <span className="font-mono text-[10px] tracking-telemetry text-fg-secondary truncate max-w-[150px]" title={run.model_route}>
-              · {run.model_route.split(':')[1] || run.model_route}
+            <span className="font-mono text-[10px] tracking-telemetry text-fg-secondary truncate max-w-[200px]" title={run.model_route}>
+              · {run.model_route.includes(':') ? run.model_route.substring(run.model_route.indexOf(':') + 1) : run.model_route}
             </span>
           )}
         </div>
@@ -359,6 +400,37 @@ function DebateRunCard({ run, expanded, onToggle, onExecute, onRerun, onCancel, 
           {error && <ErrorBanner message={error} />}
           {loading && <SkeletonBlock rows={3} />}
 
+          {/* Final Decision Section - always show for completed runs */}
+          {(run.status === "completed" || run.status === "failed") && (
+            <div className="border border-edge bg-canvas px-3 py-2 mt-3">
+              <div className="label-tel-strong mb-2">FINAL DECISION</div>
+              {run.final_recommendation ? (
+                <div className="space-y-1.5">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <StatusChip kind="recommendation" value={run.final_recommendation} />
+                    {run.implementation_readiness && (
+                      <StatusChip kind="readiness" value={run.implementation_readiness} />
+                    )}
+                  </div>
+                  {run.summary && (
+                    <div>
+                      <div className="label-tel">RATIONALE</div>
+                      <p className="text-sm text-fg-primary whitespace-pre-wrap">{run.summary}</p>
+                    </div>
+                  )}
+                </div>
+              ) : run.error_message ? (
+                <div className="text-sm text-red-400">
+                  <strong>NO DECISION</strong> — {run.error_message}
+                </div>
+              ) : (
+                <div className="text-sm text-fg-muted">
+                  <strong>NO DECISION</strong> — Arbiter output not available
+                </div>
+              )}
+            </div>
+          )}
+
           {grouped && (
             <div className="space-y-4">
               {/* Chronological debate flow - shows back-and-forth */}
@@ -446,10 +518,16 @@ export default function DebatePanel({ workItemId }) {
   const [expandedId, setExpandedId] = useState(null);
   const [executingId, setExecutingId] = useState(null);
   const [rerunningId, setRerunningId] = useState(null);
-  const [pollingInterval, setPollingInterval] = useState(null);
   const [showHiddenRuns, setShowHiddenRuns] = useState(false);
   const [showOlderFailed, setShowOlderFailed] = useState(false);
+  const pollingIntervalRef = useRef(null);
+  const expandedIdRef = useRef(null);
   const VISIBLE_FAILED_LIMIT = 2; // Show latest N failed runs, collapse older
+
+  // Keep ref in sync with state
+  useEffect(() => {
+    expandedIdRef.current = expandedId;
+  }, [expandedId]);
 
   function refresh() {
     setError(null);
@@ -460,25 +538,37 @@ export default function DebatePanel({ workItemId }) {
       .then(([rs, is]) => {
         setRuns(rs);
         setInputs(is);
-        // Expand latest run only if no run is currently expanded
-        if (rs.length > 0 && expandedId === null) {
+        // Expand latest run only if no run is currently expanded AND user hasn't manually collapsed
+        // Use ref to get current value, not stale closure
+        if (rs.length > 0 && expandedIdRef.current === null && !window.debatePanelUserCollapsed) {
           setExpandedId(rs[0].id);
         }
-        // Check if any run is running - if so, keep polling
-        const hasRunning = rs.some(r => r.status === "running" || r.execution_stage === "warming");
-        if (hasRunning && !pollingInterval) {
-          // Start polling
-          const interval = setInterval(refresh, 2000);
-          setPollingInterval(interval);
-        } else if (!hasRunning && pollingInterval) {
-          // Stop polling but DON'T reset expandedId
-          clearInterval(pollingInterval);
-          setPollingInterval(null);
+        // Check if any run is actively executing - if so, keep polling
+        const hasActiveExecution = rs.some(r => 
+          r.status === "running" || 
+          r.status === "warming" || 
+          r.status === "generating" ||
+          r.execution_stage === "warming" ||
+          r.execution_stage === "generating" ||
+          r.execution_stage === "running"
+        );
+        // Only start polling if there's active execution and no interval yet
+        if (hasActiveExecution && !pollingIntervalRef.current) {
+          const interval = setInterval(() => {
+            refresh();
+          }, 2000);
+          pollingIntervalRef.current = interval;
+        } else if (!hasActiveExecution && pollingIntervalRef.current) {
+          clearInterval(pollingIntervalRef.current);
+          pollingIntervalRef.current = null;
           setExecutingId(null);
           setRerunningId(null);
         }
       })
-      .catch((err) => setError(err.message))
+      .catch((err) => {
+        console.error('[DebatePanel] Refresh error:', err);
+        setError(err.message);
+      })
       .finally(() => setLoading(false));
   }
 
@@ -490,11 +580,12 @@ export default function DebatePanel({ workItemId }) {
   useEffect(() => {
     // Cleanup polling on unmount
     return () => {
-      if (pollingInterval) {
-        clearInterval(pollingInterval);
+      if (pollingIntervalRef.current) {
+        clearInterval(pollingIntervalRef.current);
+        pollingIntervalRef.current = null;
       }
     };
-  }, [pollingInterval]);
+  }, []);
 
   function runDebate() {
     const clamped = Math.max(
@@ -623,7 +714,12 @@ export default function DebatePanel({ workItemId }) {
               key={run.id}
               run={run}
               expanded={expandedId === run.id}
-              onToggle={() => setExpandedId(expandedId === run.id ? null : run.id)}
+              onToggle={() => {
+                const newExpandedId = expandedId === run.id ? null : run.id;
+                setExpandedId(newExpandedId);
+                // Track manual collapse so we don't auto-expand again
+                window.debatePanelUserCollapsed = (newExpandedId === null);
+              }}
               onExecute={executeRun}
               onRerun={rerunRun}
               onCancel={cancelRun}

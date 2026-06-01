@@ -27,36 +27,65 @@ router = APIRouter(prefix="/api/settings/model-hosts", tags=["settings"])
 
 
 def _is_local_endpoint(url: str) -> bool:
-    """Check if URL is a local/private endpoint."""
+    """Check if URL is a local/private endpoint.
+    
+    Local/private includes:
+    - localhost, 127.0.0.0/8, ::1
+    - RFC1918 private IPv4 (10.x.x.x, 172.16-31.x.x, 192.168.x.x)
+    - Tailscale CGNAT (100.64.0.0/10)
+    - .ts.net domains (Tailscale)
+    - Known local hostnames: ai-4080, legion, lgn-remote, lgn-local, ollama
+    """
     try:
         parsed = urlparse(url)
-        hostname = parsed.hostname or ""
-        # Local/private hostnames
+        hostname = (parsed.hostname or "").lower()
+        
+        # Exact local hostname matches
         local_hosts = {
             "localhost",
-            "127.0.0.1",
             "ai-4080",
-            "LEGION",
+            "legion",
+            "lgn-remote",
+            "lgn-local",
             "ollama",
         }
-        if hostname.lower() in local_hosts:
+        if hostname in local_hosts:
             return True
-        # RFC1918 private ranges
-        if hostname.startswith("10.") or hostname.startswith("192.168."):
+        
+        # Loopback
+        if hostname == "127.0.0.1" or hostname == "::1" or hostname == "0.0.0.0":
+            return True
+        
+        # RFC1918 private IPv4
+        if hostname.startswith("10."):
+            return True
+        if hostname.startswith("192.168."):
             return True
         if hostname.startswith("172."):
             parts = hostname.split(".")
             if len(parts) >= 2:
-                second = int(parts[1])
-                if 16 <= second <= 31:
-                    return True
-        # Tailscale (100.64.0.0/10)
+                try:
+                    second = int(parts[1])
+                    if 16 <= second <= 31:
+                        return True
+                except ValueError:
+                    pass
+        
+        # Tailscale CGNAT (100.64.0.0/10)
         if hostname.startswith("100."):
             parts = hostname.split(".")
             if len(parts) >= 2:
-                second = int(parts[1])
-                if 64 <= second <= 127:
-                    return True
+                try:
+                    second = int(parts[1])
+                    if 64 <= second <= 127:
+                        return True
+                except ValueError:
+                    pass
+        
+        # Tailscale .ts.net domains
+        if hostname.endswith(".ts.net"):
+            return True
+        
         return False
     except Exception:
         return False
