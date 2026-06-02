@@ -1,5 +1,6 @@
 """Builder Task router - Hermes Kanban bridge."""
 import json
+import os
 import subprocess
 from datetime import datetime
 from typing import Optional
@@ -9,7 +10,8 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..builder_status_projection import sync_work_item_status_from_builder
-from ..models import BuilderTask, WorkItem
+from ..models import BuilderTask, RepoLock, WorkItem
+from .. import repo_safety
 from ..schemas_builder import BuilderTaskResponse, SendToBuilderRequest
 
 router = APIRouter(prefix="/api/builder", tags=["builder"])
@@ -202,38 +204,149 @@ def _create_hermes_task(title: str, body: str, assignee: Optional[str] = None, i
         )
 
 
+def _resolve_target_repo(work_item: WorkItem) -> tuple[str, str]:
+    """Pick the (repo_path, repo_name) tuple for a work item.
+
+    Mirrors the legacy ``_create_builder_task`` derivation so the safety gate
+    and Hermes prompt resolve to the same repo.
+    """
+    if work_item.target_app and "hub" in work_item.target_app.lower():
+        return ("/srv/repo/lgn-hub", "lgn-hub")
+    return ("/srv/repo/legion-dashboard", "legion-dashboard")
+
+
 def _create_builder_task(db: Session, work_item_id: int, request: SendToBuilderRequest, status_override: str = None) -> BuilderTaskResponse:
     """Internal helper to create builder task."""
     # Fetch work item
     work_item = db.query(WorkItem).filter(WorkItem.id == work_item_id).first()
     if not work_item:
         raise HTTPException(status_code=404, detail="Work item not found")
-    
+
     # Validate approved state
     if not work_item.approved_by_operator:
         raise HTTPException(
             status_code=400,
             detail="Work item must be approved by operator before sending to builder"
         )
-    
+
     # Block Note type by default
     if work_item.type.lower() == "note":
         raise HTTPException(
             status_code=400,
             detail="Note type cannot start build"
         )
-    
+
     # Check for existing active builder task
     existing = db.query(BuilderTask).filter(
         BuilderTask.work_item_id == work_item_id,
         BuilderTask.hermes_status.not_in(["archived", "done"])
     ).first()
-    
+
     if existing:
         raise HTTPException(
             status_code=409,
             detail=f"Active builder task already exists: {existing.hermes_task_id}"
         )
+
+    # ------------------------------------------------------------------
+    # Repo safety gate (workflow slice 3): refuse to start a build when
+    # the target repo has uncommitted changes or is already locked by
+    # another in-flight build.
+    # ------------------------------------------------------------------
+    target_repo, repo_name = _resolve_target_repo(work_item)
+    skip_gate = os.environ.get("LEGION_SKIP_REPO_SAFETY_GATE") == "1"
+    # Triage-only sends queue a Hermes card without starting a build, so they
+    # must not lock the repo (or be blocked by an in-flight build's lock).
+    # We still run the dirty/branch checks so an operator sees the same gate
+    # feedback whether they triage or start immediately.
+    skip_lock = status_override == "triage"
+    acquired_lock: Optional[RepoLock] = None
+    if not skip_gate:
+        safety = repo_safety.check_repo_clean(target_repo)
+        if not safety.is_clean:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "blocker_code": safety.blocker_code or "blocked_dirty_repo",
+                    "blocker_message": (
+                        safety.blocker_message
+                        or f"Repo {target_repo} is not clean"
+                    ),
+                    "repo_path": target_repo,
+                    "dirty_files": safety.dirty_files,
+                    "staged_files": safety.staged_files,
+                    "untracked_files": safety.untracked_files,
+                    "current_branch": safety.current_branch,
+                    "current_commit": safety.current_commit,
+                },
+            )
+
+        # When the work item explicitly names a branch and the worktree is on
+        # a different one, refuse to start so the builder doesn't push to the
+        # wrong head.
+        if (
+            work_item.branch_name
+            and safety.current_branch
+            and work_item.branch_name != safety.current_branch
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "blocker_code": "blocked_branch_mismatch",
+                    "blocker_message": (
+                        f"Repo {target_repo} is on branch "
+                        f"'{safety.current_branch}' but work item expects "
+                        f"'{work_item.branch_name}'"
+                    ),
+                    "repo_path": target_repo,
+                    "current_branch": safety.current_branch,
+                    "expected_branch": work_item.branch_name,
+                },
+            )
+
+        if not skip_lock:
+            existing_lock = repo_safety.check_repo_busy(db, target_repo)
+            if existing_lock is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "blocker_code": "blocked_repo_busy",
+                        "blocker_message": (
+                            f"Repo {target_repo} is already locked by an "
+                            f"in-flight build (lock id {existing_lock.id})"
+                        ),
+                        "repo_path": target_repo,
+                        "existing_lock_id": existing_lock.id,
+                        "existing_lock_branch": existing_lock.branch_name,
+                        "existing_lock_work_item_id": existing_lock.work_item_id,
+                    },
+                )
+
+            lock_result = repo_safety.acquire_repo_lock(
+                session=db,
+                repo_path=target_repo,
+                repo_name=repo_name,
+                branch_name=safety.current_branch or "unknown",
+                commit_sha=safety.current_commit or "unknown",
+                work_item_id=work_item_id,
+                task_id=None,  # populated below after Hermes responds
+                lock_owner=request.hermes_assignee or "builder",
+            )
+            if not lock_result.acquired:
+                # Race lost between check_repo_busy and the INSERT. Treat the
+                # same as busy.
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "blocker_code": lock_result.blocker_code or "blocked_repo_busy",
+                        "blocker_message": (
+                            lock_result.blocker_message
+                            or f"Repo {target_repo} became busy during lock acquire"
+                        ),
+                        "repo_path": target_repo,
+                    },
+                )
+            acquired_lock = lock_result.lock
     
     # Get latest completed debate run for this work item
     from ..models import DebateRun
@@ -251,17 +364,28 @@ def _create_builder_task(db: Session, work_item_id: int, request: SendToBuilderR
         mandatory_edits_json=latest_debate.summary if latest_debate else None,
     )
     
-    # Create Hermes task
+    # Create Hermes task. If this fails we must release the lock we just
+    # acquired so the repo doesn't stay pinned to a build that never started.
     idempotency_key = f"legion-dashboard-work-item-{work_item_id}-builder-v1"
-    hermes_result = _create_hermes_task(
-        title=f"LEGION-WI-{work_item_id} — {work_item.title[:100]}",
-        body=prompt_body,
-        assignee=request.hermes_assignee or "builder",
-        idempotency_key=idempotency_key,
-        priority=request.priority or work_item.priority,
-        status_override=status_override,
-    )
-    
+    try:
+        hermes_result = _create_hermes_task(
+            title=f"LEGION-WI-{work_item_id} — {work_item.title[:100]}",
+            body=prompt_body,
+            assignee=request.hermes_assignee or "builder",
+            idempotency_key=idempotency_key,
+            priority=request.priority or work_item.priority,
+            status_override=status_override,
+        )
+    except Exception:
+        if acquired_lock is not None:
+            repo_safety.release_repo_lock(
+                db,
+                target_repo,
+                release_reason="hermes_task_create_failed",
+                final_status="failed",
+            )
+        raise
+
     # Create builder task record
     builder_task = BuilderTask(
         work_item_id=work_item_id,
@@ -271,7 +395,7 @@ def _create_builder_task(db: Session, work_item_id: int, request: SendToBuilderR
         hermes_assignee=request.hermes_assignee or "builder",
         title=work_item.title,
         target_app=work_item.target_app,
-        target_repo="/srv/repo/lgn-hub" if work_item.target_app and "hub" in work_item.target_app.lower() else "/srv/repo/legion-dashboard",
+        target_repo=target_repo,
         priority=request.priority or work_item.priority,
         debate_run_id=latest_debate.id if latest_debate else None,
         recommendation=latest_debate.final_recommendation if latest_debate else None,
@@ -279,18 +403,23 @@ def _create_builder_task(db: Session, work_item_id: int, request: SendToBuilderR
         mandatory_edits_json=latest_debate.summary if latest_debate else None,
         generated_prompt_snapshot=prompt_body,
     )
-    
+
     db.add(builder_task)
     db.commit()
     db.refresh(builder_task)
-    
+
+    # Backfill the lock's task_id now that we have the Hermes ID.
+    if acquired_lock is not None and hermes_result.get("task_id"):
+        acquired_lock.task_id = str(hermes_result["task_id"])
+        db.commit()
+
     # Project Hermes status to Work Item status (reusable lifecycle transition)
     sync_work_item_status_from_builder(
         db,
         builder_task.work_item_id,  # type: ignore[arg-type]
         builder_task.hermes_status,  # type: ignore[arg-type]
     )
-    
+
     return builder_task
 
 
@@ -431,15 +560,43 @@ def sync_builder_task(
         # Check for completed status
         if task.get("status") == "done":
             builder_task.completed_at = datetime.utcnow()
-    
+
     db.commit()
     db.refresh(builder_task)
-    
+
+    # Release the repo lock when the Hermes task reaches a terminal state.
+    # ``done`` -> success; ``failed``/``cancelled``/``aborted``/``archived``
+    # -> terminal failure. The lock is keyed by repo path, so we only need
+    # to know which terminal status we're handling.
+    terminal_release = {
+        "done": ("released", "build_completed"),
+        "failed": ("failed", "build_failed"),
+        "cancelled": ("aborted", "build_cancelled"),
+        "aborted": ("aborted", "build_aborted"),
+        "archived": ("released", "build_archived"),
+    }
+    if builder_task.target_repo and builder_task.hermes_status in terminal_release:
+        final_status, reason = terminal_release[builder_task.hermes_status]
+        # Pass the Hermes task_id so we only release the lock if it's still
+        # owned by *this* builder task. If a newer build already took the
+        # lock for the same repo, leave that newer lock alone.
+        repo_safety.release_repo_lock(
+            db,
+            builder_task.target_repo,  # type: ignore[arg-type]
+            release_reason=reason,
+            final_status=final_status,
+            expected_task_id=(
+                str(builder_task.hermes_task_id)
+                if builder_task.hermes_task_id is not None
+                else None
+            ),
+        )
+
     # Project Hermes status to Work Item status (reusable lifecycle transition)
     sync_work_item_status_from_builder(
         db,
         builder_task.work_item_id,  # type: ignore[arg-type]
         builder_task.hermes_status,  # type: ignore[arg-type]
     )
-    
+
     return builder_task
