@@ -1,0 +1,40 @@
+# Hermes Agent Configuration — Example Template
+# Copy this file to .hermes-config.yaml and fill in real values.
+# DO NOT commit real secrets. Store .hermes-config.yaml in .gitignore.
+
+# ── Model ────────────────────────────────────────────────────────────
+model:
+  default: "${HERMES_DEFAULT_MODEL}"
+  provider: "${HERMES_DEFAULT_PROVIDER}"
+  base_url: ''
+  api_mode: chat_completions
+
+# ── Providers ───────────────────────────────────────────────────────
+# Add your providers here. Use environment variables for API keys.
+providers: {}
+
+# ── Fallback Model ──────────────────────────────────────────────────
+# Uncomment and configure to enable automatic failover.
+# fallback_model:
+#   provider: openrouter
+#   model: anthropic/claude-sonnet-4
+
+# ── API Server ──────────────────────────────────────────────────────
+# For Hermes API server / bridge integrations.
+# Store the real key in environment, not in this file.
+# API_SERVER_KEY: "${API_SERVER_KEY}"
+API_SERVER_KEY: "set-via-environment"
+API_SERVER_ENABLED: false
+API_SERVER_HOST: 127.0.0.1
+API_SERVER_PORT: 8642
+
+# ── Platform Config ────────────────────────────────────────────────
+# Discord, Telegram, Slack, etc. Use environment variables for tokens.
+discord:
+  bot_token: "${DISCORD_BOT_TOKEN}"
+telegram:
+  bot_token: "${TELEGRAM_BOT_TOKEN}"
+
+# ── Other Settings ────────────────────────────────────────────────
+# See Hermes docs for full configuration reference.
+# https://hermes-agent.nousresearch.com/docs

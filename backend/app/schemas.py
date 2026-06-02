@@ -24,6 +24,15 @@ class WorkItemBase(BaseModel):
     source: str = "operator"
     acceptance_notes: Optional[str] = None
 
+    # System-generated/test-item classification (optional at creation)
+    is_system_generated: bool = False
+    is_test_item: bool = False
+    generated_by: Optional[str] = None
+    generated_by_prompt_id: Optional[str] = None
+    source_run_id: Optional[int] = None
+    source_kind: Optional[str] = None
+    source_ref: Optional[str] = None
+
 
 class WorkItemCreate(WorkItemBase):
     builder_profile: Optional[str] = None
@@ -73,10 +82,75 @@ class WorkItemResponse(WorkItemBase):
     merge_commit_sha: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+
+    # Workflow lifecycle metadata (slice 1).
+    # `effective_state` is the projected/derived state computed by
+    # `app.lifecycle.compute_effective_state` at response time. The other
+    # fields are persisted nullable columns that later slices will populate.
+    dashboard_lifecycle_status: Optional[str] = None
+    effective_state: Optional[str] = None
+    pr_number: Optional[int] = None
+    code_review_status: Optional[str] = None
+    branch_name: Optional[str] = None
+    preview_required: Optional[bool] = None
+    preview_deployed: Optional[bool] = None
+    operator_certified: Optional[bool] = None
+    ready_to_merge: Optional[bool] = None
+    certified_at: Optional[datetime] = None
+    certified_by: Optional[str] = None
+    certification_note: Optional[str] = None
+
+    # Archive lifecycle fields
+    archived: bool = False
+    archived_at: Optional[datetime] = None
+    archived_by: Optional[str] = None
+    archive_reason: Optional[str] = None
+    
     # Populated by the router with the most recent debate run for this item,
     # or None when no debate has been queued. Used by the list page to show
     # the debate indicator without an extra round trip.
     latest_debate: Optional["DebateRunSummary"] = None
+
+
+class WorkItemArchiveRequest(BaseModel):
+    """Request body for archiving a work item."""
+    reason: Optional[str] = None
+
+
+class WorkItemClassificationUpdate(BaseModel):
+    """Request body for updating work item classification."""
+    is_system_generated: Optional[bool] = None
+    is_test_item: Optional[bool] = None
+    tags: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Attachment schemas
+# ---------------------------------------------------------------------------
+
+
+class AttachmentResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    work_item_id: int
+    filename: str
+    original_filename: str
+    content_type: str
+    file_size: int
+    created_at: datetime
+
+
+class BulkArchiveRequest(BaseModel):
+    """Request body for bulk archiving work items."""
+    ids: List[int]
+    reason: Optional[str] = None
+
+
+class BulkArchiveTestItemsRequest(BaseModel):
+    """Request body for bulk archiving test items."""
+    older_than_days: Optional[int] = None
+    dry_run: bool = True
 
 
 class FollowUpCreate(BaseModel):
@@ -193,7 +267,27 @@ class DebateArgumentResponse(BaseModel):
     role: str
     side: str
     content: str
+    claim_id: Optional[str] = None
+    responds_to_claim_ids: Optional[List[str]] = None
+    concession: Optional[str] = None
+    rebuttal: Optional[str] = None
+    revised_position: Optional[str] = None
     created_at: datetime
+
+    @field_validator('responds_to_claim_ids', mode='before')
+    @classmethod
+    def parse_responds_to_claim_ids(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, list):
+            return v
+        if isinstance(v, str):
+            import json
+            try:
+                return json.loads(v)
+            except (json.JSONDecodeError, TypeError):
+                return None
+        return None
 
 
 class DebateRunSummary(BaseModel):
@@ -221,6 +315,42 @@ class DebateRunSummary(BaseModel):
     error_message: Optional[str] = None
     created_at: datetime
     completed_at: Optional[datetime] = None
+    # Execution stage tracking
+    execution_stage: Optional[str] = None
+    current_round: Optional[int] = None
+    current_turn: Optional[str] = None
+    current_side: Optional[str] = None
+    current_role: Optional[str] = None
+    current_model: Optional[str] = None
+    last_progress_at: Optional[datetime] = None
+    progress_message: Optional[str] = None
+    warmup_started_at: Optional[datetime] = None
+    warmup_completed_at: Optional[datetime] = None
+    warmup_duration_ms: Optional[int] = None
+    warmup_method: Optional[str] = None
+    warmup_error: Optional[str] = None
+    generation_started_at: Optional[datetime] = None
+    generation_completed_at: Optional[datetime] = None
+    generation_duration_ms: Optional[int] = None
+    error_type: Optional[str] = None
+    error_stage: Optional[str] = None
+    error_round: Optional[int] = None
+    error_turn: Optional[str] = None
+    error_elapsed_ms: Optional[int] = None
+    # Worker fields
+    worker_status: Optional[str] = None
+    worker_id: Optional[str] = None
+    heartbeat_at: Optional[datetime] = None
+    lease_until: Optional[datetime] = None
+    cancel_requested: bool = False
+    # Cleanup/visibility controls
+    hidden_at: Optional[datetime] = None
+    hidden_by: Optional[str] = None
+    hidden_reason: Optional[str] = None
+    hidden_category: Optional[str] = None
+    is_test_run: bool = False
+    superseded_by_run_id: Optional[int] = None
+    cleanup_note: Optional[str] = None
 
 
 class DebateRunDetail(DebateRunSummary):
@@ -310,11 +440,16 @@ class DebateExecutionConfigResponse(BaseModel):
     # Model mode: single_model (default) or role_models (advanced)
     model_mode: str
     # Single-model mode: all roles use this
+    default_host_id: Optional[int] = None
     default_model: str
     # Role-specific models (only used when model_mode='role_models')
+    pro_host_id: Optional[int] = None
     pro_model: Optional[str] = None
+    con_host_id: Optional[int] = None
     con_model: Optional[str] = None
+    arbiter_host_id: Optional[int] = None
     arbiter_model: Optional[str] = None
+    fallback_host_id: Optional[int] = None
     fallback_model: Optional[str] = None
     # API key never returned — only indicate if configured
     api_key_configured: bool
@@ -322,6 +457,26 @@ class DebateExecutionConfigResponse(BaseModel):
     max_output_chars: int
     default_rounds: int
     allow_cloud_endpoints: bool
+    # Warmup settings
+    warm_model_before_debate: bool = True
+    warmup_timeout_seconds: int = 300
+    keep_model_loaded_for: str = "1h"
+    fail_debate_if_warmup_fails: bool = True
+    # Failed run display
+    visible_failed_runs_limit: int = 2
+    # Worker configuration
+    execution_backend: str = "worker"
+    worker_enabled: bool = True
+    worker_poll_interval_seconds: int = 3
+    worker_lease_seconds: int = 300
+    worker_heartbeat_seconds: int = 10
+    worker_max_concurrent_runs: int = 1
+    turn_timeout_seconds: Optional[int] = None
+    whole_run_timeout_seconds: Optional[int] = None
+    retry_failed_turn_enabled: bool = True
+    max_turn_retries: int = 1
+    # Display settings
+    display_timezone: str = "Australia/Sydney"
     notes: Optional[str] = None
     updated_at: datetime
 
@@ -334,11 +489,16 @@ class DebateExecutionConfigUpdate(BaseModel):
     # Model mode: single_model (default) or role_models (advanced)
     model_mode: Optional[str] = None
     # Single-model mode: all roles use this
+    default_host_id: Optional[int] = None
     default_model: Optional[str] = None
     # Role-specific models (only used when model_mode='role_models')
+    pro_host_id: Optional[int] = None
     pro_model: Optional[str] = None
+    con_host_id: Optional[int] = None
     con_model: Optional[str] = None
+    arbiter_host_id: Optional[int] = None
     arbiter_model: Optional[str] = None
+    fallback_host_id: Optional[int] = None
     fallback_model: Optional[str] = None
     # Write-only: set/replace/clear API key
     api_key: Optional[str] = None
@@ -348,6 +508,26 @@ class DebateExecutionConfigUpdate(BaseModel):
     max_output_chars: Optional[int] = None
     default_rounds: Optional[int] = None
     allow_cloud_endpoints: Optional[bool] = None
+    # Display settings
+    display_timezone: Optional[str] = None
+    # Warmup settings
+    warm_model_before_debate: Optional[bool] = None
+    warmup_timeout_seconds: Optional[int] = None
+    keep_model_loaded_for: Optional[str] = None
+    fail_debate_if_warmup_fails: Optional[bool] = None
+    # Failed run display
+    visible_failed_runs_limit: Optional[int] = None
+    # Worker configuration
+    execution_backend: Optional[str] = None
+    worker_enabled: Optional[bool] = None
+    worker_poll_interval_seconds: Optional[int] = None
+    worker_lease_seconds: Optional[int] = None
+    worker_heartbeat_seconds: Optional[int] = None
+    worker_max_concurrent_runs: Optional[int] = None
+    turn_timeout_seconds: Optional[int] = None
+    whole_run_timeout_seconds: Optional[int] = None
+    retry_failed_turn_enabled: Optional[bool] = None
+    max_turn_retries: Optional[int] = None
     notes: Optional[str] = None
 
     @field_validator("model_mode")
@@ -395,6 +575,177 @@ class DebateExecutionTestResponse(BaseModel):
     model: str
     latency_ms: Optional[int] = None
     error: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Debate run cleanup/visibility schemas
+# ---------------------------------------------------------------------------
+
+
+class DebateRunHideRequest(BaseModel):
+    """Request to hide a debate run."""
+    reason: Optional[str] = None
+    category: str = "operator_cleanup"
+
+
+class DebateRunRestoreRequest(BaseModel):
+    """Request to restore a hidden debate run."""
+    pass
+
+
+class DebateRunBulkHideRequest(BaseModel):
+    """Request to bulk hide failed debate runs for a work item."""
+    older_than_run_id: Optional[int] = None
+    keep_latest_failed: bool = True
+    reason: Optional[str] = None
+
+
+class DebateRunHideResponse(BaseModel):
+    """Response for hide/restore operations."""
+    model_config = ConfigDict(from_attributes=True)
+    
+    id: int
+    work_item_id: int
+    status: str
+    hidden_at: Optional[datetime] = None
+    hidden_by: Optional[str] = None
+    hidden_reason: Optional[str] = None
+    hidden_category: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Model warmup schemas
+# ---------------------------------------------------------------------------
+
+
+class ModelWarmupRequest(BaseModel):
+    """Request to warm up a model."""
+    keep_alive: Optional[str] = "1h"
+    timeout_seconds: Optional[int] = 300
+
+
+class ModelWarmupResponse(BaseModel):
+    """Response for model warmup operations."""
+    success: bool
+    provider: Optional[str] = None
+    base_url_host: Optional[str] = None
+    model: str
+    latency_ms: Optional[int] = None
+    warmup_method: Optional[str] = None  # ollama_native, openai_compatible_ping, skipped
+    error: Optional[str] = None
+    # Residency verification (Ollama native only)
+    model_resident: Optional[bool] = None  # true/false/unknown
+    expires_at: Optional[str] = None  # ISO timestamp if resident
+
+
+# ---------------------------------------------------------------------------
+# Model host schemas
+# ---------------------------------------------------------------------------
+
+
+class ModelHostModelResponse(BaseModel):
+    """Model in a host's catalog."""
+    model_config = ConfigDict(from_attributes=True)
+    
+    id: int
+    model_id: str
+    display_name: Optional[str] = None
+    is_available: bool = True
+    discovered_at: datetime
+
+
+class ModelHostResponse(BaseModel):
+    """Model host configuration response — masks secrets."""
+    model_config = ConfigDict(from_attributes=True)
+    
+    id: int
+    name: str
+    provider_type: str  # ollama_native, openai_compatible, xai, other
+    provider: str  # Legacy field
+    base_url: str
+    enabled: bool
+    allow_cloud_endpoints: bool
+    api_key_configured: bool
+    
+    # Capability flags
+    supports_native_ollama: Optional[bool] = None
+    supports_openai_chat_completions: Optional[bool] = None
+    supports_model_list: Optional[bool] = None
+    supports_loaded_models: Optional[bool] = None
+    preferred_generation_api: Optional[str] = None
+    
+    # Test status
+    last_test_status: Optional[str] = None
+    last_test_message: Optional[str] = None
+    last_tested_at: Optional[datetime] = None
+    last_models_refresh_at: Optional[datetime] = None
+    last_error: Optional[str] = None
+    
+    # Models (eager loaded)
+    models: List[ModelHostModelResponse] = []
+    
+    # Hermes sync metadata
+    source: str = "manual"
+    source_key: Optional[str] = None
+    profile_name: Optional[str] = None
+    provider_name: Optional[str] = None
+    sync_enabled: bool = True
+    last_synced_at: Optional[datetime] = None
+    last_sync_status: Optional[str] = None
+    last_sync_error: Optional[str] = None
+    
+    created_at: datetime
+    updated_at: datetime
+
+
+class ModelHostCreate(BaseModel):
+    """Create a new model host."""
+    name: str
+    provider_type: str = "ollama_native"
+    provider: str = "openai_compatible"  # Legacy
+    base_url: str
+    api_key: Optional[str] = None
+    enabled: bool = True
+    allow_cloud_endpoints: bool = False
+
+
+class ModelHostUpdate(BaseModel):
+    """Update a model host."""
+    name: Optional[str] = None
+    provider_type: Optional[str] = None
+    provider: Optional[str] = None
+    base_url: Optional[str] = None
+    api_key: Optional[str] = None
+    clear_api_key: bool = False
+    enabled: Optional[bool] = None
+    allow_cloud_endpoints: Optional[bool] = None
+    supports_native_ollama: Optional[bool] = None
+    supports_openai_chat_completions: Optional[bool] = None
+    supports_model_list: Optional[bool] = None
+    supports_loaded_models: Optional[bool] = None
+    preferred_generation_api: Optional[str] = None
+
+
+class CapabilityCheckResult(BaseModel):
+    """Result of a single capability check."""
+    name: str
+    status: str  # success, failed, skipped
+    endpoint: Optional[str] = None
+    latency_ms: Optional[int] = None
+    message: Optional[str] = None
+
+
+class ModelHostCapabilityTestResponse(BaseModel):
+    """Structured capability test result for a model host."""
+    provider_id: int
+    provider_type: str
+    enabled: bool
+    overall_status: str  # success, warning, failed
+    checks: List[CapabilityCheckResult] = []
+    recommended_generation_api: Optional[str] = None  # ollama_native, openai_chat_completions
+    safe_error: Optional[str] = None
+    selected_model_available: Optional[bool] = None
+    selected_model: Optional[str] = None
 
 
 # Resolve the forward reference from WorkItemResponse -> DebateRunSummary now

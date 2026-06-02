@@ -7,6 +7,7 @@ import WorkItemNew from "./pages/WorkItemNew.jsx";
 import WorkIntakeForm from "./components/WorkIntakeForm.jsx";
 import Apps from "./pages/Apps.jsx";
 import Settings from "./pages/Settings.jsx";
+import ModelHosts from "./pages/ModelHosts.jsx";
 import { Sidebar, MobileNav, TopBar } from "./components/shell.jsx";
 
 function crumbsFromPath(pathname) {
@@ -24,6 +25,8 @@ function crumbsFromPath(pathname) {
   }
   if (pathname.startsWith("/work-items")) return ["WORK ITEMS"];
   if (pathname.startsWith("/apps")) return ["APPS"];
+  if (pathname === "/settings/model-providers") return ["SETTINGS", "MODEL PROVIDERS"];
+  if (pathname === "/settings") return ["SETTINGS"];
   return [pathname.toUpperCase()];
 }
 
@@ -50,6 +53,9 @@ export default function App() {
               <Route path="/work-items/:id/edit" element={<WorkItemForm />} />
               <Route path="/apps" element={<Apps />} />
               <Route path="/settings" element={<Settings />} />
+              <Route path="/settings/model-providers" element={<ModelHosts />} />
+              {/* Legacy route - redirects to new location */}
+              <Route path="/model-hosts" element={<Navigate to="/settings/model-providers" replace />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </div>

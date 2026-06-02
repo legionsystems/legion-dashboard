@@ -60,6 +60,37 @@ class WorkItem(Base):
     pr_url = Column(String(500), nullable=True)
     merge_commit_sha = Column(String(40), nullable=True)
 
+    # Workflow lifecycle metadata (slice 1: foundation).
+    # All columns are nullable; later slices populate them as operators
+    # certify, repos lock, previews deploy, and merges complete.
+    dashboard_lifecycle_status = Column(String(40), nullable=True)
+    effective_state = Column(String(40), nullable=True)
+    pr_number = Column(Integer, nullable=True)
+    code_review_status = Column(String(30), nullable=True)
+    branch_name = Column(String(200), nullable=True)
+    preview_required = Column(Boolean, nullable=True)
+    preview_deployed = Column(Boolean, nullable=True)
+    operator_certified = Column(Boolean, nullable=True)
+    ready_to_merge = Column(Boolean, nullable=True)
+    certified_at = Column(DateTime, nullable=True)
+    certified_by = Column(String(100), nullable=True)
+    certification_note = Column(Text, nullable=True)
+
+    # Archive lifecycle
+    archived = Column(Boolean, nullable=False, default=False, index=True)
+    archived_at = Column(DateTime, nullable=True)
+    archived_by = Column(String(100), nullable=True)
+    archive_reason = Column(Text, nullable=True)
+
+    # System-generated/test-item metadata
+    is_system_generated = Column(Boolean, nullable=False, default=False, index=True)
+    is_test_item = Column(Boolean, nullable=False, default=False, index=True)
+    generated_by = Column(String(100), nullable=True)
+    generated_by_prompt_id = Column(String(200), nullable=True)
+    source_run_id = Column(Integer, nullable=True)
+    source_kind = Column(String(50), nullable=True)
+    source_ref = Column(String(200), nullable=True)
+
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(
         DateTime,
@@ -71,6 +102,32 @@ class WorkItem(Base):
     follow_ups = relationship(
         "FollowUp", back_populates="work_item", cascade="all, delete-orphan"
     )
+    builder_tasks = relationship(
+        "BuilderTask", back_populates="work_item", cascade="all, delete-orphan"
+    )
+    attachments = relationship(
+        "WorkItemAttachment", back_populates="work_item", cascade="all, delete-orphan"
+    )
+
+
+class WorkItemAttachment(Base):
+    __tablename__ = "work_item_attachments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    work_item_id = Column(
+        Integer,
+        ForeignKey("work_items.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    filename = Column(String(255), nullable=False)
+    original_filename = Column(String(255), nullable=False)
+    content_type = Column(String(100), nullable=False)
+    file_size = Column(Integer, nullable=False)
+    storage_path = Column(String(500), nullable=False)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+
+    work_item = relationship("WorkItem", back_populates="attachments")
 
 
 class FollowUp(Base):
@@ -128,8 +185,25 @@ class DebateRun(Base):
     # later edited (which the API allows).
     work_item_type_snapshot = Column(String(30), nullable=False)
 
-    # queued | running | completed | failed
+    # Status: queued | claimed | warming | generating | running | completed | failed | cancelled
     status = Column(String(20), nullable=False, default="queued")
+    
+    # Worker/queue fields for durable execution
+    worker_status = Column(String(20), nullable=False, default="queued")  # queued | claimed | warming | running | completed | failed | cancelled
+    worker_id = Column(String(100), nullable=True)  # Worker that claimed this run
+    lease_until = Column(DateTime, nullable=True)  # Lease expiration time
+    claimed_at = Column(DateTime, nullable=True)
+    heartbeat_at = Column(DateTime, nullable=True)
+    queued_at = Column(DateTime, server_default=func.now(), nullable=False)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    cancelled_at = Column(DateTime, nullable=True)
+    cancelled_by = Column(String(100), nullable=True)
+    cancel_requested = Column(Boolean, nullable=False, default=False)
+    retry_of_run_id = Column(Integer, nullable=True)  # Link to previous run if this is a retry
+    retry_from_turn_id = Column(Integer, nullable=True)  # Retry from specific turn
+    attempt_number = Column(Integer, nullable=False, default=1)
+    max_attempts = Column(Integer, nullable=False, default=1)
 
     # Operator-controlled (1..5, default 2). The router enforces the clamp;
     # the column trusts the router and the model layer's pre-write validation.
@@ -161,6 +235,38 @@ class DebateRun(Base):
 
     error_message = Column(Text, nullable=True)
 
+    # Execution stage tracking (warming, running, etc.)
+    execution_stage = Column(String(20), nullable=True)  # queued | warming | generating | running | completed | failed
+    current_round = Column(Integer, nullable=True)  # Active round during execution
+    current_turn = Column(String(50), nullable=True)  # Active turn name (e.g., "pro_opening", "con_response")
+    current_side = Column(String(10), nullable=True)  # pro | con | arbiter
+    current_role = Column(String(100), nullable=True)  # Active role during execution
+    current_model = Column(String(200), nullable=True)  # Model being used
+    last_progress_at = Column(DateTime, nullable=True)
+    progress_message = Column(Text, nullable=True)
+    warmup_started_at = Column(DateTime, nullable=True)
+    warmup_completed_at = Column(DateTime, nullable=True)
+    warmup_duration_ms = Column(Integer, nullable=True)
+    warmup_method = Column(String(50), nullable=True)  # ollama_native | openai_compatible_ping
+    warmup_error = Column(Text, nullable=True)
+    generation_started_at = Column(DateTime, nullable=True)
+    generation_completed_at = Column(DateTime, nullable=True)
+    generation_duration_ms = Column(Integer, nullable=True)
+    error_type = Column(String(50), nullable=True)
+    error_stage = Column(String(20), nullable=True)  # warmup | generation
+    error_round = Column(Integer, nullable=True)
+    error_turn = Column(String(50), nullable=True)
+    error_elapsed_ms = Column(Integer, nullable=True)
+
+    # Cleanup/visibility controls
+    hidden_at = Column(DateTime, nullable=True)
+    hidden_by = Column(String(100), nullable=True)
+    hidden_reason = Column(Text, nullable=True)
+    hidden_category = Column(String(50), nullable=True)  # repeated_timeout | setup_failure | superseded | operator_cleanup | test_run
+    is_test_run = Column(Boolean, nullable=False, default=False)
+    superseded_by_run_id = Column(Integer, nullable=True)
+    cleanup_note = Column(Text, nullable=True)
+
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     completed_at = Column(DateTime, nullable=True)
 
@@ -187,10 +293,17 @@ class DebateArgument(Base):
     # Role names follow the spec: Product Owner, UX/Design Reviewer,
     # Technical Architect, Security/Privacy Reviewer, Builder,
     # Skeptic/Red Team, Final Arbiter, Operator (for operator-attached args).
-    role = Column(String(60), nullable=False)
+    role = Column(String(200), nullable=False)
     # pro | con | neutral | arbiter
     side = Column(String(20), nullable=False, default="neutral")
     content = Column(Text, nullable=False)
+    
+    # Dialectic tracking: claim_id for this argument, and which prior claims it responds to
+    claim_id = Column(String(50), nullable=True)  # e.g., "R1-PRO-PO-001"
+    responds_to_claim_ids = Column(Text, nullable=True)  # JSON array of claim IDs this responds to
+    concession = Column(Text, nullable=True)  # What this side concedes from opponent
+    rebuttal = Column(Text, nullable=True)  # What this side rebuts
+    revised_position = Column(Text, nullable=True)  # How position changed after considering opponent
 
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
 
@@ -248,17 +361,22 @@ class DebateExecutionConfig(Base):
     # Model mode: single_model (default) or role_models (advanced)
     model_mode = Column(String(20), nullable=False, default="single_model")
 
-    # Single-model mode: all roles use this model
+    # Single-model mode: all roles use this model/host
+    default_host_id = Column(Integer, nullable=True)
     default_model = Column(String(200), nullable=False, default="deepseek-r1:32b")
 
     # Role-specific models (only used when model_mode='role_models')
     # Pro/Builder model: Product Owner, UX/Design Reviewer, Technical Architect, Builder
+    pro_host_id = Column(Integer, nullable=True)
     pro_model = Column(String(200), nullable=True)
     # Con/Skeptic model: Skeptic/Red Team, Security/Privacy Reviewer
+    con_host_id = Column(Integer, nullable=True)
     con_model = Column(String(200), nullable=True)
     # Arbiter model: Final Arbiter
+    arbiter_host_id = Column(Integer, nullable=True)
     arbiter_model = Column(String(200), nullable=True)
     # Optional fallback model (stored for future use)
+    fallback_host_id = Column(Integer, nullable=True)
     fallback_model = Column(String(200), nullable=True)
 
     # Secret — stored server-side only, never returned to UI
@@ -274,6 +392,30 @@ class DebateExecutionConfig(Base):
     # Security guards
     allow_cloud_endpoints = Column(Boolean, nullable=False, default=False)
 
+    # Model warmup settings
+    warm_model_before_debate = Column(Boolean, nullable=False, default=True)
+    warmup_timeout_seconds = Column(Integer, nullable=False, default=300)
+    keep_model_loaded_for = Column(String(20), nullable=False, default="1h")
+    fail_debate_if_warmup_fails = Column(Boolean, nullable=False, default=True)
+    
+    # Failed run display settings
+    visible_failed_runs_limit = Column(Integer, nullable=False, default=2)
+    
+    # Worker configuration
+    execution_backend = Column(String(20), nullable=False, default="worker")  # worker | sync
+    worker_enabled = Column(Boolean, nullable=False, default=True)
+    worker_poll_interval_seconds = Column(Integer, nullable=False, default=3)
+    worker_lease_seconds = Column(Integer, nullable=False, default=300)
+    worker_heartbeat_seconds = Column(Integer, nullable=False, default=10)
+    worker_max_concurrent_runs = Column(Integer, nullable=False, default=1)
+    turn_timeout_seconds = Column(Integer, nullable=True)  # Per-turn timeout (defaults to timeout_seconds)
+    whole_run_timeout_seconds = Column(Integer, nullable=True)  # Whole-run max duration
+    retry_failed_turn_enabled = Column(Boolean, nullable=False, default=True)
+    max_turn_retries = Column(Integer, nullable=False, default=1)
+    
+    # Display settings
+    display_timezone = Column(String(50), nullable=False, default="Australia/Sydney")  # IANA timezone name
+    
     # Metadata
     notes = Column(Text, nullable=True)
     updated_at = Column(
@@ -287,25 +429,44 @@ class DebateExecutionConfig(Base):
 class ModelHost(Base):
     """SQL-backed model host configuration.
 
-    Represents an OpenAI-compatible model provider endpoint.
+    Represents a model provider endpoint (Ollama native, OpenAI-compatible, xAI, etc.).
     UI manages hosts; debate execution references them.
     """
     __tablename__ = "model_hosts"
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(100), nullable=False, unique=True, index=True)
-    provider = Column(String(50), nullable=False, default="openai_compatible")
+    provider_type = Column(String(30), nullable=False, default="ollama_native")  # ollama_native, openai_compatible, xai, other
+    provider = Column(String(50), nullable=False, default="openai_compatible")  # Legacy field, kept for compatibility
     base_url = Column(String(500), nullable=False)
     api_key = Column(String(500), nullable=True)
     enabled = Column(Boolean, nullable=False, default=True)
     allow_cloud_endpoints = Column(Boolean, nullable=False, default=False)
 
+    # Capability flags
+    supports_native_ollama = Column(Boolean, nullable=True)  # /api/tags, /api/chat
+    supports_openai_chat_completions = Column(Boolean, nullable=True)  # /v1/chat/completions
+    supports_model_list = Column(Boolean, nullable=True)
+    supports_loaded_models = Column(Boolean, nullable=True)  # /api/ps
+    preferred_generation_api = Column(String(30), nullable=True)  # ollama_native, openai_chat_completions
+
     # Test/refresh status
-    last_test_status = Column(String(20), nullable=True)  # success, failed, unknown
+    last_test_status = Column(String(20), nullable=True)  # success, warning, failed, unknown
     last_test_message = Column(Text, nullable=True)
     last_tested_at = Column(DateTime, nullable=True)
     last_models_refresh_at = Column(DateTime, nullable=True)
     last_error = Column(Text, nullable=True)
+    last_capability_result = Column(Text, nullable=True)  # JSON safe capability test result
+
+    # Hermes sync metadata
+    source = Column(String(20), nullable=False, default="manual")  # manual | hermes
+    source_key = Column(String(200), nullable=True)  # Stable identifier from Hermes
+    profile_name = Column(String(100), nullable=True)  # Hermes profile name
+    provider_name = Column(String(100), nullable=True)  # Hermes provider name
+    sync_enabled = Column(Boolean, nullable=False, default=True)
+    last_synced_at = Column(DateTime, nullable=True)
+    last_sync_status = Column(String(20), nullable=True)  # success, failed, skipped
+    last_sync_error = Column(Text, nullable=True)
 
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(
@@ -322,6 +483,10 @@ class ModelHost(Base):
         cascade="all, delete-orphan",
         lazy="selectin",
     )
+
+    @property
+    def api_key_configured(self) -> bool:
+        return bool(self.api_key)
 
 
 class ModelHostModel(Base):
@@ -344,7 +509,26 @@ class ModelHostModel(Base):
     is_available = Column(Boolean, nullable=False, default=True)
     discovered_at = Column(DateTime, server_default=func.now(), nullable=False)
 
+    # Hermes sync metadata
+    source = Column(String(20), nullable=False, default="manual")  # manual | hermes
+    source_key = Column(String(200), nullable=True)
+    last_synced_at = Column(DateTime, nullable=True)
+
     host = relationship("ModelHost", back_populates="models")
+
+
+class ModelSyncRun(Base):
+    """Record of a Hermes model sync run."""
+    __tablename__ = "model_sync_runs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    source = Column(String(20), nullable=False, default="hermes")
+    status = Column(String(20), nullable=False, default="running")  # running, completed, failed
+    hosts_discovered = Column(Integer, nullable=True)
+    models_discovered = Column(Integer, nullable=True)
+    error_message = Column(Text, nullable=True)  # Safe/redacted error message
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    completed_at = Column(DateTime, nullable=True)
 
 
 class AppActionLog(Base):
@@ -371,3 +555,10 @@ class AppActionLog(Base):
     elapsed_seconds = Column(Integer, nullable=True)
 
     app = relationship("App", back_populates="action_logs")
+
+
+# BuilderTask is defined in models_builder.py - import after all Base classes are defined
+from .models_builder import BuilderTask
+
+# Now backfill the relationship on WorkItem (already defined above)
+# The relationship string reference works because BuilderTask is now imported

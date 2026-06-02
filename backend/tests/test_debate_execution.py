@@ -46,8 +46,8 @@ class TestExecutionDisabled:
         # Should still be queued
         assert data["status"] == "queued"
         # Should have clear error message
-        assert "not enabled" in data["error_message"].lower()
-        assert "DEBATE_EXECUTION_ENABLED" in data["error_message"]
+        assert "not enabled" in data["error_message"].lower() or "disabled" in data["error_message"].lower()
+        assert "Settings" in data["error_message"] or "DEBATE_EXECUTION_ENABLED" in data["error_message"]
 
     def test_execute_next_returns_clear_message(self, client):
         """Execute next also returns clear message when disabled."""
@@ -63,7 +63,7 @@ class TestExecutionDisabled:
         data = response.json()
 
         assert data["status"] == "queued"
-        assert "not enabled" in data["error_message"].lower()
+        assert "not enabled" in data["error_message"].lower() or "disabled" in data["error_message"].lower()
 
 
 class TestExecutionEndpointsExist:

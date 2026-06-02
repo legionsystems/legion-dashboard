@@ -93,14 +93,27 @@ export default function WorkItemList() {
   const [items, setItems] = useState([]);
   const [type, setType] = useState("");
   const [status, setStatus] = useState("");
+  const [view, setView] = useState("active"); // active | archived | all
+  const [generated, setGenerated] = useState("all"); // human | system | test | all
+  const [app, setApp] = useState(""); // "" = All | app_id | __unassigned__
   const [query, setQuery] = useState("");
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [apps, setApps] = useState([]);
+
+  useEffect(() => {
+    getJson("/work-items/apps")
+      .then((data) => setApps(data))
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     const params = new URLSearchParams();
     if (type) params.set("type", type);
     if (status) params.set("status", status);
+    if (view) params.set("view", view);
+    if (generated) params.set("generated", generated);
+    if (app) params.set("app", app);
     const qs = params.toString();
     setLoading(true);
     let cancelled = false;
@@ -116,7 +129,7 @@ export default function WorkItemList() {
     return () => {
       cancelled = true;
     };
-  }, [type, status]);
+  }, [type, status, view, generated, app]);
 
   const statusCounts = useMemo(() => {
     // counts reflect currently-loaded set (server already filtered by status if applied)
@@ -156,6 +169,90 @@ export default function WorkItemList() {
       </div>
 
       <ErrorBanner message={error} />
+
+      <Panel
+        title="VIEW / ORIGIN"
+        subtitle={`// ${view} · ${generated}`}
+      >
+        <div className="flex flex-wrap gap-2 items-center">
+          <div className="flex items-center gap-1.5 mr-4">
+            <span className="label-tel">VIEW:</span>
+            <button
+              onClick={() => setView("active")}
+              className={`px-2 py-1 font-mono uppercase tracking-telemetry text-[10px] font-semibold border ${
+                view === "active"
+                  ? "border-fg-primary text-fg-primary bg-raised"
+                  : "border-edge text-fg-secondary hover:text-fg-primary"
+              }`}
+            >
+              ACTIVE
+            </button>
+            <button
+              onClick={() => setView("archived")}
+              className={`px-2 py-1 font-mono uppercase tracking-telemetry text-[10px] font-semibold border ${
+                view === "archived"
+                  ? "border-fg-primary text-fg-primary bg-raised"
+                  : "border-edge text-fg-secondary hover:text-fg-primary"
+              }`}
+            >
+              ARCHIVED
+            </button>
+            <button
+              onClick={() => setView("all")}
+              className={`px-2 py-1 font-mono uppercase tracking-telemetry text-[10px] font-semibold border ${
+                view === "all"
+                  ? "border-fg-primary text-fg-primary bg-raised"
+                  : "border-edge text-fg-secondary hover:text-fg-primary"
+              }`}
+            >
+              ALL
+            </button>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="label-tel">ORIGIN:</span>
+            <button
+              onClick={() => setGenerated("human")}
+              className={`px-2 py-1 font-mono uppercase tracking-telemetry text-[10px] font-semibold border ${
+                generated === "human"
+                  ? "border-fg-primary text-fg-primary bg-raised"
+                  : "border-edge text-fg-secondary hover:text-fg-primary"
+              }`}
+            >
+              HUMAN
+            </button>
+            <button
+              onClick={() => setGenerated("system")}
+              className={`px-2 py-1 font-mono uppercase tracking-telemetry text-[10px] font-semibold border ${
+                generated === "system"
+                  ? "border-fg-primary text-fg-primary bg-raised"
+                  : "border-edge text-fg-secondary hover:text-fg-primary"
+              }`}
+            >
+              SYSTEM
+            </button>
+            <button
+              onClick={() => setGenerated("test")}
+              className={`px-2 py-1 font-mono uppercase tracking-telemetry text-[10px] font-semibold border ${
+                generated === "test"
+                  ? "border-fg-primary text-fg-primary bg-raised"
+                  : "border-edge text-fg-secondary hover:text-fg-primary"
+              }`}
+            >
+              TEST
+            </button>
+            <button
+              onClick={() => setGenerated("all")}
+              className={`px-2 py-1 font-mono uppercase tracking-telemetry text-[10px] font-semibold border ${
+                generated === "all"
+                  ? "border-fg-primary text-fg-primary bg-raised"
+                  : "border-edge text-fg-secondary hover:text-fg-primary"
+              }`}
+            >
+              ALL
+            </button>
+          </div>
+        </div>
+      </Panel>
 
       <Panel
         title="FILTER / STATUS"
@@ -229,6 +326,20 @@ export default function WorkItemList() {
               />
             ))}
           </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="label-tel">APP:</span>
+          <select
+            value={app}
+            onChange={(e) => setApp(e.target.value)}
+            className="bg-surface border border-edge font-mono uppercase tracking-telemetry text-[11px] text-fg-secondary px-2 py-1 outline-none"
+          >
+            <option value="">ALL</option>
+            <option value="__unassigned__">NO APP</option>
+            {apps.map((a) => (
+              <option key={a} value={a}>{a.toUpperCase()}</option>
+            ))}
+          </select>
         </div>
       </div>
 
@@ -306,6 +417,44 @@ export default function WorkItemList() {
                             {item.body}
                           </p>
                         )}
+                        <div className="flex gap-1 mt-1 flex-wrap">
+                          {item.archived && (
+                            <span
+                              className="inline-flex items-center gap-1 border px-1 py-0.5 text-[9px] font-mono uppercase tracking-telemetry font-semibold"
+                              style={{
+                                color: "#8A8A8A",
+                                borderColor: "#8A8A8A55",
+                                backgroundColor: "#8A8A8A14",
+                              }}
+                            >
+                              ARCHIVED
+                            </span>
+                          )}
+                          {item.is_system_generated && (
+                            <span
+                              className="inline-flex items-center gap-1 border px-1 py-0.5 text-[9px] font-mono uppercase tracking-telemetry font-semibold"
+                              style={{
+                                color: "#A855F7",
+                                borderColor: "#A855F755",
+                                backgroundColor: "#A855F714",
+                              }}
+                            >
+                              SYSTEM
+                            </span>
+                          )}
+                          {item.is_test_item && (
+                            <span
+                              className="inline-flex items-center gap-1 border px-1 py-0.5 text-[9px] font-mono uppercase tracking-telemetry font-semibold"
+                              style={{
+                                color: "#F59E0B",
+                                borderColor: "#F59E0B55",
+                                backgroundColor: "#F59E0B14",
+                              }}
+                            >
+                              TEST
+                            </span>
+                          )}
+                        </div>
                       </td>
                       <td className="px-3 py-2.5">
                         <StatusBadge status={item.status} />

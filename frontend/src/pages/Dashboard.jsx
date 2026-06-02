@@ -22,8 +22,18 @@ const STATUS_GROUPS = [
 
 function formatTime(iso) {
   if (!iso) return "—";
+  // Display in user's local timezone (Sydney: Australia/Sydney)
   const d = new Date(iso);
-  return d.toISOString().replace("T", " ").split(".")[0] + "Z";
+  return d.toLocaleString('en-AU', {
+    timeZone: 'Australia/Sydney',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  }).replace(',', '');
 }
 
 export default function Dashboard() {

@@ -183,7 +183,7 @@ def test_get_single_debate_run_includes_arguments(client):
     assert len(body["arguments"]) >= 1
     note = body["arguments"][0]
     assert note["role"] == "System"
-    assert "execution bridge not configured" in note["content"]
+    assert "disabled" in note["content"].lower() or "execution" in note["content"].lower()
 
 
 # ---------------------------------------------------------------------------

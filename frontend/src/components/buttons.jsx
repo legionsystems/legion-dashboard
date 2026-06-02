@@ -38,6 +38,30 @@ export function Button({
   );
 }
 
+export function OperatorButton({
+  size = "sm",
+  type = "button",
+  disabled = false,
+  className = "",
+  children,
+  ...rest
+}) {
+  // Operator action: dark canvas bg with phosphor green accent - for START BUILD and other primary operator actions
+  // Default size 'sm' matches badge/button scale in header action area
+  return (
+    <button
+      type={type}
+      disabled={disabled}
+      className={
+        `inline-flex items-center gap-1.5 font-mono uppercase tracking-telemetry font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-40 bg-canvas text-phosphor hover:bg-phosphor/10 border border-phosphor/60 ${SIZES[size]} ${className}`
+      }
+      {...rest}
+    >
+      {children}
+    </button>
+  );
+}
+
 export function LinkButton({ children, className = "", ...rest }) {
   return (
     <a

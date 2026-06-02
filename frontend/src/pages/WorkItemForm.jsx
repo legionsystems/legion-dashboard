@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { getJson, postJson, putJson } from "../api/client.js";
+import { getJson, postJson, putJson, uploadFile } from "../api/client.js";
 import {
   ALL_STATUSES,
   ALL_TYPES,
@@ -46,6 +46,9 @@ export default function WorkItemForm() {
   const [error, setError] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [touched, setTouched] = useState({});
+  const [attachments, setAttachments] = useState([]);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState(null);
 
   useEffect(() => {
     if (!editing) return;
@@ -61,6 +64,9 @@ export default function WorkItemForm() {
       })
       .catch((err) => setError(err.message))
       .finally(() => setLoaded(true));
+    getJson(`/work-items/${id}/attachments`)
+      .then(setAttachments)
+      .catch(() => undefined);
   }, [id, editing]);
 
   function update(field, value) {
@@ -89,6 +95,23 @@ export default function WorkItemForm() {
       .then((data) => navigate(`/work-items/${data.id}`))
       .catch((err) => setError(err.message))
       .finally(() => setSubmitting(false));
+  }
+
+  function handleFileSelect(event) {
+    const files = event.target.files;
+    if (!files || files.length === 0) return;
+    const file = files[0];
+    setUploading(true);
+    setUploadError(null);
+    uploadFile(`/work-items/${id}/attachments`, file)
+      .then((result) => {
+        setAttachments((prev) => [result, ...prev]);
+        event.target.value = "";
+      })
+      .catch((err) => {
+        setUploadError(err.message);
+      })
+      .finally(() => setUploading(false));
   }
 
   const headerLabel = editing ? `EDIT // #${id}` : "NEW WORK ITEM";
@@ -189,6 +212,52 @@ export default function WorkItemForm() {
                   className={inputBase}
                 />
               </Field>
+
+              {editing && (
+                <Field
+                  label="ATTACHMENTS"
+                  hint={uploading ? "UPLOADING…" : `${attachments.length} FILE(S) // PNG, JPG, GIF, WEBP, PDF // MAX 10MB`}
+                >
+                  <div className="space-y-3">
+                    <div className="flex items-center gap-3">
+                      <label className="inline-flex items-center gap-2 px-3 py-2 text-xs font-mono uppercase tracking-telemetry bg-canvas border border-edge-strong cursor-pointer hover:bg-raised transition-colors">
+                        <input
+                          type="file"
+                          accept="image/png,image/jpeg,image/gif,image/webp,application/pdf"
+                          onChange={handleFileSelect}
+                          disabled={uploading}
+                          className="hidden"
+                        />
+                        {uploading ? "UPLOADING…" : "+ ATTACH FILE"}
+                      </label>
+                      {uploadError && (
+                        <span className="text-xs text-alert font-mono">! {uploadError}</span>
+                      )}
+                    </div>
+                    {attachments.length > 0 && (
+                      <div className="space-y-1.5">
+                        {attachments.map((att) => (
+                          <div
+                            key={att.id}
+                            className="flex items-center justify-between px-3 py-2 bg-canvas border border-edge text-xs font-mono"
+                          >
+                            <div className="flex items-center gap-2 min-w-0">
+                              <span className="text-fg-secondary">📎</span>
+                              <span className="truncate text-fg-primary">{att.original_filename}</span>
+                              <span className="text-fg-muted">({att.content_type})</span>
+                            </div>
+                            <span className="text-fg-muted tabular-nums">
+                              {att.file_size > 1024 * 1024
+                                ? `${(att.file_size / (1024 * 1024)).toFixed(1)} MB`
+                                : `${Math.round(att.file_size / 1024)} KB`}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </Field>
+              )}
             </div>
           </Panel>
 

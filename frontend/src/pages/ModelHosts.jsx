@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { getJson, postJson, putJson } from "../api/client.js";
 
 function Section({ title, children }) {
@@ -105,14 +106,16 @@ function HostCard({ host, onEdit, onTest, onRefresh, onDelete }) {
   const [refreshing, setRefreshing] = useState(false);
   const [testResult, setTestResult] = useState(null);
 
+  const isHermes = host.source === "hermes";
+
   async function handleTest() {
     setTesting(true);
     setTestResult(null);
     try {
-      const result = await postJson(`/api/settings/model-hosts/${host.id}/test`);
+      const result = await postJson(`/settings/model-hosts/${host.id}/test-capability?selected_model=${encodeURIComponent(host.models?.[0]?.model_id || "")}`);
       setTestResult(result);
     } catch (err) {
-      setTestResult({ success: false, error: err.message });
+      setTestResult({ overall_status: "failed", safe_error: err.message });
     } finally {
       setTesting(false);
     }
@@ -121,7 +124,7 @@ function HostCard({ host, onEdit, onTest, onRefresh, onDelete }) {
   async function handleRefresh() {
     setRefreshing(true);
     try {
-      await postJson(`/api/settings/model-hosts/${host.id}/refresh-models`);
+      await postJson(`/settings/model-hosts/${host.id}/refresh-models`);
       onRefresh(host.id);
     } catch (err) {
       // Error handled by parent
@@ -137,10 +140,25 @@ function HostCard({ host, onEdit, onTest, onRefresh, onDelete }) {
     <div className="border border-edge bg-canvas rounded p-3 mb-3">
       <div className="flex items-center justify-between mb-2">
         <div>
-          <h4 className="font-mono uppercase tracking-telemetry text-xs font-semibold text-fg-primary">
-            {host.name}
-          </h4>
+          <div className="flex items-center gap-2">
+            <h4 className="font-mono uppercase tracking-telemetry text-xs font-semibold text-fg-primary">
+              {host.name}
+            </h4>
+            <span className={`font-mono text-[8px] uppercase px-1.5 py-0.5 rounded border ${
+              isHermes ? "border-fg-primary text-fg-primary" : "border-edge text-fg-muted"
+            }`}>
+              {isHermes ? "Hermes" : "Manual"}
+            </span>
+            <span className="font-mono text-[8px] uppercase px-1.5 py-0.5 rounded border border-edge text-fg-secondary">
+              {host.provider_type || "unknown"}
+            </span>
+          </div>
           <p className="font-mono text-[10px] text-fg-muted">{host.base_url}</p>
+          {isHermes && host.provider_name && (
+            <p className="font-mono text-[9px] text-fg-secondary mt-0.5">
+              {host.profile_name || "default"}:{host.provider_name}
+            </p>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <span className={`font-mono text-[9px] uppercase ${statusColor}`}>
@@ -154,42 +172,71 @@ function HostCard({ host, onEdit, onTest, onRefresh, onDelete }) {
         <Button onClick={handleTest} variant="secondary" size="sm" disabled={testing}>
           {testing ? "Testing..." : "Test"}
         </Button>
-        <Button onClick={handleRefresh} variant="secondary" size="sm" disabled={refreshing}>
-          {refreshing ? "Refreshing..." : "Refresh Models"}
-        </Button>
+        {!isHermes && (
+          <Button onClick={handleRefresh} variant="secondary" size="sm" disabled={refreshing}>
+            {refreshing ? "Refreshing..." : "Refresh Models"}
+          </Button>
+        )}
         <Button onClick={() => onEdit(host)} variant="secondary" size="sm">
           Edit
         </Button>
-        <Button onClick={() => onDelete(host.id)} variant="danger" size="sm">
-          Delete
-        </Button>
+        {!isHermes && (
+          <Button onClick={() => onDelete(host.id)} variant="danger" size="sm">
+            Delete
+          </Button>
+        )}
       </div>
 
       {testResult && (
-        <div className={`p-2 rounded text-[10px] font-mono ${testResult.success ? "bg-green-500/10 text-green-400" : "bg-red-500/10 text-red-400"}`}>
-          {testResult.success ? "✓ Connection successful" : `✗ ${testResult.error}`}
-          {testResult.latency_ms && <span> ({testResult.latency_ms}ms)</span>}
+        <div className={`p-2 rounded text-[10px] font-mono mb-2 ${testResult.overall_status === "success" ? "bg-green-500/10 text-green-400" : testResult.overall_status === "warning" ? "bg-amber-500/10 text-amber-400" : "bg-red-500/10 text-red-400"}`}>
+          {testResult.overall_status === "success" ? "✓ Capability test passed" : testResult.overall_status === "warning" ? "⚠ Partial success" : `✗ ${testResult.safe_error || "Failed"}`}
+          {testResult.recommended_generation_api && (
+            <div className="mt-1 text-fg-secondary">
+              Recommended: {testResult.recommended_generation_api}
+            </div>
+          )}
+          {testResult.checks && testResult.checks.length > 0 && (
+            <div className="mt-2 space-y-0.5">
+              {testResult.checks.map((check, i) => (
+                <div key={i} className={check.status === "success" ? "text-green-400" : check.status === "failed" ? "text-red-400" : "text-fg-muted"}>
+                  {check.status === "success" ? "✓" : check.status === "failed" ? "✗" : "○"} {check.name}: {check.message || check.status}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
-      {host.last_models_refresh_at && (
-        <p className="font-mono text-[9px] text-fg-muted mt-1">
-          Models refreshed: {new Date(host.last_models_refresh_at).toLocaleString()}
-        </p>
-      )}
+      <div className="mt-2 flex items-center gap-4 text-[9px] font-mono text-fg-muted">
+        {host.last_models_refresh_at && (
+          <span>Models: {new Date(host.last_models_refresh_at).toLocaleString()}</span>
+        )}
+        {isHermes && host.last_synced_at && (
+          <span>Synced: {new Date(host.last_synced_at).toLocaleString()}</span>
+        )}
+        {isHermes && host.last_sync_status && (
+          <span className={host.last_sync_status === "success" ? "text-green-400" : host.last_sync_status === "stale" ? "text-amber-400" : "text-red-400"}>
+            {host.last_sync_status}
+          </span>
+        )}
+      </div>
     </div>
   );
 }
 
 export default function ModelHosts({ onBack }) {
+  const navigate = useNavigate();
   const [hosts, setHosts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(null);
   const [showForm, setShowForm] = useState(false);
   const [error, setError] = useState(null);
+  const [syncing, setSyncing] = useState(false);
+  const [lastSync, setLastSync] = useState(null);
 
   const [formData, setFormData] = useState({
     name: "",
+    provider_type: "ollama_native",
     provider: "openai_compatible",
     base_url: "",
     api_key: "",
@@ -203,7 +250,7 @@ export default function ModelHosts({ onBack }) {
 
   async function loadHosts() {
     try {
-      const data = await getJson("/api/settings/model-hosts");
+      const data = await getJson("/settings/model-hosts");
       setHosts(data);
       setLoading(false);
     } catch (err) {
@@ -212,17 +259,31 @@ export default function ModelHosts({ onBack }) {
     }
   }
 
+  async function handleSync() {
+    setSyncing(true);
+    setError(null);
+    try {
+      const result = await postJson("/settings/model-hosts/sync-hermes");
+      setLastSync(result);
+      loadHosts();
+    } catch (err) {
+      setError(`Sync failed: ${err.message}`);
+    } finally {
+      setSyncing(false);
+    }
+  }
+
   async function handleSave() {
     setError(null);
     try {
       if (editing) {
-        await putJson(`/api/settings/model-hosts/${editing.id}`, formData);
+        await putJson(`/settings/model-hosts/${editing.id}`, formData);
       } else {
-        await postJson("/api/settings/model-hosts", formData);
+        await postJson("/settings/model-hosts", formData);
       }
       setShowForm(false);
       setEditing(null);
-      setFormData({ name: "", provider: "openai_compatible", base_url: "", api_key: "", enabled: true, allow_cloud_endpoints: false });
+      setFormData({ name: "", provider_type: "ollama_native", provider: "openai_compatible", base_url: "", api_key: "", enabled: true, allow_cloud_endpoints: false });
       loadHosts();
     } catch (err) {
       setError(`Failed to save: ${err.message}`);
@@ -232,11 +293,12 @@ export default function ModelHosts({ onBack }) {
   function handleEdit(host, updates = null) {
     if (updates) {
       // Quick toggle update
-      putJson(`/api/settings/model-hosts/${host.id}`, updates).then(loadHosts);
+      putJson(`/settings/model-hosts/${host.id}`, updates).then(loadHosts);
     } else {
       setEditing(host);
       setFormData({
         name: host.name,
+        provider_type: host.provider_type || "ollama_native",
         provider: host.provider,
         base_url: host.base_url,
         api_key: "",
@@ -250,7 +312,7 @@ export default function ModelHosts({ onBack }) {
   async function handleDelete(id) {
     if (!confirm("Delete this model host?")) return;
     try {
-      await postJson(`/api/settings/model-hosts/${id}`);
+      await fetch(`/api/settings/model-hosts/${id}`, { method: "DELETE" });
       loadHosts();
     } catch (err) {
       setError(`Failed to delete: ${err.message}`);
@@ -274,16 +336,31 @@ export default function ModelHosts({ onBack }) {
       <div className="mb-6 flex items-center justify-between">
         <div>
           <h1 className="font-display font-extrabold tracking-tighter-display text-fg-primary text-2xl mb-1">
-            MODEL HOSTS
+            MODEL PROVIDERS
           </h1>
           <p className="font-mono text-xs text-fg-muted">
-            Configure model provider endpoints
+            Model hosts are AI/model endpoints used by Debate Execution. Sync from Hermes or add manually.
           </p>
         </div>
-        <Button onClick={() => { setShowForm(true); setEditing(null); setFormData({ name: "", provider: "openai_compatible", base_url: "", api_key: "", enabled: true, allow_cloud_endpoints: false }); }}>
-          Add Host
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button onClick={handleSync} variant="primary" disabled={syncing}>
+            {syncing ? "Syncing..." : "Sync from Hermes"}
+          </Button>
+          <Button onClick={() => { setShowForm(true); setEditing(null); setFormData({ name: "", provider_type: "ollama_native", provider: "openai_compatible", base_url: "", api_key: "", enabled: true, allow_cloud_endpoints: false }); }}>
+            Add Host
+          </Button>
+        </div>
       </div>
+
+      {lastSync && (
+        <div className={`mb-4 border rounded p-3 ${lastSync.error_message ? "border-amber-500 bg-amber-500/10" : "border-green-500 bg-green-500/10"}`}>
+          <p className={`font-mono text-xs ${lastSync.error_message ? "text-amber-400" : "text-green-400"}`}>
+            {lastSync.error_message 
+              ? `⚠ ${lastSync.error_message}`
+              : `✓ Synced ${lastSync.hosts_discovered} hosts, ${lastSync.models_discovered} models from Hermes`}
+          </p>
+        </div>
+      )}
 
       {error && (
         <div className="mb-4 border border-red-500 bg-red-500/10 rounded p-3">
@@ -300,6 +377,20 @@ export default function ModelHosts({ onBack }) {
                 onChange={(v) => setFormData({ ...formData, name: v })}
                 placeholder="e.g., ai-4080"
               />
+            </Field>
+            <Field label="Provider Type">
+              <SelectInput
+                value={formData.provider_type}
+                onChange={(v) => setFormData({ ...formData, provider_type: v })}
+                options={[
+                  { value: "ollama_native", label: "Ollama Native" },
+                  { value: "openai_compatible", label: "OpenAI Compatible" },
+                  { value: "xai", label: "xAI / Grok (Cloud)" },
+                ]}
+              />
+              <p className="font-mono text-[9px] text-fg-secondary mt-1">
+                Ollama uses /api/chat, OpenAI uses /v1/chat/completions
+              </p>
             </Field>
 
             <Field label="Provider">
@@ -372,7 +463,7 @@ export default function ModelHosts({ onBack }) {
       </Section>
 
       <div className="mt-4">
-        <Button onClick={onBack} variant="secondary">Back to Settings</Button>
+        <Button onClick={() => navigate("/settings")} variant="secondary">Back to Settings</Button>
       </div>
     </div>
   );

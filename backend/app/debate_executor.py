@@ -26,13 +26,15 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import httpx
 from sqlalchemy.orm import Session
 
 from .models import DebateArgument, DebateExecutionConfig, DebateRun, OperatorDebateInput, WorkItem
+from .debate_warmup import warm_model_ollama_native, warm_model_openai_compatible
 
 
 # Debate roles in order
@@ -48,13 +50,15 @@ DEBATE_ROLES = [
 # Final arbiter recommendation values
 RECOMMENDATIONS = [
     "APPROVE_AS_IS",
-    "APPROVE_WITH_EDITS",
-    "SPLIT_FIRST",
-    "NEEDS_MORE_DETAIL",
-    "DO_NOT_BUILD_NOW",
+    "APPROVE_WITH_MANDATORY_EDITS",
+    "NEEDS_REWORK",
+    "SPLIT_SCOPE",
+    "DEFER",
+    "REJECT",
+    "LOW_SIGNAL",
 ]
 
-READINESS_STATES = ["READY", "READY_AFTER_EDITS", "NOT_READY"]
+READINESS_STATES = ["READY_NOW", "READY_AFTER_EDITS", "NOT_READY", "NEEDS_SPIKE", "BLOCKED"]
 
 
 @dataclass
@@ -97,25 +101,262 @@ def get_execution_config(db: Session) -> ExecutionConfig:
 
     DB settings take precedence. Environment variables are only used as
     bootstrap defaults when no DB row exists.
+
+    Resolves ModelHost references to actual base_url/provider/api_key.
     """
     # Try DB first
     config_row = db.query(DebateExecutionConfig).filter(DebateExecutionConfig.id == 1).first()
 
     if config_row is not None:
+        # Resolve host if selected
+        base_url = config_row.base_url
+        provider = config_row.provider
+        api_key = config_row.api_key
+        
+        # If host_id is set, use the host's settings (overrides base_url/provider/api_key)
+        if config_row.default_host_id:
+            from .models import ModelHost
+            host = db.query(ModelHost).filter(ModelHost.id == config_row.default_host_id).first()
+            if host and host.enabled:
+                base_url = host.base_url
+                # Use provider_type for routing, fall back to legacy provider
+                provider = host.provider_type if host.provider_type else host.provider
+                api_key = host.api_key or api_key
+
         # Use default_model for single-model mode, or fall back to it for compatibility
         model = config_row.default_model
+
         return ExecutionConfig(
             enabled=config_row.enabled,
-            provider=config_row.provider,
-            base_url=config_row.base_url,
+            provider=provider,
+            base_url=base_url,
             model=model,
-            api_key=config_row.api_key,
+            api_key=api_key,
             timeout_seconds=config_row.timeout_seconds,
             max_output_chars=config_row.max_output_chars,
         )
 
     # Fallback to environment (bootstrap only)
     return ExecutionConfig.from_env()
+
+
+def derive_ollama_native_url(openai_compatible_url: str) -> str:
+    """Derive Ollama native API URL from OpenAI-compatible URL.
+    
+    Example: http://ai-4080:11434/v1 -> http://ai-4080:11434/api/chat
+    
+    Args:
+        openai_compatible_url: URL ending with /v1
+        
+    Returns:
+        Native Ollama chat endpoint URL
+    """
+    from urllib.parse import urlparse, urlunparse
+    
+    parsed = urlparse(openai_compatible_url)
+    
+    # Strip /v1 suffix if present
+    path = parsed.path
+    if path.endswith("/v1"):
+        path = path[:-3]  # Remove /v1
+    elif path.endswith("/v1/"):
+        path = path[:-4]  # Remove /v1/
+    
+    # Build native chat endpoint
+    native_path = path.rstrip("/") + "/api/chat"
+    
+    return urlunparse((
+        parsed.scheme,
+        parsed.netloc,
+        native_path,
+        parsed.params,
+        parsed.query,
+        parsed.fragment
+    ))
+
+
+def is_local_endpoint(url: str) -> bool:
+    """Check if URL is a local/private endpoint (not cloud).
+    
+    Local/private includes:
+    - localhost, 127.0.0.0/8, ::1
+    - RFC1918 private IPv4 (10.x.x.x, 172.16-31.x.x, 192.168.x.x)
+    - Tailscale CGNAT (100.64.0.0/10)
+    - .ts.net domains (Tailscale)
+    - Known local hostnames: ai-4080, legion, lgn-remote, lgn-local, ollama
+    """
+    from urllib.parse import urlparse
+    
+    try:
+        parsed = urlparse(url)
+        hostname = (parsed.hostname or "").lower()
+        
+        # Exact local hostname matches
+        local_hosts = {
+            "localhost",
+            "ai-4080",
+            "legion",
+            "lgn-remote",
+            "lgn-local",
+            "ollama",
+        }
+        if hostname in local_hosts:
+            return True
+        
+        # Loopback
+        if hostname == "127.0.0.1" or hostname == "::1" or hostname == "0.0.0.0":
+            return True
+        
+        # RFC1918 private IPv4
+        if hostname.startswith("10."):
+            return True
+        if hostname.startswith("192.168."):
+            return True
+        if hostname.startswith("172."):
+            parts = hostname.split(".")
+            if len(parts) >= 2:
+                try:
+                    second = int(parts[1])
+                    if 16 <= second <= 31:
+                        return True
+                except ValueError:
+                    pass
+        
+        # Tailscale CGNAT (100.64.0.0/10)
+        if hostname.startswith("100."):
+            parts = hostname.split(".")
+            if len(parts) >= 2:
+                try:
+                    second = int(parts[1])
+                    if 64 <= second <= 127:
+                        return True
+                except ValueError:
+                    pass
+        
+        # Tailscale .ts.net domains
+        if hostname.endswith(".ts.net"):
+            return True
+        
+        return False
+    except Exception:
+        return False
+
+
+def warm_model_if_enabled(
+    db_session: Session,
+    config_row: DebateExecutionConfig,
+    model: str,
+) -> dict:
+    """Warm up the model before debate execution if enabled.
+    
+    Args:
+        db_session: Database session
+        config_row: Debate execution config with warmup settings
+        model: Model name to warm
+        
+    Returns:
+        dict with keys:
+            - success: bool
+            - warmup_method: str (ollama_native | openai_compatible_ping | skipped)
+            - duration_ms: int (if successful)
+            - error: str (if failed)
+    """
+    # Check if warmup is enabled
+    if not config_row.warm_model_before_debate:
+        return {"success": True, "warmup_method": "skipped", "duration_ms": 0}
+    
+    # Resolve host if selected
+    base_url = config_row.base_url
+    api_key = config_row.api_key
+    
+    if config_row.default_host_id:
+        from .models import ModelHost
+        host = db_session.query(ModelHost).filter(ModelHost.id == config_row.default_host_id).first()
+        if host and host.enabled:
+            base_url = host.base_url
+            api_key = host.api_key or api_key
+            print(f"[WARMUP] Using host {host.name}: base_url={base_url}, provider_type={host.provider_type}")
+    
+    print(f"[WARMUP] Resolved base_url: {base_url}")
+    
+    # Cloud endpoint guard
+    is_cloud = not is_local_endpoint(base_url)
+    if is_cloud and not config_row.allow_cloud_endpoints:
+        return {
+            "success": False,
+            "warmup_method": "skipped",
+            "error": "Cloud endpoints require allow_cloud_endpoints=true",
+        }
+    
+    # Derive native Ollama URL if applicable
+    is_ollama = "ollama" in base_url.lower() or "11434" in base_url
+    warmup_url = derive_ollama_native_url(base_url) if is_ollama else base_url.rstrip("/") + "/chat/completions"
+    
+    print(f"[WARMUP] is_ollama={is_ollama}, warmup_url={warmup_url}")
+    
+    timeout = config_row.warmup_timeout_seconds
+    keep_alive = config_row.keep_model_loaded_for
+    
+    try:
+        start = time.time()
+        
+        if is_ollama:
+            # Native Ollama warmup: POST /api/chat with empty messages
+            warmup_payload = {
+                "model": model,
+                "messages": [],
+                "keep_alive": keep_alive,
+            }
+            warmup_method = "ollama_native"
+        else:
+            # OpenAI-compatible ping
+            warmup_payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": "OK"}],
+                "max_tokens": 1,
+            }
+            warmup_method = "openai_compatible_ping"
+        
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        
+        with httpx.Client(timeout=timeout) as client:
+            response = client.post(warmup_url, headers=headers, json=warmup_payload)
+            response.raise_for_status()
+        
+        duration_ms = int((time.time() - start) * 1000)
+        
+        return {
+            "success": True,
+            "warmup_method": warmup_method,
+            "duration_ms": duration_ms,
+        }
+        
+    except httpx.TimeoutException:
+        return {
+            "success": False,
+            "warmup_method": "ollama_native" if is_ollama else "openai_compatible_ping",
+            "error": f"Warmup timeout after {timeout}s",
+        }
+    except httpx.ConnectError as e:
+        return {
+            "success": False,
+            "warmup_method": "ollama_native" if is_ollama else "openai_compatible_ping",
+            "error": f"Connection failed: {str(e)[:200]}",
+        }
+    except httpx.HTTPStatusError as e:
+        return {
+            "success": False,
+            "warmup_method": "ollama_native" if is_ollama else "openai_compatible_ping",
+            "error": f"HTTP {e.response.status_code}: {str(e)[:200]}",
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "warmup_method": "ollama_native" if is_ollama else "openai_compatible_ping",
+            "error": f"Warmup error: {type(e).__name__}: {str(e)[:200]}",
+        }
 
 
 def get_model_for_role(config: DebateExecutionConfig, role: str, side: Optional[str] = None) -> str:
@@ -163,21 +404,22 @@ def get_model_for_role(config: DebateExecutionConfig, role: str, side: Optional[
 def build_debate_prompt(
     work_item: WorkItem,
     operator_inputs: list[OperatorDebateInput],
-    previous_summary: Optional[str],
-    changes_since_previous: Optional[dict],
+    previous_arguments: list[dict],
     round_number: int,
     total_rounds: int,
     role: str,
     side: str,
+    turn_index: int,
+    total_turns_in_round: int,
 ) -> str:
-    """Build a compact prompt for a single debate role.
-
-    Keeps context bounded to avoid token overrun.
+    """Build a dialectic prompt for a single debate turn.
+    
+    Each turn must respond to prior opposing claims, not just repeat.
     """
     parts = []
 
     # Header
-    parts.append(f"=== DEBATE ROUND {round_number}/{total_rounds} ===")
+    parts.append(f"=== DEBATE ROUND {round_number}/{total_rounds}, TURN {turn_index}/{total_turns_in_round} ===")
     parts.append(f"Role: {role}")
     parts.append(f"Side: {side.upper()}")
     parts.append("")
@@ -186,16 +428,10 @@ def build_debate_prompt(
     parts.append("=== WORK ITEM ===")
     parts.append(f"Type: {work_item.type.upper()}")
     parts.append(f"Title: {work_item.title}")
-    parts.append(f"Status: {work_item.status}")
-    parts.append(f"Priority: {work_item.priority}")
-    if work_item.target_app:
-        parts.append(f"Target App: {work_item.target_app}")
     if work_item.body:
-        parts.append(f"Description:\n{work_item.body}")
+        parts.append(f"Description:\\n{work_item.body}")
     if work_item.acceptance_notes:
-        parts.append(f"Acceptance Notes:\n{work_item.acceptance_notes}")
-    if work_item.tags:
-        parts.append(f"Tags: {work_item.tags}")
+        parts.append(f"Acceptance Notes:\\n{work_item.acceptance_notes}")
     parts.append("")
 
     # Operator arguments
@@ -206,36 +442,82 @@ def build_debate_prompt(
             parts.append(f"[{stance.upper()}] {inp.content}")
         parts.append("")
 
-    # Previous debate context
-    if previous_summary:
-        parts.append("=== PREVIOUS DEBATE SUMMARY ===")
-        parts.append(previous_summary)
+    # Prior arguments from this debate - CRITICAL for dialectic
+    if previous_arguments:
+        parts.append("=== PRIOR ARGUMENTS IN THIS DEBATE ===")
+        parts.append("You MUST read these carefully and respond to the strongest opposing claims.")
+        parts.append("Do NOT repeat arguments already made. Build on, rebut, or concede specific points.")
         parts.append("")
+        for arg in previous_arguments:
+            arg_side = arg.get('side', 'unknown').upper()
+            arg_role = arg.get('role', 'Unknown')
+            arg_content = arg.get('content', '')[:800]  # Truncate for token bounds
+            claim_id = arg.get('claim_id', '')
+            parts.append(f"[{arg_side}] {arg_role} (Claim {claim_id}):")
+            parts.append(f"  {arg_content}")
+            parts.append("")
 
-    if changes_since_previous:
-        parts.append("=== CHANGES SINCE LAST DEBATE ===")
-        for field, change in changes_since_previous.items():
-            parts.append(f"{field}: {change.get('from')} → {change.get('to')}")
-        parts.append("")
-
-    # Role-specific instructions
+    # Dialectic instructions
     parts.append("=== YOUR TASK ===")
     if role == "Final Arbiter":
-        parts.append("Synthesize all arguments and produce a final recommendation.")
-        parts.append("Your response MUST be valid JSON with this exact structure:")
+        parts.append("You are the Final Arbiter. Produce a final decision in STRICT JSON format.")
+        parts.append("CRITICAL: Return ONLY raw JSON. No markdown. No code fences. No prose outside JSON.")
+        parts.append("")
+        parts.append("REQUIRED JSON STRUCTURE (minimal - only these 6 fields required):")
         parts.append("{")
-        parts.append('  "recommendation": "APPROVE_AS_IS|APPROVE_WITH_EDITS|SPLIT_FIRST|NEEDS_MORE_DETAIL|DO_NOT_BUILD_NOW",')
-        parts.append('  "implementation_readiness": "READY|READY_AFTER_EDITS|NOT_READY",')
-        parts.append('  "rationale": "...",')
-        parts.append('  "top_risks": "...",')
-        parts.append('  "suggested_title": "...",')
-        parts.append('  "suggested_description": "...",')
-        parts.append('  "suggested_acceptance_notes": "..."')
+        parts.append('  "recommendation": "APPROVE_AS_IS",')
+        parts.append('  "implementation_readiness": "READY_NOW",')
+        parts.append('  "decision_confidence": "medium",')
+        parts.append('  "actionability_score": 75,')
+        parts.append('  "rationale": "One concise paragraph referencing specific claim IDs.",')
+        parts.append('  "mandatory_edits": []')
         parts.append("}")
+        parts.append("")
+        parts.append("ALLOWED recommendation values: APPROVE_AS_IS, APPROVE_WITH_MANDATORY_EDITS, NEEDS_REWORK, SPLIT_SCOPE, DEFER, REJECT, LOW_SIGNAL")
+        parts.append("ALLOWED implementation_readiness values: READY_NOW, READY_AFTER_EDITS, NOT_READY, NEEDS_SPIKE, BLOCKED")
+        parts.append("ALLOWED decision_confidence values: low, medium, high")
+        parts.append("RULES:")
+        parts.append("1. If recommendation is APPROVE_WITH_MANDATORY_EDITS, mandatory_edits MUST have at least one concrete edit with field, current_problem, and required_change.")
+        parts.append("2. If no concrete mandatory edits exist, use APPROVE_AS_IS instead.")
+        parts.append("3. Generic edits like 'consider security' are NOT valid mandatory edits.")
+        parts.append("4. Keep rationale concise (2-4 sentences). Reference claim IDs like R1-PRO-PO-001.")
+        parts.append("5. If arguments are repetitive/generic with no clear winner, use LOW_SIGNAL and explain why in rationale.")
+        parts.append("")
+        parts.append("DO NOT include markdown code fences like ```json or ```.")
+        parts.append("DO NOT include any text before or after the JSON object.")
+        parts.append("Your entire response must be a single valid JSON object starting with { and ending with }.")
+        parts.append("2. If no concrete mandatory edits exist, use APPROVE_AS_IS.")
+        parts.append("3. Generic edits like 'consider security' are NOT valid mandatory edits.")
+        parts.append("4. Each mandatory edit must identify the field and the required change.")
+        parts.append("5. If arguments are repetitive/generic, use LOW_SIGNAL and explain in rationale.")
+        parts.append("6. Separate scope-creep suggestions from mandatory edits.")
+        parts.append("7. Mark suggestions already in the work item as already_covered.")
     else:
+        # Determine which opposing side to respond to
+        opposing_side = "con" if side == "pro" else "pro"
+        prior_opposing = [a for a in previous_arguments if a.get('side') == opposing_side]
+        
         parts.append(f"As {role}, argue from the {side} perspective.")
-        parts.append("Be concise and specific. Reference the work item details.")
-        parts.append("If side is 'neutral', provide context and analysis without taking a position.")
+        if prior_opposing:
+            parts.append(f"CRITICAL: There are {len(prior_opposing)} {opposing_side.upper()} claims made before you.")
+            parts.append("You MUST:")
+            parts.append("  1. Identify the 1-2 strongest opposing claims by their claim_id")
+            parts.append("  2. Either rebut them with specific counter-evidence, concede a valid point, or reframe the issue")
+            parts.append("  3. State clearly: 'Responding to claim [X]: ...' or 'I concede that [X] raises a valid point about ...'")
+            parts.append("  4. Avoid repeating arguments already made by your side")
+            parts.append("  5. If your position evolved after considering the other side, state: 'After considering [X], I now believe...'")
+        else:
+            parts.append("This is the opening argument for your side. Make a strong, concise case.")
+        parts.append("Be specific. Reference work item details. Keep under 800 characters.")
+        parts.append("")
+        parts.append("Your response MUST be valid JSON:")
+        parts.append("{")
+        parts.append('  "content": "Your argument text...",')
+        parts.append(f'  "responds_to_claim_ids": ["claim_id_you_are_responding_to"],  // empty array [] if opening argument')
+        parts.append('  "concession": "What you concede from opponent, or null",')
+        parts.append('  "rebuttal": "What you rebut and why, or null",')
+        parts.append('  "revised_position": "How your view changed, or null"')
+        parts.append("}")
 
     return "\n".join(parts)
 
@@ -246,10 +528,31 @@ def call_model(
 ) -> str:
     """Call the configured model endpoint.
 
+    Uses Ollama native API (/api/chat) for ollama_native providers.
+    Uses OpenAI-compatible API (/v1/chat/completions) for openai_compatible providers.
+
     Returns raw model output (not parsed).
     Raises httpx.RequestError on network/model failures.
     """
-    url = config.base_url.rstrip("/") + "/chat/completions"
+    # Route based on provider
+    if config.provider == "ollama_native":
+        # Ollama native: /api/chat
+        url = config.base_url.rstrip("/") + "/api/chat"
+        payload = {
+            "model": config.model,
+            "messages": messages,
+            "stream": False,
+        }
+    else:
+        # OpenAI-compatible: /chat/completions
+        url = config.base_url.rstrip("/") + "/chat/completions"
+        payload = {
+            "model": config.model,
+            "messages": messages,
+            "temperature": 0.7,
+            "max_tokens": 2048,
+            "stream": False,
+        }
 
     headers = {
         "Content-Type": "application/json",
@@ -257,18 +560,16 @@ def call_model(
     if config.api_key:
         headers["Authorization"] = f"Bearer {config.api_key}"
 
-    payload = {
-        "model": config.model,
-        "messages": messages,
-        "temperature": 0.7,
-        "max_tokens": 2048,
-        "stream": False,
-    }
-
     with httpx.Client(timeout=config.timeout_seconds) as client:
         response = client.post(url, headers=headers, json=payload)
         response.raise_for_status()
         data = response.json()
+        
+        # Parse response based on provider
+        if config.provider == "ollama_native":
+            return data.get("message", {}).get("content", "")
+        else:
+            return data.get("choices", [{}])[0].get("message", {}).get("content", "")
 
     # Extract content from OpenAI-compatible response
     try:
@@ -283,45 +584,124 @@ def call_model(
     return content
 
 
-def parse_arbiter_json(content: str) -> Optional[dict[str, Any]]:
-    """Parse Final Arbiter JSON output.
+def parse_arbiter_json(content: str) -> dict:
+    """Parse Final Arbiter JSON output with structured result.
 
-    Returns parsed dict or None if parsing fails.
+    Returns a structured result dict:
+    {
+        "success": True/False,
+        "data": parsed_dict or None,
+        "failure_category": None or one of:
+            "empty_response", "invalid_json", "markdown_fence_not_removed",
+            "missing_recommendation", "missing_implementation_readiness",
+            "invalid_recommendation_enum", "invalid_readiness_enum",
+            "mandatory_edits_missing", "schema_validation_failure",
+        "safe_diagnostic": None or short human-readable reason
+    }
     """
-    # Try to extract JSON from content (may have markdown code fences)
-    json_match = re.search(r"\{[^{}]*\}", content, re.DOTALL)
-    if not json_match:
-        # Try to find JSON with nested braces
-        start = content.find("{")
-        if start == -1:
-            return None
-        # Find matching close brace (simplified)
-        depth = 0
-        for i, char in enumerate(content[start:], start):
-            if char == "{":
-                depth += 1
-            elif char == "}":
-                depth -= 1
-                if depth == 0:
-                    json_match = type("Match", (), {"group": lambda _: content[start : i + 1]})()
-                    break
-
-    if not json_match:
-        return None
+    # Initialize result structure
+    result = {
+        "success": False,
+        "data": None,
+        "failure_category": None,
+        "safe_diagnostic": None
+    }
+    
+    # Check for empty response
+    if not content or not content.strip():
+        result["failure_category"] = "empty_response"
+        result["safe_diagnostic"] = "Arbiter returned empty response"
+        return result
+    
+    original_content = content
+    content = content.strip()
+    
+    # Strip markdown code fences if present
+    had_fence = content.startswith("```") or content.endswith("```")
+    if content.startswith("```json"):
+        content = content[7:]
+    elif content.startswith("```"):
+        content = content[3:]
+    if content.endswith("```"):
+        content = content[:-3]
+    content = content.strip()
+    
+    # Try to extract JSON object from content using depth tracking (handles nested objects)
+    # Note: regex \{[^{}]*\} fails on nested objects - it matches inner objects first
+    start = content.find("{")
+    if start == -1:
+        result["failure_category"] = "invalid_json"
+        result["safe_diagnostic"] = "No JSON object found in response"
+        return result
+    
+    # Find matching close brace by tracking depth
+    json_str = None
+    depth = 0
+    for i, char in enumerate(content[start:], start):
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                # Store the extracted JSON string directly, not a lambda wrapper
+                # Lambda with wrong signature causes: "takes 1 positional argument but 2 were given"
+                json_str = content[start : i + 1]
+                break
+    
+    if not json_str:
+        result["failure_category"] = "invalid_json"
+        result["safe_diagnostic"] = "Could not extract complete JSON object"
+        return result
 
     try:
-        # Extract JSON string safely
-        if hasattr(json_match, "group"):
-            json_str = json_match.group(0)
-        else:
-            json_str = str(json_match)
+        # Parse the extracted JSON string
         parsed = json.loads(json_str)
+        
         # Validate required fields
         if "recommendation" not in parsed:
-            return None
-        return parsed
-    except (json.JSONDecodeError, AttributeError):
-        return None
+            result["failure_category"] = "missing_recommendation"
+            result["safe_diagnostic"] = "Arbiter JSON missing 'recommendation' field"
+            return result
+        
+        # Validate recommendation is a known value
+        if parsed["recommendation"] not in RECOMMENDATIONS:
+            result["failure_category"] = "invalid_recommendation_enum"
+            result["safe_diagnostic"] = f"Invalid recommendation: {parsed['recommendation']}"
+            return result
+        
+        # Validate implementation_readiness if present
+        if "implementation_readiness" in parsed:
+            if parsed["implementation_readiness"] not in ["READY_NOW", "READY_AFTER_EDITS", "NOT_READY", "NEEDS_SPIKE", "BLOCKED"]:
+                result["failure_category"] = "invalid_readiness_enum"
+                result["safe_diagnostic"] = f"Invalid implementation_readiness: {parsed['implementation_readiness']}"
+                return result
+        else:
+            # Missing implementation_readiness is a validation failure
+            result["failure_category"] = "missing_implementation_readiness"
+            result["safe_diagnostic"] = "Arbiter JSON missing 'implementation_readiness' field"
+            return result
+        
+        # Enforce mandatory_edits for APPROVE_WITH_MANDATORY_EDITS
+        if parsed["recommendation"] == "APPROVE_WITH_MANDATORY_EDITS":
+            mandatory_edits = parsed.get("mandatory_edits", [])
+            if not mandatory_edits or not isinstance(mandatory_edits, list) or len(mandatory_edits) == 0:
+                result["failure_category"] = "mandatory_edits_missing"
+                result["safe_diagnostic"] = "APPROVE_WITH_MANDATORY_EDITS requires non-empty mandatory_edits"
+                return result
+        
+        # All validations passed
+        result["success"] = True
+        result["data"] = parsed
+        return result
+        
+    except json.JSONDecodeError as e:
+        result["failure_category"] = "invalid_json"
+        result["safe_diagnostic"] = f"JSON parse error: {str(e)[:50]}"
+        return result
+    except (ValueError, TypeError, KeyError) as e:
+        result["failure_category"] = "schema_validation_failure"
+        result["safe_diagnostic"] = f"Schema validation failed: {str(e)[:50]}"
+        return result
 
 
 def execute_debate_run(
@@ -330,147 +710,584 @@ def execute_debate_run(
     work_item: WorkItem,
     config: ExecutionConfig,
 ) -> None:
-    """Execute a single debate run.
-
+    """Execute a single debate run with model warmup and true dialectic back-and-forth.
+    
+    Warmup phase (if enabled):
+    - Loads the model before starting debate timer
+    - Uses warmup_timeout_seconds (separate from generation timeout)
+    - Records warmup duration and method
+    
+    Generation phase:
+    - Only starts after warmup completes
+    - Uses config.timeout_seconds for actual debate generation
+    - Tracks generation timestamps separately
+    
     Updates the run in-place with status, arguments, and outcomes.
     Caller must commit the session.
     """
-    from sqlalchemy.orm import make_transient
-
+    import uuid
+    
+    # Load DebateExecutionConfig for warmup settings
+    config_row = db_session.query(DebateExecutionConfig).filter(DebateExecutionConfig.id == 1).first()
+    
     # Fetch operator inputs for this work item
     operator_inputs = (
         db_session.query(OperatorDebateInput)
         .filter(OperatorDebateInput.work_item_id == work_item.id)
         .all()
     )
-
-    # Get previous debate summary if this is a rerun
-    previous_summary = None
-    changes_since_previous = None
-    if run.changed_since_previous_json:
-        try:
-            changes_since_previous = json.loads(run.changed_since_previous_json)
-        except (json.JSONDecodeError, TypeError):
-            pass
-
-    # Mark as running
-    run.status = "running"
+    
+    # Mark as queued initially
+    run.status = "queued"
+    run.execution_stage = "queued"
     run.rounds_completed = 0
     run.model_route = f"{config.provider}:{config.model}"
     run.provenance = f"executed via {config.redacted_base_url()}"
-
+    db_session.flush()
+    
+    # ===== WARMUP PHASE =====
+    warmup_result = None
+    if config_row and config_row.warm_model_before_debate:
+        run.execution_stage = "warming"
+        run.warmup_started_at = datetime.now(timezone.utc)
+        db_session.flush()
+        
+        # Use the resolved config (which has correct provider routing) instead of config_row
+        
+        # Perform warmup using the correct provider routing
+        if config.provider == "ollama_native":
+            success, error, latency_ms = warm_model_ollama_native(
+                base_url=config.base_url,
+                model=config.model,
+                keep_alive=config_row.keep_model_loaded_for,
+                timeout_seconds=config_row.warmup_timeout_seconds,
+            )
+            warmup_result = {"success": success, "error": error, "warmup_method": "ollama_native", "duration_ms": latency_ms}
+        else:
+            success, error, latency_ms = warm_model_openai_compatible(
+                base_url=config.base_url,
+                model=config.model,
+                api_key=config.api_key,
+                timeout_seconds=config_row.warmup_timeout_seconds,
+            )
+            warmup_result = {"success": success, "error": error, "warmup_method": "openai_compatible", "duration_ms": latency_ms}
+        
+        if warmup_result["success"]:
+            run.warmup_completed_at = datetime.now(timezone.utc)
+            run.warmup_duration_ms = warmup_result.get("duration_ms", 0)
+            run.warmup_method = warmup_result.get("warmup_method", "unknown")
+            run.execution_stage = "running"
+            db_session.flush()
+        else:
+            # Warmup failed
+            run.warmup_error = warmup_result.get("error", "Unknown warmup error")
+            run.warmup_method = warmup_result.get("warmup_method", "unknown")
+            run.warmup_completed_at = datetime.now(timezone.utc)
+            
+            if config_row and config_row.fail_debate_if_warmup_fails:
+                run.status = "failed"
+                run.execution_stage = "failed"
+                run.error_type = "model_warmup_failed"
+                run.error_message = f"Model warmup failed: {run.warmup_error}"
+                run.completed_at = datetime.utcnow()
+                return
+            else:
+                # Continue to generation but record warmup failure
+                run.execution_stage = "running"
+                db_session.flush()
+    
+    # ===== GENERATION PHASE =====
+    run.generation_started_at = datetime.utcnow()
+    run.execution_stage = "generating"
+    db_session.flush()
+    
+    print(f"[EXECUTE] Starting generation phase for run {run.id}")
+    print(f"[EXECUTE] Config: provider={config.provider}, base_url={config.base_url}, model={config.model}")
+    
+    # Track all arguments for dialectic context
+    all_arguments = []  # List of dicts with claim_id, side, role, content
+    generation_error = None
+    
     try:
-        # Execute each round
+        # Define turn order: sequential pro/con exchanges per round
+        # Round 1: PRO opening -> CON response -> PRO reply
+        # Round 2+: PRO responds to CON -> CON responds to PRO -> PRO final reply
+        turns_per_round = 3  # pro_opening, con_response, pro_reply
+        
         for round_num in range(1, run.rounds_requested + 1):
-            # Execute each role for this round
-            for role in DEBATE_ROLES:
-                # Determine side for this role
-                # (simplified: all roles argue both pro and con across rounds)
-                if round_num % 2 == 1:
-                    side = "pro" if role in ["Product Owner", "Builder"] else "con"
-                else:
-                    side = "con" if role in ["Product Owner", "Builder"] else "pro"
+            # Get arguments from prior rounds for context
+            prior_args = all_arguments.copy()
+            
+            # Update progress before PRO turn
+            run.current_round = round_num
+            run.current_turn = "pro_opening"
+            run.current_side = "pro"
+            run.current_role = "Product Owner + Builder"
+            run.current_model = config.model
+            run.last_progress_at = datetime.utcnow()
+            run.progress_message = f"Round {round_num}: PRO opening argument"
+            db_session.flush()
 
-                # Build prompt
-                prompt = build_debate_prompt(
+            # Turn 1: PRO side opening (or response in round 2+)
+            pro_roles = ["Product Owner", "Builder"]
+            pro_content = _execute_debate_turn(
+                db_session=db_session,
+                run=run,
+                work_item=work_item,
+                operator_inputs=operator_inputs,
+                config=config,
+                round_number=round_num,
+                turn_index=1,
+                total_turns=turns_per_round,
+                side="pro",
+                roles=pro_roles,
+                prior_arguments=prior_args,
+            )
+            if pro_content:
+                all_arguments.append(pro_content)
+
+            # Turn 2: CON side response
+            con_roles = ["UX/Design Reviewer", "Technical Architect", "Security/Privacy Reviewer", "Skeptic/Red Team"]
+            # CON sees PRO's argument from this round
+            prior_args_with_pro = all_arguments.copy()
+            try:
+                con_content = _execute_debate_turn(
+                    db_session=db_session,
+                    run=run,
                     work_item=work_item,
-                    operator_inputs=[i for i in operator_inputs if not i.considered_in_run_id],
-                    previous_summary=previous_summary,
-                    changes_since_previous=changes_since_previous if round_num == 1 else None,
+                    operator_inputs=operator_inputs,
+                    config=config,
                     round_number=round_num,
-                    total_rounds=run.rounds_requested,
-                    role=role,
-                    side=side,
+                    turn_index=2,
+                    total_turns=turns_per_round,
+                    side="con",
+                    roles=con_roles,
+                    prior_arguments=prior_args_with_pro,
                 )
+                if con_content:
+                    all_arguments.append(con_content)
+            except Exception as e:
+                generation_error = f"CON turn failed: {type(e).__name__}"
+                run.error_type = "model_generation_error"
+                run.error_stage = f"round_{round_num}_turn_2_con"
+                run.error_message = str(e)[:500]
+                break  # Exit the round loop
 
-                # Call model
-                messages = [
-                    {"role": "system", "content": "You are participating in a structured debate about a software work item. Be concise, specific, and constructive."},
-                    {"role": "user", "content": prompt},
-                ]
-
-                content = call_model(config, messages)
-
-                # Store argument
-                arg = DebateArgument(
-                    debate_run_id=run.id,
+            # Turn 3: PRO side reply to CON
+            prior_args_with_con = all_arguments.copy()
+            try:
+                pro_reply_content = _execute_debate_turn(
+                    db_session=db_session,
+                    run=run,
+                    work_item=work_item,
+                    operator_inputs=operator_inputs,
+                    config=config,
                     round_number=round_num,
-                    role=role,
-                    side=side,
-                    content=content,
+                    turn_index=3,
+                    total_turns=turns_per_round,
+                    side="pro",
+                    roles=pro_roles,
+                    prior_arguments=prior_args_with_con,
+                    is_reply=True,
                 )
-                db_session.add(arg)
+                if pro_reply_content:
+                    all_arguments.append(pro_reply_content)
+            except Exception as e:
+                generation_error = f"PRO reply turn failed: {type(e).__name__}"
+                run.error_type = "model_generation_error"
+                run.error_stage = f"round_{round_num}_turn_3_pro_reply"
+                run.error_message = str(e)[:500]
+                break  # Exit the round loop
 
-            # End of round — flush to DB
+            # End of round
             db_session.flush()
             run.rounds_completed = round_num
+            print(f"[EXECUTE] Round {round_num} complete, rounds_completed={run.rounds_completed}", flush=True)
 
-        # Final Arbiter round
-        arbiter_prompt = build_debate_prompt(
+        print(f"[EXECUTE] All rounds complete, calling Final Arbiter...", flush=True)
+        print(f"[EXECUTE] Total arguments for arbiter: {len(all_arguments)}", flush=True)
+        
+        # Final Arbiter round - sees all arguments
+        arbiter_result = _execute_arbiter_turn(
+            db_session=db_session,
+            run=run,
             work_item=work_item,
-            operator_inputs=[],
-            previous_summary=None,
-            changes_since_previous=None,
-            round_number=run.rounds_requested + 1,
-            total_rounds=run.rounds_requested + 1,
-            role="Final Arbiter",
-            side="arbiter",
+            config=config,
+            all_arguments=all_arguments,
         )
-
-        messages = [
-            {"role": "system", "content": "You are the Final Arbiter in a software work item debate. Synthesize all arguments and produce a structured recommendation. Your response MUST be valid JSON."},
-            {"role": "user", "content": arbiter_prompt},
-        ]
-
-        arbiter_content = call_model(config, messages)
-
-        # Parse arbiter JSON
-        arbiter_data = parse_arbiter_json(arbiter_content)
-
-        if arbiter_data:
-            run.final_recommendation = arbiter_data.get("recommendation")
-            run.implementation_readiness = arbiter_data.get("implementation_readiness")
-            run.summary = arbiter_data.get("rationale")
-            run.risks = arbiter_data.get("top_risks")
-            run.suggested_title = arbiter_data.get("suggested_title")
-            run.suggested_description = arbiter_data.get("suggested_description")
-            run.suggested_acceptance_notes = arbiter_data.get("suggested_acceptance_notes")
-
-            # Store arbiter argument
-            arbiter_arg = DebateArgument(
-                debate_run_id=run.id,
-                round_number=run.rounds_requested + 1,
-                role="Final Arbiter",
-                side="arbiter",
-                content=arbiter_content,
-            )
-            db_session.add(arbiter_arg)
+        print(f"[ARBITER] Result: success={arbiter_result['success']}, was_repaired={arbiter_result.get('was_repaired', False)}", flush=True)
+        
+        # Check if arbiter produced valid decision
+        arbiter_success = False
+        if arbiter_result["success"] and arbiter_result["data"]:
+            arbiter_data = arbiter_result["data"]
+            recommendation = arbiter_data.get("recommendation")
+            if recommendation:
+                run.final_recommendation = recommendation
+                run.implementation_readiness = arbiter_data.get("implementation_readiness")
+                run.summary = arbiter_data.get("rationale")
+                run.risks = arbiter_data.get("top_risks")
+                run.suggested_title = arbiter_data.get("suggested_title")
+                run.suggested_description = arbiter_data.get("suggested_description")
+                run.suggested_acceptance_notes = arbiter_data.get("suggested_acceptance_notes")
+                arbiter_success = True
+            else:
+                # Arbiter returned JSON but no recommendation - mark as low signal
+                run.final_recommendation = "LOW_SIGNAL"
+                run.implementation_readiness = "NEEDS_SPIKE"
+                run.summary = "Arbiter could not produce a clear decision."
+                run.error_message = "Arbiter response missing recommendation field"
+                arbiter_success = False
+        else:
+            # Arbiter failed - use structured diagnostic
+            failure_cat = arbiter_result.get("failure_category", "unknown")
+            safe_diag = arbiter_result.get("safe_diagnostic", "Arbiter validation failed")
+            run.error_message = f"Final arbiter failed: {safe_diag}"
+            run.error_type = f"arbiter_{failure_cat}"
+            arbiter_success = False
 
         # Mark operator inputs as considered
         for inp in operator_inputs:
             if not inp.considered_in_run_id:
                 inp.considered_in_run_id = run.id
                 if inp.stance_requested == "auto_assign":
-                    # Auto-assign based on content sentiment (simplified)
                     inp.stance_assigned = "neutral"
                 db_session.add(inp)
 
-        # Success
-        run.status = "completed"
+        # Finalize run state - enforce final-state invariant
+        if arbiter_success:
+            # Valid arbiter decision: status=completed, clear all error fields
+            run.status = "completed"
+            run.execution_stage = "completed"
+            run.error_type = None
+            run.error_stage = None
+            run.error_message = None
+            
+            # Reconcile work item status: completed debate advances DRAFT → DEBATED
+            # Do not override if already approved or in advanced delivery state
+            if work_item.status.lower() == "draft" and not work_item.approved_by_operator:
+                work_item.status = "debated"
+                db_session.add(work_item)
+        else:
+            # Arbiter failed: status=failed with specific reason
+            run.status = "failed"
+            run.execution_stage = "failed"
+            run.error_type = "arbiter_failure"
+            run.error_stage = "arbiter"
+            # error_message already set above
+        
+        run.generation_completed_at = datetime.utcnow()
+        run.generation_duration_ms = int((run.generation_completed_at - run.generation_started_at).total_seconds() * 1000) if run.generation_started_at else None
         run.completed_at = datetime.utcnow()
 
+    except httpx.TimeoutException as e:
+        generation_error = f"Model generation timeout: {type(e).__name__}"
+        run.error_type = "model_generation_timeout"
+        run.error_stage = "generation"
+        run.error_round = run.current_round
+        run.error_turn = run.current_turn
+        run.error_elapsed_ms = int((datetime.utcnow() - run.generation_started_at).total_seconds() * 1000) if run.generation_started_at else None
     except httpx.RequestError as e:
-        # Network/model error
-        run.status = "failed"
-        run.error_message = f"Model endpoint error: {type(e).__name__}"
-        run.completed_at = datetime.utcnow()
+        generation_error = f"Model endpoint error: {type(e).__name__}"
+        run.error_type = "model_read_timeout" if "timeout" in str(e).lower() else "model_provider_unreachable"
+        run.error_stage = "generation"
+        run.error_round = run.current_round
+        run.error_turn = run.current_turn
     except ValueError as e:
-        # Parse error
-        run.status = "failed"
-        run.error_message = f"Model response parsing error: {str(e)[:200]}"
-        run.completed_at = datetime.utcnow()
+        generation_error = f"Model response parsing error: {str(e)[:200]}"
+        run.error_type = "model_response_parse_error"
+        run.error_stage = "generation"
     except Exception as e:
-        # Unexpected error
+        generation_error = f"Unexpected error: {type(e).__name__}"
+        run.error_type = "unexpected_error"
+        run.error_stage = "generation"
+    
+    # Handle generation failure
+    if generation_error:
         run.status = "failed"
-        run.error_message = f"Unexpected error: {type(e).__name__}"
+        run.execution_stage = "failed"
+        run.error_message = generation_error
+        run.generation_completed_at = datetime.utcnow()
+        run.generation_duration_ms = int((run.generation_completed_at - run.generation_started_at).total_seconds() * 1000) if run.generation_started_at else None
         run.completed_at = datetime.utcnow()
+
+
+def _generate_claim_id(round_num: int, side: str, role_short: str, turn_index: int) -> str:
+    """Generate a unique claim ID like R1-PRO-PO-001."""
+    side_code = "PRO" if side == "pro" else "CON" if side == "con" else "ARB"
+    role_map = {
+        "Product Owner": "PO",
+        "UX/Design Reviewer": "UX",
+        "Technical Architect": "ARCH",
+        "Security/Privacy Reviewer": "SEC",
+        "Builder": "BLD",
+        "Skeptic/Red Team": "SKP",
+        "Final Arbiter": "ARB",
+    }
+    role_code = role_map.get(role_short, "UNK")
+    return f"R{round_num}-{side_code}-{role_code}-{turn_index:03d}"
+
+
+def _execute_debate_turn(
+    db_session,
+    run: DebateRun,
+    work_item: WorkItem,
+    operator_inputs: list,
+    config: ExecutionConfig,
+    round_number: int,
+    turn_index: int,
+    total_turns: int,
+    side: str,
+    roles: list,
+    prior_arguments: list,
+    is_reply: bool = False,
+) -> Optional[dict]:
+    """Execute a single debate turn for one side.
+    
+    Returns dict with claim_id, side, role, content for tracking.
+    """
+    # Combine roles into one argument for this turn
+    role_str = " + ".join(roles) if len(roles) > 1 else roles[0]
+    role_short = roles[0] if len(roles) == 1 else "Multiple"
+    
+    # Generate claim ID
+    claim_id = _generate_claim_id(round_number, side, role_short, turn_index)
+    
+    # Find opposing claims to respond to
+    opposing_side = "con" if side == "pro" else "pro"
+    opposing_claims = [a for a in prior_arguments if a.get('side') == opposing_side]
+    responds_to = [a['claim_id'] for a in opposing_claims[-2:]] if opposing_claims else []
+    
+    # Build prompt with prior arguments
+    prompt = build_debate_prompt(
+        work_item=work_item,
+        operator_inputs=[i for i in operator_inputs if not i.considered_in_run_id],
+        previous_arguments=prior_arguments,
+        round_number=round_number,
+        total_rounds=run.rounds_requested,
+        role=role_str,
+        side=side,
+        turn_index=turn_index,
+        total_turns_in_round=total_turns,
+    )
+
+    # Call model
+    messages = [
+        {"role": "system", "content": "You are participating in a structured debate. Respond in valid JSON only."},
+        {"role": "user", "content": prompt},
+    ]
+
+    content = call_model(config, messages)
+    
+    # Parse JSON response
+    try:
+        # Extract JSON from content
+        json_match = re.search(r"\{[^{}]*\}", content, re.DOTALL)
+        if json_match:
+            json_str = json_match.group(0)
+            parsed = json.loads(json_str)
+        else:
+            # Fallback: treat entire content as the argument
+            parsed = {"content": content, "responds_to_claim_ids": [], "concession": None, "rebuttal": None, "revised_position": None}
+        
+        argument_content = parsed.get("content", content)[:config.max_output_chars]
+        responds_to_claim_ids = parsed.get("responds_to_claim_ids", responds_to)
+        # Ensure it's a list before JSON encoding
+        if isinstance(responds_to_claim_ids, str):
+            responds_to_claim_ids = [responds_to_claim_ids]
+        elif not isinstance(responds_to_claim_ids, list):
+            responds_to_claim_ids = []
+        concession = parsed.get("concession")
+        rebuttal = parsed.get("rebuttal")
+        revised_position = parsed.get("revised_position")
+    except (json.JSONDecodeError, AttributeError):
+        argument_content = content[:config.max_output_chars]
+        responds_to_claim_ids = responds_to
+        # Ensure fallback is a list
+        if isinstance(responds_to_claim_ids, str):
+            responds_to_claim_ids = [responds_to_claim_ids]
+        elif not isinstance(responds_to_claim_ids, list):
+            responds_to_claim_ids = []
+        concession = None
+        rebuttal = None
+        revised_position = None
+
+    # Store argument
+    arg = DebateArgument(
+        debate_run_id=run.id,
+        round_number=round_number,
+        role=role_str,
+        side=side,
+        content=argument_content,
+        claim_id=claim_id,
+        responds_to_claim_ids=json.dumps(responds_to_claim_ids) if responds_to_claim_ids else None,
+        concession=concession,
+        rebuttal=rebuttal,
+        revised_position=revised_position,
+    )
+    db_session.add(arg)
+    db_session.flush()
+
+    return {
+        "claim_id": claim_id,
+        "side": side,
+        "role": role_str,
+        "content": argument_content,
+        "round_number": round_number,
+    }
+
+
+def _execute_arbiter_turn(
+    db_session,
+    run: DebateRun,
+    work_item: WorkItem,
+    config: ExecutionConfig,
+    all_arguments: list,
+) -> dict:
+    """Execute Final Arbiter turn with repair retry.
+    
+    Returns structured result:
+    {
+        "success": True/False,
+        "data": parsed_dict or None,
+        "failure_category": None or category string,
+        "safe_diagnostic": None or short reason,
+        "was_repaired": True/False
+    }
+    """
+    
+    # Truncate arguments for arbiter to avoid timeout - use last 6 instead of 4 for better context
+    # With 2 rounds x 2 sides x 2 arguments = 8 args typical, 6 gives arbiter most of the debate
+    truncated_args = all_arguments[-6:] if len(all_arguments) > 6 else all_arguments
+    
+    arbiter_prompt = build_debate_prompt(
+        work_item=work_item,
+        operator_inputs=[],
+        previous_arguments=truncated_args,
+        round_number=run.rounds_requested + 1,
+        total_rounds=run.rounds_requested + 1,
+        role="Final Arbiter",
+        side="arbiter",
+        turn_index=1,
+        total_turns_in_round=1,
+    )
+    
+    messages = [
+        {"role": "system", "content": "You are the Final Arbiter. Return ONLY valid JSON. No markdown. No code fences. No prose. Your entire response must be a single JSON object starting with { and ending with }."},
+        {"role": "user", "content": arbiter_prompt},
+    ]
+    
+    # Arbiter needs more time - use 180s timeout
+    import httpx
+    with httpx.Client(timeout=180) as client:
+        url = config.base_url.rstrip("/") + "/api/chat" if config.provider == "ollama_native" else config.base_url.rstrip("/") + "/chat/completions"
+        headers = {"Content-Type": "application/json"}
+        if config.api_key:
+            headers["Authorization"] = f"Bearer {config.api_key}"
+        payload = {"model": config.model, "messages": messages, "stream": False}
+        if config.provider != "ollama_native":
+            payload["temperature"] = 0.7
+            payload["max_tokens"] = 2048
+        
+        response = client.post(url, headers=headers, json=payload)
+        response.raise_for_status()
+        data = response.json()
+        
+        if config.provider == "ollama_native":
+            arbiter_content = data.get("message", {}).get("content", "")
+        else:
+            arbiter_content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+    
+    # First parse attempt
+    parse_result = parse_arbiter_json(arbiter_content)
+    first_parse_result = parse_result.copy()  # Preserve first attempt result for audit
+    
+    # If first parse fails, attempt one repair retry
+    was_repaired = False
+    if not parse_result["success"]:
+        print(f"[ARBITER] First parse failed: {parse_result['failure_category']} - {parse_result['safe_diagnostic']}", flush=True)
+        
+        # Build repair prompt
+        repair_prompt = f"""You are a JSON repair assistant. The following arbiter decision failed validation.
+
+ORIGINAL ATTEMPT:
+{arbiter_content[:2000]}
+
+PARSE ERROR: {parse_result['safe_diagnostic']}
+
+REQUIRED JSON SCHEMA:
+{{
+  "recommendation": "APPROVE_AS_IS|APPROVE_WITH_MANDATORY_EDITS|NEEDS_REWORK|SPLIT_SCOPE|DEFER|REJECT|LOW_SIGNAL",
+  "implementation_readiness": "READY_NOW|READY_AFTER_EDITS|NOT_READY|NEEDS_SPIKE|BLOCKED",
+  "decision_confidence": "low|medium|high",
+  "actionability_score": 0-100,
+  "rationale": "One concise paragraph.",
+  "mandatory_edits": []
+}}
+
+Convert the attempted decision above into valid JSON matching this schema. Return ONLY the JSON object. No markdown. No code fences. No prose."""
+
+        repair_messages = [
+            {"role": "system", "content": "You are a JSON repair assistant. Return ONLY valid JSON. No markdown. No code fences."},
+            {"role": "user", "content": repair_prompt},
+        ]
+        
+        try:
+            with httpx.Client(timeout=120) as repair_client:
+                repair_payload = {"model": config.model, "messages": repair_messages, "stream": False}
+                if config.provider != "ollama_native":
+                    repair_payload["temperature"] = 0.3  # Lower temp for repair
+                    repair_payload["max_tokens"] = 1024
+                
+                repair_response = repair_client.post(url, headers=headers, json=repair_payload)
+                repair_response.raise_for_status()
+                repair_data = repair_response.json()
+                
+                if config.provider == "ollama_native":
+                    repaired_content = repair_data.get("message", {}).get("content", "")
+                else:
+                    repaired_content = repair_data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            
+            # Parse repaired content
+            parse_result = parse_arbiter_json(repaired_content)
+            
+            if parse_result["success"]:
+                was_repaired = True
+                arbiter_content = repaired_content  # Use repaired content for storage
+                print(f"[ARBITER] Repair succeeded", flush=True)
+            else:
+                print(f"[ARBITER] Repair also failed: {parse_result['failure_category']}", flush=True)
+        except Exception as e:
+            print(f"[ARBITER] Repair attempt failed: {type(e).__name__}", flush=True)
+            # Keep original parse_result with original failure
+    
+    # Store arbiter argument - use the content that was actually parsed (repaired if successful)
+    # Only store ONE arbiter argument - the final selected decision
+    if arbiter_content:
+        claim_id = _generate_claim_id(run.rounds_requested + 1, "arbiter", "Final Arbiter", 1)
+        all_claim_ids = [a["claim_id"] for a in all_arguments]
+        
+        arbiter_arg = DebateArgument(
+            debate_run_id=run.id,
+            round_number=run.rounds_requested + 1,
+            role="Final Arbiter",
+            side="arbiter",
+            content=arbiter_content,
+            claim_id=claim_id,
+            responds_to_claim_ids=json.dumps(all_claim_ids[-6:]),
+        )
+        db_session.add(arbiter_arg)
+        db_session.flush()
+    
+    # Return structured result - this is what determines finalization
+    # If repair succeeded, parse_result is the repaired result (success=True)
+    # If repair failed, parse_result is the repair failure (success=False)
+    return {
+        "success": parse_result["success"],
+        "data": parse_result["data"],
+        "failure_category": parse_result["failure_category"],
+        "safe_diagnostic": parse_result["safe_diagnostic"],
+        "was_repaired": was_repaired,
+        "first_attempt_success": first_parse_result["success"],
+        "first_attempt_failure_category": first_parse_result["failure_category"]
+    }

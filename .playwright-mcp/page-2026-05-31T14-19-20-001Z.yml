@@ -1,0 +1,43 @@
+- generic [ref=e3]:
+  - complementary [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e6]:
+        - generic [ref=e7]: LEGION
+        - generic [ref=e8]: ®
+      - generic [ref=e9]: CONTROL PLANE / v0.1
+    - navigation [ref=e10]:
+      - link "> DASHBOARD" [ref=e11] [cursor=pointer]:
+        - /url: /
+        - generic [ref=e12]: ">"
+        - generic [ref=e13]: DASHBOARD
+      - link "# WORK ITEMS" [ref=e14] [cursor=pointer]:
+        - /url: /work-items
+        - generic [ref=e15]: "#"
+        - generic [ref=e16]: WORK ITEMS
+      - link "◉ APPS" [ref=e17] [cursor=pointer]:
+        - /url: /apps
+        - generic [ref=e18]: ◉
+        - generic [ref=e19]: APPS
+      - link "⚙ SETTINGS" [ref=e20] [cursor=pointer]:
+        - /url: /settings
+        - generic [ref=e21]: ⚙
+        - generic [ref=e22]: SETTINGS
+    - generic [ref=e23]:
+      - generic [ref=e24]: UNIT / D-01
+      - generic [ref=e25]: REV 0.1.0
+  - generic [ref=e26]:
+    - banner [ref=e27]:
+      - generic [ref=e28]:
+        - generic [ref=e29]: "["
+        - list [ref=e30]:
+          - listitem [ref=e31]:
+            - generic [ref=e32]: WORK ITEMS
+          - listitem [ref=e33]:
+            - generic [ref=e34]: /
+            - generic [ref=e35]: "#2"
+        - generic [ref=e36]: "]"
+      - generic [ref=e37]:
+        - generic [ref=e38]: 2026-05-31 14:19:19Z
+        - generic [ref=e41]: SYNC…
+    - main [ref=e42]:
+      - heading "[ LOADING ]" [level=3] [ref=e49]

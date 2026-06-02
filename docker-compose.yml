@@ -25,14 +25,37 @@ services:
     volumes:
       - /srv/repo:/srv/repo:ro
       - /var/run/docker.sock:/var/run/docker.sock
+      - /srv/repo/legion-dashboard/.hermes-config.yaml:/app/.hermes/config.yaml:ro  # Hermes config (copied for container access)
+      - app-attachments:/app/attachments
     group_add:
       - docker
     environment:
       APP_ID: ${APP_ID:-legion-dashboard}
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg2://legion:legion@db:5432/legion_dashboard}
       LEGION_DOCKER_CONTROL_ENABLED: ${LEGION_DOCKER_CONTROL_ENABLED:-true}
+      HERMES_HOME: /app/.hermes  # Point to mounted config location
+      HERMES_KANBAN_BRIDGE_URL: http://host.docker.internal:8765
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "${APP_HOST_PORT:-8720}:8080"
 
+  debate-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["python", "-m", "app.debate_worker"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg2://legion:legion@db:5432/legion_dashboard}
+      WORKER_ID: legion-debate-worker-1
+    volumes:
+      - /srv/repo:/srv/repo:ro
+    # No public ports - worker only needs DB access
+
 volumes:
   db-data:
+  app-attachments:
