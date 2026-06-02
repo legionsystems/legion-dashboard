@@ -50,6 +50,7 @@ from ..schemas import (
     RejectRequest,
     RejectWithChangesRequest,
     RevertPreviewRequest,
+    VerifyMergeRequest,
     WorkItemArchiveRequest,
     WorkItemClassificationUpdate,
     WorkItemCreate,
@@ -929,6 +930,70 @@ def complete_work_item(
     item.completed_at = now
     item.completed_by = payload.completed_by
     item.completion_note = payload.completion_note
+    db.commit()
+    db.refresh(item)
+    return _serialize_with_debate(db, item)
+
+
+@router.post("/{work_item_id}/verify-merge", response_model=WorkItemResponse)
+def verify_merge_action(
+    work_item_id: int,
+    payload: Optional[VerifyMergeRequest] = None,
+    db: Session = Depends(get_db),
+):
+    """Re-run the post-merge healthcheck after a failed post-merge deploy.
+
+    Allows the operator to fix a broken deploy (e.g. fix the base branch by
+    hand on the host) and clear ``merged_deployment_failed`` without
+    re-merging the PR. The merge SHA is preserved either way; only
+    ``post_merge_health_status`` and ``post_merge_verified_*`` move.
+    """
+    item = _get_or_404(db, work_item_id)
+
+    state = compute_effective_state(item, None)
+    if state != "merged_deployment_failed":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Work item is in state '{state}'; verify-merge requires "
+                "state 'merged_deployment_failed'."
+            ),
+        )
+
+    repo_path, _repo_name = preview_deploy.resolve_preview_repo(item)
+    # The executor's healthcheck only reads ``docker compose ps`` — it does
+    # not mutate git state, so the dashboard does not acquire the repo lock
+    # here. ``branch`` is a placeholder to satisfy the executor's request
+    # validation; the healthcheck path ignores it.
+    result = preview_deploy.call_host_executor(
+        action="healthcheck",
+        repo_path=repo_path,
+        branch=preview_deploy.REVERT_BASE_BRANCH,
+    )
+
+    verified_by = payload.verified_by if payload else None
+    now = datetime.utcnow()
+    if not result.success:
+        item.post_merge_health_status = result.health_status or "unhealthy"
+        item.merge_error = (
+            f"executor {result.error_code or 'healthcheck_failed'}: "
+            f"{result.error or 'post-merge healthcheck failed'}"
+        )[:2000]
+        db.commit()
+        db.refresh(item)
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Post-merge healthcheck still failing: "
+                f"{result.error or 'unknown error'}"
+            ),
+        )
+
+    item.merge_status = "merged"
+    item.post_merge_health_status = result.health_status or "healthy"
+    item.post_merge_verified_at = now
+    item.post_merge_verified_by = verified_by
+    item.merge_error = None
     db.commit()
     db.refresh(item)
     return _serialize_with_debate(db, item)

@@ -236,17 +236,18 @@ def _perform_merge_pr(
       2. ``gh pr view`` (pre-merge) confirms the PR is OPEN, mergeable, and
          that its base branch matches the operator-supplied ``base_branch``.
       3. ``gh pr merge --merge --delete-branch`` to land the PR and clean up.
-      4. ``git checkout`` + ``git pull --ff-only`` of the base branch.
-      5. ``gh pr view`` again to read the GitHub-canonical ``mergeCommit.oid``
-         and return it as ``merge_commit_sha``.
+      4. ``gh pr view`` again — immediately — to read the GitHub-canonical
+         ``mergeCommit.oid``. The SHA is captured here so every later
+         failure return can include it.
+      5. ``git checkout`` + ``git pull --ff-only`` of the base branch.
       6. ``docker compose build`` + ``up -d`` to ship the new base.
       7. Healthcheck.
 
     Returns a dict mirroring the deploy_preview shape, with the merge SHA in
     ``merge_commit_sha`` so the dashboard can stamp it. If the merge landed
-    but a later step failed, ``merge_commit_sha`` is still set so the
-    dashboard can record ``merged_deployment_failed`` instead of retrying
-    the merge.
+    but a later step failed (checkout, pull, build, up, healthcheck),
+    ``merge_commit_sha`` is still set so the dashboard records
+    ``merged_deployment_failed`` instead of ``blocked_merge``.
     """
     action = "merge_pr"
     dirty = _git_clean(repo_path)
@@ -307,35 +308,11 @@ def _perform_merge_pr(
             "error_code": "executor_gh_pr_merge_failed",
         }
 
-    rc, _out, err = _run(
-        ["git", "-C", repo_path, "checkout", base_branch],
-        cwd=repo_path,
-        timeout=GIT_CHECKOUT_TIMEOUT_SECONDS,
-    )
-    if rc != 0:
-        return {
-            "success": False,
-            "action": action,
-            "error": f"git checkout {base_branch} failed (rc={rc}): {err.strip()[:300]}",
-            "error_code": "executor_git_checkout_failed",
-        }
-
-    rc, _out, err = _run(
-        ["git", "-C", repo_path, "pull", "--ff-only", "origin", base_branch],
-        cwd=repo_path,
-        timeout=GIT_PULL_TIMEOUT_SECONDS,
-    )
-    if rc != 0:
-        return {
-            "success": False,
-            "action": action,
-            "error": f"git pull failed (rc={rc}): {err.strip()[:300]}",
-            "error_code": "executor_git_pull_failed",
-        }
-
-    # Read the merge SHA from GitHub via gh pr view's ``mergeCommit.oid``.
-    # The spec requires this rather than a local rev-parse so the dashboard
-    # records the same SHA GitHub considers canonical for the merge.
+    # Merge has landed on GitHub. Capture the SHA NOW (before any local
+    # checkout/pull) so every subsequent failure return carries it. The
+    # dashboard distinguishes ``blocked_merge`` (no SHA, merge never
+    # happened) from ``merged_deployment_failed`` (SHA present, post-merge
+    # work failed) using this field.
     rc, post_info, gh_err = _gh_pr_view(repo_path, pr_number)
     if rc != 0 or not post_info:
         return {
@@ -354,6 +331,34 @@ def _perform_merge_pr(
             "action": action,
             "error": "gh pr view returned no mergeCommit.oid after merge",
             "error_code": "executor_gh_pr_view_failed",
+        }
+
+    rc, _out, err = _run(
+        ["git", "-C", repo_path, "checkout", base_branch],
+        cwd=repo_path,
+        timeout=GIT_CHECKOUT_TIMEOUT_SECONDS,
+    )
+    if rc != 0:
+        return {
+            "success": False,
+            "action": action,
+            "merge_commit_sha": merge_sha,
+            "error": f"git checkout {base_branch} failed (rc={rc}): {err.strip()[:300]}",
+            "error_code": "executor_git_checkout_failed",
+        }
+
+    rc, _out, err = _run(
+        ["git", "-C", repo_path, "pull", "--ff-only", "origin", base_branch],
+        cwd=repo_path,
+        timeout=GIT_PULL_TIMEOUT_SECONDS,
+    )
+    if rc != 0:
+        return {
+            "success": False,
+            "action": action,
+            "merge_commit_sha": merge_sha,
+            "error": f"git pull failed (rc={rc}): {err.strip()[:300]}",
+            "error_code": "executor_git_pull_failed",
         }
 
     rc, _out, err = _run(
@@ -616,6 +621,8 @@ class ExecutorHandler(BaseHTTPRequestHandler):
         repo_path = payload.get("repo_path")
         branch = payload.get("branch")
         service = payload.get("service") or DEFAULT_COMPOSE_SERVICE
+        pr_number = payload.get("pr_number")
+        base_branch = payload.get("base_branch")
 
         if action not in ALLOWED_ACTIONS:
             return _json_response(self, 400, {
@@ -643,8 +650,35 @@ class ExecutorHandler(BaseHTTPRequestHandler):
                 "error_code": "executor_repo_missing",
             })
 
-        log.info("executor request: action=%s repo=%s branch=%s", action, repo_path, branch)
-        body = _perform_action(action, repo_path, branch, service)
+        # Per-action dispatch. ``merge_pr`` needs the operator-supplied
+        # ``pr_number`` and ``base_branch``; ``healthcheck`` skips git/compose
+        # mutations entirely; ``deploy_preview`` / ``revert_preview`` use the
+        # branch-checkout + build flow.
+        if action == "merge_pr":
+            if not isinstance(pr_number, int) or isinstance(pr_number, bool) or pr_number <= 0:
+                return _json_response(self, 400, {
+                    "error": "pr_number must be a positive integer for merge_pr",
+                    "error_code": "executor_bad_pr_number",
+                })
+            if not isinstance(base_branch, str) or not BRANCH_RE.match(base_branch):
+                return _json_response(self, 400, {
+                    "error": "base_branch failed validation",
+                    "error_code": "executor_bad_base_branch",
+                })
+            log.info(
+                "executor request: action=%s repo=%s pr=%s base=%s",
+                action, repo_path, pr_number, base_branch,
+            )
+            body = _perform_merge_pr(repo_path, base_branch, pr_number, service)
+        elif action == "healthcheck":
+            log.info("executor request: action=%s repo=%s", action, repo_path)
+            body = _perform_healthcheck_only(repo_path, service)
+        else:
+            log.info(
+                "executor request: action=%s repo=%s branch=%s",
+                action, repo_path, branch,
+            )
+            body = _perform_action(action, repo_path, branch, service)
         status = 200 if body.get("success") else 500
         return _json_response(self, status, body)
 

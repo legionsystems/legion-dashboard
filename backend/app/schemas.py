@@ -935,6 +935,18 @@ class CompleteRequest(BaseModel):
     completed_by: Optional[str] = None
 
 
+class VerifyMergeRequest(BaseModel):
+    """Operator-initiated re-verification of a failed post-merge deploy.
+
+    Used after the operator has manually fixed a deploy that landed in
+    ``merged_deployment_failed``. The router re-runs the host executor's
+    healthcheck and, on success, flips the Work Item back to ``merged``
+    without re-merging the PR. ``verified_by`` is optional attribution.
+    """
+
+    verified_by: Optional[str] = None
+
+
 class RevertPreviewRequest(BaseModel):
     """Operator-initiated request to revert a deployed preview.
 
@@ -968,7 +980,12 @@ class RevertPreviewRequest(BaseModel):
 
 
 # Actions the dashboard may request from the host executor.
-ALLOWED_EXECUTOR_ACTIONS = {"deploy_preview", "revert_preview", "merge_pr"}
+ALLOWED_EXECUTOR_ACTIONS = {
+    "deploy_preview",
+    "revert_preview",
+    "merge_pr",
+    "healthcheck",
+}
 
 
 class PreviewExecutorRequest(BaseModel):
