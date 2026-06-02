@@ -1,0 +1,441 @@
+#!/usr/bin/env python3
+"""Host-side preview deployment executor for the LEGION Dashboard.
+
+The dashboard runs inside a docker container that mounts ``/srv/repo``
+read-only and cannot manipulate the host's docker daemon for arbitrary
+branches. This service runs on the host with the privileges needed to
+``git checkout`` a PR branch on a known repo and ``docker compose``
+build / up / ps the corresponding service. The dashboard reaches it over
+HTTP at ``http://host.docker.internal:8766/preview``.
+
+Security posture:
+  * The listen socket binds only to 127.0.0.1 — there is no remote attack
+    surface beyond what containers on the host can reach via the
+    ``host.docker.internal`` loopback.
+  * Every request must carry ``X-Api-Key`` matching ``API_SERVER_KEY``.
+    Missing or mismatched keys yield 401; the key is never logged.
+  * ``repo_path`` is validated against a fixed allowlist (the dashboard's
+    repo and the lgn-hub repo); arbitrary paths are rejected with 400.
+  * ``branch`` is restricted to git-ref-safe characters; anything else
+    is rejected with 400.
+  * The executor never ``shell=True``-execs and never interpolates
+    untrusted input into a shell string.
+
+The service is intentionally small and dependency-free (stdlib only) so
+the host can run it without a venv. Errors are returned as structured
+JSON; subprocess stderr is included in the body but never printed to
+stdout/stderr in a form that could leak the API key.
+"""
+from __future__ import annotations
+
+import hmac
+import json
+import logging
+import os
+import re
+import subprocess
+import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Optional, Tuple
+
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+LISTEN_HOST = os.environ.get("LEGION_PREVIEW_EXECUTOR_HOST", "127.0.0.1")
+LISTEN_PORT = int(os.environ.get("LEGION_PREVIEW_EXECUTOR_PORT", "8766"))
+
+# Repo paths the executor is willing to act on. Arbitrary paths are refused.
+ALLOWED_REPOS = {
+    "/srv/repo/legion-dashboard",
+    "/srv/repo/lgn-hub",
+}
+
+# Action -> docker compose service name. The dashboard's "app" service is
+# the only one the PR branches modify; lgn-hub uses the same convention.
+DEFAULT_COMPOSE_SERVICE = "app"
+
+# Action allowlist mirrors backend/app/schemas.py::ALLOWED_EXECUTOR_ACTIONS.
+ALLOWED_ACTIONS = frozenset({"deploy_preview", "revert_preview"})
+
+# Conservative branch-name pattern: alnum, underscore, dash, dot, slash.
+# Refuses ``;``, ``&``, ``$``, spaces, etc. — defense in depth even though
+# we never use shell=True.
+BRANCH_RE = re.compile(r"^[A-Za-z0-9._/\-]{1,200}$")
+
+# Per-subprocess timeouts. ``git fetch`` and ``docker compose build`` are
+# the slow ones; ``ps`` is fast.
+GIT_FETCH_TIMEOUT_SECONDS = 120
+GIT_CHECKOUT_TIMEOUT_SECONDS = 60
+COMPOSE_BUILD_UP_TIMEOUT_SECONDS = 1200
+HEALTHCHECK_TIMEOUT_SECONDS = 30
+
+
+log = logging.getLogger("legion-preview-executor")
+
+
+# ---------------------------------------------------------------------------
+# Subprocess helpers
+# ---------------------------------------------------------------------------
+
+
+def _run(cmd: list, cwd: str, timeout: int) -> Tuple[int, str, str]:
+    """Run ``cmd`` and return (returncode, stdout, stderr).
+
+    Never raises — timeouts surface as returncode 124, missing binary as
+    127. Callers treat non-zero as failure.
+    """
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        return proc.returncode, proc.stdout or "", proc.stderr or ""
+    except subprocess.TimeoutExpired as exc:
+        out = exc.stdout.decode() if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        return 124, out, f"timed out after {timeout}s"
+    except FileNotFoundError as exc:
+        return 127, "", str(exc)
+
+
+def _git_clean(repo_path: str) -> Optional[str]:
+    """Return None when ``repo_path`` is clean, else a blocker message.
+
+    Mirrors the dashboard's ``check_repo_clean`` rules so the executor
+    rejects a dirty worktree even if the dashboard somehow missed the
+    gate. The dashboard remains the primary gate; this is defense in
+    depth.
+    """
+    rc, _out, err = _run(["git", "-C", repo_path, "diff", "--quiet"], cwd=repo_path, timeout=20)
+    if rc not in (0, 1):
+        return f"git diff --quiet failed: {err.strip()[:200]}"
+    if rc == 1:
+        return "repo has unstaged changes"
+    rc, _out, err = _run(
+        ["git", "-C", repo_path, "diff", "--cached", "--quiet"], cwd=repo_path, timeout=20
+    )
+    if rc not in (0, 1):
+        return f"git diff --cached --quiet failed: {err.strip()[:200]}"
+    if rc == 1:
+        return "repo has staged changes"
+    rc, out, err = _run(
+        ["git", "-C", repo_path, "ls-files", "--others", "--exclude-standard"],
+        cwd=repo_path,
+        timeout=20,
+    )
+    if rc != 0:
+        return f"git ls-files failed: {err.strip()[:200]}"
+    # Filter out the same ignored hermes-config file the dashboard ignores.
+    untracked = [
+        line for line in out.splitlines()
+        if line.strip() and os.path.basename(line.strip()) != ".hermes-config.yaml"
+    ]
+    if untracked:
+        return f"repo has {len(untracked)} untracked file(s)"
+    return None
+
+
+def _current_commit(repo_path: str) -> Optional[str]:
+    rc, out, _err = _run(
+        ["git", "-C", repo_path, "rev-parse", "HEAD"], cwd=repo_path, timeout=10
+    )
+    if rc != 0:
+        return None
+    sha = out.strip()
+    return sha or None
+
+
+def _healthcheck(repo_path: str, service: str) -> Tuple[bool, str]:
+    """Return (running, human_status_message)."""
+    rc, out, err = _run(
+        ["docker", "compose", "ps", "--format", "json", service],
+        cwd=repo_path,
+        timeout=HEALTHCHECK_TIMEOUT_SECONDS,
+    )
+    if rc != 0:
+        return False, f"docker compose ps failed (rc={rc}): {err.strip()[:200]}"
+    for line in (out or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            parsed = json.loads(line)
+        except ValueError:
+            continue
+        entries = parsed if isinstance(parsed, list) else [parsed]
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            state = entry.get("State") or entry.get("state") or entry.get("status") or ""
+            if str(state).lower() == "running":
+                return True, "running"
+    return False, "no running container reported"
+
+
+# ---------------------------------------------------------------------------
+# Action runner
+# ---------------------------------------------------------------------------
+
+
+def _perform_action(action: str, repo_path: str, branch: str, service: str) -> dict:
+    """Execute a deploy or revert action and return the response body.
+
+    The function never raises; failures are encoded into the dict so the
+    HTTP layer can serialize them uniformly.
+    """
+    # Defense-in-depth dirty check. The dashboard already gated this, but
+    # if it didn't, refuse to clobber operator state.
+    dirty = _git_clean(repo_path)
+    if dirty:
+        return {
+            "success": False,
+            "action": action,
+            "error": f"dirty repo: {dirty}",
+            "error_code": "executor_dirty_repo",
+        }
+
+    # Fetch so the requested branch is locally resolvable. ``--prune`` keeps
+    # the worktree tidy; ``--quiet`` cuts output. ``origin`` is the only
+    # remote we expect.
+    rc, _out, err = _run(
+        ["git", "-C", repo_path, "fetch", "--prune", "--quiet", "origin"],
+        cwd=repo_path,
+        timeout=GIT_FETCH_TIMEOUT_SECONDS,
+    )
+    if rc != 0:
+        return {
+            "success": False,
+            "action": action,
+            "error": f"git fetch failed (rc={rc}): {err.strip()[:300]}",
+            "error_code": "executor_git_fetch_failed",
+        }
+
+    rc, _out, err = _run(
+        ["git", "-C", repo_path, "checkout", branch],
+        cwd=repo_path,
+        timeout=GIT_CHECKOUT_TIMEOUT_SECONDS,
+    )
+    if rc != 0:
+        return {
+            "success": False,
+            "action": action,
+            "error": f"git checkout failed (rc={rc}): {err.strip()[:300]}",
+            "error_code": "executor_git_checkout_failed",
+        }
+
+    commit_sha = _current_commit(repo_path)
+
+    rc, _out, err = _run(
+        ["docker", "compose", "build", service],
+        cwd=repo_path,
+        timeout=COMPOSE_BUILD_UP_TIMEOUT_SECONDS,
+    )
+    if rc != 0:
+        return {
+            "success": False,
+            "action": action,
+            "commit_sha": commit_sha,
+            "error": f"docker compose build failed (rc={rc}): {err.strip()[:300]}",
+            "error_code": "executor_compose_build_failed",
+        }
+
+    rc, _out, err = _run(
+        ["docker", "compose", "up", "-d", service],
+        cwd=repo_path,
+        timeout=COMPOSE_BUILD_UP_TIMEOUT_SECONDS,
+    )
+    if rc != 0:
+        return {
+            "success": False,
+            "action": action,
+            "commit_sha": commit_sha,
+            "error": f"docker compose up failed (rc={rc}): {err.strip()[:300]}",
+            "error_code": "executor_compose_up_failed",
+        }
+
+    healthy, health_msg = _healthcheck(repo_path, service)
+    if not healthy:
+        return {
+            "success": False,
+            "action": action,
+            "commit_sha": commit_sha,
+            "health_status": "unhealthy",
+            "error": f"healthcheck failed: {health_msg}",
+            "error_code": "executor_healthcheck_failed",
+        }
+
+    return {
+        "success": True,
+        "action": action,
+        "commit_sha": commit_sha,
+        "branch": branch,
+        "health_status": "healthy",
+    }
+
+
+# ---------------------------------------------------------------------------
+# HTTP handler
+# ---------------------------------------------------------------------------
+
+
+def _expected_api_key() -> str:
+    """Return the API key the service was configured with.
+
+    Stored at process start (see ``main``) so each request compares against
+    a stable, fail-closed reference. An empty string means the service
+    refused to start without a key — see ``main``.
+    """
+    return getattr(_expected_api_key, "_value", "")
+
+
+def _set_api_key(value: str) -> None:
+    setattr(_expected_api_key, "_value", value)
+
+
+def _json_response(handler: "ExecutorHandler", status: int, body: dict) -> None:
+    payload = json.dumps(body).encode("utf-8")
+    handler.send_response(status)
+    handler.send_header("Content-Type", "application/json")
+    handler.send_header("Content-Length", str(len(payload)))
+    handler.end_headers()
+    handler.wfile.write(payload)
+
+
+class ExecutorHandler(BaseHTTPRequestHandler):
+    """HTTP request handler for ``/preview`` and ``/health``."""
+
+    server_version = "LegionPreviewExecutor/1.0"
+
+    # We override log_message to keep the API key out of logs and to use a
+    # structured logger instead of stderr. Default handler logs the full
+    # request line which could include sensitive query strings.
+    def log_message(self, format: str, *args) -> None:  # noqa: A002 (stdlib name)
+        log.info("%s - %s", self.client_address[0], format % args)
+
+    def do_GET(self) -> None:  # noqa: N802 (stdlib name)
+        if self.path == "/health":
+            return _json_response(self, 200, {"status": "ok"})
+        return _json_response(self, 404, {"error": "not found", "error_code": "not_found"})
+
+    def do_POST(self) -> None:  # noqa: N802 (stdlib name)
+        if self.path != "/preview":
+            return _json_response(self, 404, {"error": "not found", "error_code": "not_found"})
+
+        expected_key = _expected_api_key()
+        if not expected_key:
+            # Should be unreachable: ``main`` refuses to start without a
+            # key. Still, fail closed.
+            return _json_response(self, 503, {
+                "error": "executor not configured with API key",
+                "error_code": "executor_unconfigured",
+            })
+        provided_key = self.headers.get("X-Api-Key", "")
+        if not hmac.compare_digest(expected_key, provided_key):
+            return _json_response(self, 401, {
+                "error": "unauthorized",
+                "error_code": "executor_unauthorized",
+            })
+
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = 0
+        if length <= 0 or length > 64 * 1024:
+            return _json_response(self, 400, {
+                "error": "missing or oversized body",
+                "error_code": "executor_bad_request",
+            })
+
+        raw = self.rfile.read(length)
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return _json_response(self, 400, {
+                "error": "invalid JSON body",
+                "error_code": "executor_bad_request",
+            })
+        if not isinstance(payload, dict):
+            return _json_response(self, 400, {
+                "error": "body must be a JSON object",
+                "error_code": "executor_bad_request",
+            })
+
+        action = payload.get("action")
+        repo_path = payload.get("repo_path")
+        branch = payload.get("branch")
+        service = payload.get("service") or DEFAULT_COMPOSE_SERVICE
+
+        if action not in ALLOWED_ACTIONS:
+            return _json_response(self, 400, {
+                "error": f"action must be one of {sorted(ALLOWED_ACTIONS)}",
+                "error_code": "executor_bad_action",
+            })
+        if not isinstance(repo_path, str) or repo_path not in ALLOWED_REPOS:
+            return _json_response(self, 400, {
+                "error": "repo_path is not in the executor allowlist",
+                "error_code": "executor_bad_repo",
+            })
+        if not isinstance(branch, str) or not BRANCH_RE.match(branch):
+            return _json_response(self, 400, {
+                "error": "branch failed validation",
+                "error_code": "executor_bad_branch",
+            })
+        if not isinstance(service, str) or not BRANCH_RE.match(service):
+            return _json_response(self, 400, {
+                "error": "service failed validation",
+                "error_code": "executor_bad_service",
+            })
+        if not os.path.isdir(repo_path):
+            return _json_response(self, 400, {
+                "error": "repo_path is not a directory on the host",
+                "error_code": "executor_repo_missing",
+            })
+
+        log.info("executor request: action=%s repo=%s branch=%s", action, repo_path, branch)
+        body = _perform_action(action, repo_path, branch, service)
+        status = 200 if body.get("success") else 500
+        return _json_response(self, status, body)
+
+
+# ---------------------------------------------------------------------------
+# Entrypoint
+# ---------------------------------------------------------------------------
+
+
+def main() -> int:
+    logging.basicConfig(
+        level=os.environ.get("LEGION_PREVIEW_EXECUTOR_LOG_LEVEL", "INFO"),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        stream=sys.stderr,
+    )
+    api_key = os.environ.get("API_SERVER_KEY", "")
+    if not api_key:
+        log.error("API_SERVER_KEY is not set; refusing to start")
+        return 2
+    _set_api_key(api_key)
+
+    server = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), ExecutorHandler)
+    log.info("legion-preview-executor listening on %s:%s", LISTEN_HOST, LISTEN_PORT)
+
+    # Run the server until SIGTERM / Ctrl-C. ``serve_forever`` runs in this
+    # thread; threading the handler is enough for the dashboard's
+    # one-request-at-a-time flow.
+    stop = threading.Event()
+    try:
+        server.serve_forever(poll_interval=0.5)
+    except KeyboardInterrupt:
+        log.info("shutting down on interrupt")
+    finally:
+        server.server_close()
+        stop.set()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -578,59 +578,37 @@ def deploy_preview_action(
             db, repo_path, release_reason=reason, final_status="failed"
         )
 
-    checkout = preview_deploy.checkout_branch(repo_path, item.branch_name)
-    if not checkout.ok:
-        _abort(
-            "preview_checkout_failed",
-            f"git checkout failed (exit {checkout.returncode}): {checkout.stderr.strip()}",
-        )
+    # Delegate the side-effectful work (git checkout, docker compose build/up,
+    # healthcheck) to the host-side executor. The dashboard container mounts
+    # /srv/repo read-only and cannot run docker compose against the host
+    # daemon for arbitrary branches; only the executor can.
+    result = preview_deploy.call_host_executor(
+        action="deploy_preview",
+        repo_path=repo_path,
+        branch=item.branch_name,
+    )
+    if not result.success:
+        reason = result.error_code or "preview_executor_failed"
+        # The executor's ``error`` may include subprocess stderr — keep it
+        # but trim to a sensible width before stamping it on the row.
+        detail_msg = result.error or "host executor reported failure"
+        _abort(reason, f"executor {reason}: {detail_msg}")
         raise HTTPException(
-            status_code=500,
-            detail=(
-                f"Failed to checkout branch '{item.branch_name}': "
-                f"{checkout.stderr.strip() or 'git exited non-zero'}"
-            ),
-        )
-
-    build = preview_deploy.compose_build_and_up(repo_path)
-    if not build.ok:
-        _abort(
-            "preview_compose_failed",
-            f"docker compose failed (exit {build.returncode}): {build.stderr.strip()}",
-        )
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                f"docker compose failed (exit {build.returncode}): "
-                f"{build.stderr.strip() or 'see logs'}"
-            ),
-        )
-
-    health = preview_deploy.run_healthcheck(repo_path)
-    healthy = preview_deploy.parse_healthcheck(health)
-    if not healthy:
-        _abort(
-            "preview_healthcheck_failed",
-            (
-                f"healthcheck failed (exit {health.returncode}): "
-                f"{(health.stderr or health.stdout).strip()}"
-            ),
-        )
-        raise HTTPException(
-            status_code=500,
-            detail="Preview healthcheck failed — service is not running.",
+            status_code=502 if reason == "executor_unreachable" else 500,
+            detail=f"Preview deploy failed: {detail_msg}",
         )
 
     # Successful deploy: stamp metadata and release the lock cleanly. The
-    # lock's commit_sha is captured at lock-acquire time (pre-checkout), so
-    # re-read HEAD here to record the PR branch's deployed commit.
+    # executor returns ``commit_sha`` for the PR branch HEAD post-checkout,
+    # so we record that as the deployed commit (the lock's commit_sha was
+    # captured pre-checkout and reflects the base branch).
     now = datetime.utcnow()
     item.preview_status = "deployed"
     item.preview_deployed = True
     item.preview_deployed_at = now
     item.preview_deployed_by = deployed_by
-    item.preview_health_status = "healthy"
-    item.preview_commit_sha = preview_deploy.current_commit_sha(repo_path)
+    item.preview_health_status = result.health_status or "healthy"
+    item.preview_commit_sha = result.commit_sha
     item.preview_error = None
     db.commit()
     db.refresh(item)
@@ -693,49 +671,18 @@ def revert_preview_action(
             db, repo_path, release_reason=release_reason, final_status="failed"
         )
 
-    checkout = preview_deploy.checkout_branch(
-        repo_path, preview_deploy.REVERT_BASE_BRANCH
+    result = preview_deploy.call_host_executor(
+        action="revert_preview",
+        repo_path=repo_path,
+        branch=preview_deploy.REVERT_BASE_BRANCH,
     )
-    if not checkout.ok:
-        _abort(
-            "revert_checkout_failed",
-            f"git checkout failed (exit {checkout.returncode}): {checkout.stderr.strip()}",
-        )
+    if not result.success:
+        reason_code = result.error_code or "revert_executor_failed"
+        detail_msg = result.error or "host executor reported failure"
+        _abort(reason_code, f"executor {reason_code}: {detail_msg}")
         raise HTTPException(
-            status_code=500,
-            detail=(
-                f"Failed to checkout '{preview_deploy.REVERT_BASE_BRANCH}': "
-                f"{checkout.stderr.strip() or 'git exited non-zero'}"
-            ),
-        )
-
-    build = preview_deploy.compose_build_and_up(repo_path)
-    if not build.ok:
-        _abort(
-            "revert_compose_failed",
-            f"docker compose failed (exit {build.returncode}): {build.stderr.strip()}",
-        )
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                f"docker compose failed (exit {build.returncode}): "
-                f"{build.stderr.strip() or 'see logs'}"
-            ),
-        )
-
-    health = preview_deploy.run_healthcheck(repo_path)
-    healthy = preview_deploy.parse_healthcheck(health)
-    if not healthy:
-        _abort(
-            "revert_healthcheck_failed",
-            (
-                f"healthcheck failed (exit {health.returncode}): "
-                f"{(health.stderr or health.stdout).strip()}"
-            ),
-        )
-        raise HTTPException(
-            status_code=500,
-            detail="Revert healthcheck failed — base branch service is not running.",
+            status_code=502 if reason_code == "executor_unreachable" else 500,
+            detail=f"Preview revert failed: {detail_msg}",
         )
 
     now = datetime.utcnow()

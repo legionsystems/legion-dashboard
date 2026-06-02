@@ -903,6 +903,76 @@ class RevertPreviewRequest(BaseModel):
         return v
 
 
+# ---------------------------------------------------------------------------
+# Host-side preview executor schemas (slice 4b)
+# ---------------------------------------------------------------------------
+#
+# The dashboard container does not have write access to ``/srv/repo`` and
+# cannot run ``docker compose`` against the host's daemon for arbitrary
+# branches. Slice 4b moves the side-effectful work to a host-side executor
+# (``legion-preview-executor``) reachable at
+# ``http://host.docker.internal:8766/preview``. These schemas describe the
+# request the dashboard sends and the response it parses, so both ends
+# agree on the wire shape and the router can stamp metadata only on a
+# confirmed success.
+
+
+# Actions the dashboard may request from the host executor.
+ALLOWED_EXECUTOR_ACTIONS = {"deploy_preview", "revert_preview"}
+
+
+class PreviewExecutorRequest(BaseModel):
+    """Wire payload sent from the dashboard to the host preview executor.
+
+    ``action`` selects deploy vs revert. ``repo_path`` is validated against
+    a host-side allowlist before any work runs — the dashboard never sends
+    an arbitrary path, but the executor refuses unknown paths defensively.
+    ``branch`` is the git ref to check out on the host worktree.
+    ``service`` is the docker-compose service to rebuild/restart (defaults
+    to the dashboard's app service).
+    """
+
+    action: str
+    repo_path: str
+    branch: str
+    service: Optional[str] = None
+
+    @field_validator("action")
+    @classmethod
+    def _action_allowed(cls, v: str) -> str:
+        if v not in ALLOWED_EXECUTOR_ACTIONS:
+            raise ValueError(
+                f"action must be one of {sorted(ALLOWED_EXECUTOR_ACTIONS)}"
+            )
+        return v
+
+    @field_validator("repo_path", "branch")
+    @classmethod
+    def _nonempty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("must not be empty")
+        return v
+
+
+class PreviewExecutorResponse(BaseModel):
+    """Response the host executor returns to the dashboard.
+
+    ``success`` is the single boolean the router gates metadata writes on.
+    On a non-success the router must release the lock with a failed status
+    and not stamp ``preview_deployed = True``. ``error_code`` is a stable
+    short identifier the operator UI can localize; ``error`` is the human
+    string.
+    """
+
+    success: bool
+    action: Optional[str] = None
+    commit_sha: Optional[str] = None
+    branch: Optional[str] = None
+    health_status: Optional[str] = None
+    error: Optional[str] = None
+    error_code: Optional[str] = None
+
+
 # Resolve the forward reference from WorkItemResponse -> DebateRunSummary now
 # that both classes are defined.
 WorkItemResponse.model_rebuild()
