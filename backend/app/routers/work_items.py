@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..lifecycle import compute_effective_state
+from .. import preview_deploy, repo_safety
 from ..debate import (
     attach_operator_inputs_to_run,
     execution_bridge_configured,
@@ -39,12 +40,14 @@ from ..schemas import (
     DebateRunHideRequest,
     DebateRunHideResponse,
     DebateRunSummary,
+    DeployPreviewRequest,
     FollowUpCreate,
     FollowUpResponse,
     OperatorDebateInputCreate,
     OperatorDebateInputResponse,
     RejectRequest,
     RejectWithChangesRequest,
+    RevertPreviewRequest,
     WorkItemArchiveRequest,
     WorkItemClassificationUpdate,
     WorkItemCreate,
@@ -424,6 +427,332 @@ def reject_work_item_with_changes(
     item.preview_required = False
     db.commit()
     db.refresh(item)
+    return _serialize_with_debate(db, item)
+
+
+# ---------------------------------------------------------------------------
+# Preview deployment / revert endpoints (slice 4)
+# ---------------------------------------------------------------------------
+#
+# Operators trigger ``deploy-preview`` to bring up a Work Item's PR branch on
+# the host's compose stack and ``revert-preview`` to roll back to the base
+# branch. Both actions go through the same repo safety gate that builder
+# runs use (clean worktree + free lock), acquire the lock for the duration
+# of the action, and release it whether the action succeeds or aborts. The
+# shell-out helpers live in :mod:`app.preview_deploy` so tests can stub the
+# subprocesses out without touching the surrounding state machine.
+
+
+def _preview_gate_or_409(
+    db: Session, repo_path: str, repo_name: str, branch_name: str
+) -> repo_safety.LockResult:
+    """Run the repo safety gate and acquire the preview lock.
+
+    Mirrors the builder gate (clean repo check, busy lock check, atomic
+    acquire) and raises HTTPException(409) with a structured detail body on
+    any blocker. On success the caller owns the returned lock and must
+    release it before returning.
+    """
+    safety = repo_safety.check_repo_clean(repo_path)
+    if not safety.is_clean:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "blocker_code": safety.blocker_code or "blocked_dirty_repo",
+                "blocker_message": (
+                    safety.blocker_message
+                    or f"Repo {repo_path} is not clean"
+                ),
+                "repo_path": repo_path,
+                "dirty_files": safety.dirty_files,
+                "staged_files": safety.staged_files,
+                "untracked_files": safety.untracked_files,
+                "current_branch": safety.current_branch,
+                "current_commit": safety.current_commit,
+            },
+        )
+
+    existing_lock = repo_safety.check_repo_busy(db, repo_path)
+    if existing_lock is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "blocker_code": "blocked_repo_busy",
+                "blocker_message": (
+                    f"Repo {repo_path} is already locked by an "
+                    f"in-flight build (lock id {existing_lock.id})"
+                ),
+                "repo_path": repo_path,
+                "existing_lock_id": existing_lock.id,
+                "existing_lock_branch": existing_lock.branch_name,
+                "existing_lock_work_item_id": existing_lock.work_item_id,
+            },
+        )
+
+    lock_result = repo_safety.acquire_repo_lock(
+        session=db,
+        repo_path=repo_path,
+        repo_name=repo_name,
+        branch_name=branch_name,
+        commit_sha=safety.current_commit or "unknown",
+        lock_owner="preview-deploy",
+    )
+    if not lock_result.acquired:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "blocker_code": lock_result.blocker_code or "blocked_repo_busy",
+                "blocker_message": (
+                    lock_result.blocker_message
+                    or f"Repo {repo_path} became busy during lock acquire"
+                ),
+                "repo_path": repo_path,
+            },
+        )
+    return lock_result
+
+
+@router.post("/{work_item_id}/deploy-preview", response_model=WorkItemResponse)
+def deploy_preview_action(
+    work_item_id: int,
+    payload: Optional[DeployPreviewRequest] = None,
+    db: Session = Depends(get_db),
+):
+    """Deploy a Work Item's PR branch as a preview on the host compose stack.
+
+    Validates the Work Item carries branch / PR metadata, that its effective
+    state allows a preview, and that the repo safety gate is open. On a
+    successful build + healthcheck the Work Item is stamped as deployed; on
+    any failure the lock is released and the preview is marked errored.
+    """
+    item = _get_or_404(db, work_item_id)
+
+    if not item.branch_name or item.pr_number is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Work item is missing branch metadata. "
+                "Both branch_name and pr_number must be set before "
+                "deploying a preview."
+            ),
+        )
+
+    state = compute_effective_state(item, None)
+    if preview_deploy.is_preview_state_blocked(state):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Work item is in state '{state}'; preview deploy is not "
+                "allowed for merged, implemented, certified, archived, "
+                "rejected, or ready-to-merge items."
+            ),
+        )
+    if not preview_deploy.is_deploy_state_allowed(state):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Work item is in state '{state}'; preview deploy requires "
+                "an in-review, code-reviewed, preview, or rework state."
+            ),
+        )
+
+    repo_path, repo_name = preview_deploy.resolve_preview_repo(item)
+    lock_result = _preview_gate_or_409(
+        db, repo_path, repo_name, item.branch_name
+    )
+
+    deployed_by = payload.deployed_by if payload else None
+    item.preview_status = "deploying"
+    item.preview_branch = item.branch_name
+    item.preview_pr_number = item.pr_number
+    item.preview_error = None
+    db.commit()
+
+    def _abort(reason: str, error_detail: str) -> None:
+        """Mark the preview as errored and release the lock."""
+        item.preview_status = "error"
+        item.preview_error = error_detail[:2000]
+        item.preview_health_status = "unhealthy"
+        db.commit()
+        repo_safety.release_repo_lock(
+            db, repo_path, release_reason=reason, final_status="failed"
+        )
+
+    checkout = preview_deploy.checkout_branch(repo_path, item.branch_name)
+    if not checkout.ok:
+        _abort(
+            "preview_checkout_failed",
+            f"git checkout failed (exit {checkout.returncode}): {checkout.stderr.strip()}",
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Failed to checkout branch '{item.branch_name}': "
+                f"{checkout.stderr.strip() or 'git exited non-zero'}"
+            ),
+        )
+
+    build = preview_deploy.compose_build_and_up(repo_path)
+    if not build.ok:
+        _abort(
+            "preview_compose_failed",
+            f"docker compose failed (exit {build.returncode}): {build.stderr.strip()}",
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"docker compose failed (exit {build.returncode}): "
+                f"{build.stderr.strip() or 'see logs'}"
+            ),
+        )
+
+    health = preview_deploy.run_healthcheck(repo_path)
+    healthy = preview_deploy.parse_healthcheck(health)
+    if not healthy:
+        _abort(
+            "preview_healthcheck_failed",
+            (
+                f"healthcheck failed (exit {health.returncode}): "
+                f"{(health.stderr or health.stdout).strip()}"
+            ),
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Preview healthcheck failed — service is not running.",
+        )
+
+    # Successful deploy: stamp metadata and release the lock cleanly. The
+    # lock's commit_sha is captured at lock-acquire time (pre-checkout), so
+    # re-read HEAD here to record the PR branch's deployed commit.
+    now = datetime.utcnow()
+    item.preview_status = "deployed"
+    item.preview_deployed = True
+    item.preview_deployed_at = now
+    item.preview_deployed_by = deployed_by
+    item.preview_health_status = "healthy"
+    item.preview_commit_sha = preview_deploy.current_commit_sha(repo_path)
+    item.preview_error = None
+    db.commit()
+    db.refresh(item)
+
+    repo_safety.release_repo_lock(
+        db, repo_path, release_reason="preview_deployed", final_status="released"
+    )
+
+    return _serialize_with_debate(db, item)
+
+
+@router.post("/{work_item_id}/revert-preview", response_model=WorkItemResponse)
+def revert_preview_action(
+    work_item_id: int,
+    payload: RevertPreviewRequest,
+    db: Session = Depends(get_db),
+):
+    """Revert a deployed preview back to the project's base branch.
+
+    Requires that a preview is currently deployed. Runs the same safety gate
+    as deploy (clean worktree + free lock), checks out the base branch,
+    rebuilds the compose service, healthchecks, and clears the deployed
+    flag. The revert reason is recorded for audit.
+    """
+    item = _get_or_404(db, work_item_id)
+
+    if not item.preview_deployed:
+        raise HTTPException(
+            status_code=409,
+            detail="Work item has no active preview deployment to revert.",
+        )
+
+    state = compute_effective_state(item, None)
+    if preview_deploy.is_preview_state_blocked(state):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Work item is in state '{state}'; preview revert is not "
+                "allowed for merged, implemented, certified, archived, "
+                "rejected, or ready-to-merge items."
+            ),
+        )
+
+    repo_path, repo_name = preview_deploy.resolve_preview_repo(item)
+    lock_result = _preview_gate_or_409(
+        db, repo_path, repo_name, preview_deploy.REVERT_BASE_BRANCH
+    )
+
+    reverted_by = payload.reverted_by
+    reason = payload.reason
+
+    item.preview_status = "reverting"
+    db.commit()
+
+    def _abort(release_reason: str, error_detail: str) -> None:
+        item.preview_status = "revert_error"
+        item.preview_error = error_detail[:2000]
+        db.commit()
+        repo_safety.release_repo_lock(
+            db, repo_path, release_reason=release_reason, final_status="failed"
+        )
+
+    checkout = preview_deploy.checkout_branch(
+        repo_path, preview_deploy.REVERT_BASE_BRANCH
+    )
+    if not checkout.ok:
+        _abort(
+            "revert_checkout_failed",
+            f"git checkout failed (exit {checkout.returncode}): {checkout.stderr.strip()}",
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Failed to checkout '{preview_deploy.REVERT_BASE_BRANCH}': "
+                f"{checkout.stderr.strip() or 'git exited non-zero'}"
+            ),
+        )
+
+    build = preview_deploy.compose_build_and_up(repo_path)
+    if not build.ok:
+        _abort(
+            "revert_compose_failed",
+            f"docker compose failed (exit {build.returncode}): {build.stderr.strip()}",
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"docker compose failed (exit {build.returncode}): "
+                f"{build.stderr.strip() or 'see logs'}"
+            ),
+        )
+
+    health = preview_deploy.run_healthcheck(repo_path)
+    healthy = preview_deploy.parse_healthcheck(health)
+    if not healthy:
+        _abort(
+            "revert_healthcheck_failed",
+            (
+                f"healthcheck failed (exit {health.returncode}): "
+                f"{(health.stderr or health.stdout).strip()}"
+            ),
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Revert healthcheck failed — base branch service is not running.",
+        )
+
+    now = datetime.utcnow()
+    item.preview_status = "reverted"
+    item.preview_deployed = False
+    item.preview_health_status = "reverted"
+    item.preview_reverted_at = now
+    item.preview_reverted_by = reverted_by
+    item.preview_revert_reason = reason
+    item.preview_error = None
+    db.commit()
+    db.refresh(item)
+
+    repo_safety.release_repo_lock(
+        db, repo_path, release_reason="preview_reverted", final_status="released"
+    )
+
     return _serialize_with_debate(db, item)
 
 

@@ -84,6 +84,24 @@ class WorkItem(Base):
     changes_requested_by = Column(String(100), nullable=True)
     change_request = Column(Text, nullable=True)
 
+    # Preview deployment / revert metadata (slice 4). All nullable; the
+    # ``deploy-preview`` action populates them, and ``revert-preview`` clears
+    # ``preview_deployed`` and stamps the revert columns. ``preview_required``
+    # and ``preview_deployed`` already exist above from slice 1; this block
+    # adds the rest of the observable preview state.
+    preview_status = Column(String(30), nullable=True)
+    preview_url = Column(String(500), nullable=True)
+    preview_branch = Column(String(200), nullable=True)
+    preview_pr_number = Column(Integer, nullable=True)
+    preview_commit_sha = Column(String(40), nullable=True)
+    preview_deployed_at = Column(DateTime, nullable=True)
+    preview_deployed_by = Column(String(100), nullable=True)
+    preview_health_status = Column(String(30), nullable=True)
+    preview_error = Column(Text, nullable=True)
+    preview_reverted_at = Column(DateTime, nullable=True)
+    preview_reverted_by = Column(String(100), nullable=True)
+    preview_revert_reason = Column(Text, nullable=True)
+
     # Archive lifecycle
     archived = Column(Boolean, nullable=False, default=False, index=True)
     archived_at = Column(DateTime, nullable=True)
