@@ -153,6 +153,24 @@ def test_parse_healthcheck_returns_false_on_failed_command():
     assert preview_deploy.parse_healthcheck(result) is False
 
 
+def test_parse_healthcheck_handles_json_array_output():
+    """Newer ``docker compose ps --format json`` emits a JSON array."""
+    result = _ok(stdout='[{"Name": "app", "State": "running"}]')
+    assert preview_deploy.parse_healthcheck(result) is True
+
+
+def test_parse_healthcheck_handles_json_array_with_exited_container():
+    result = _ok(stdout='[{"Name": "app", "State": "exited"}]')
+    assert preview_deploy.parse_healthcheck(result) is False
+
+
+def test_parse_healthcheck_handles_json_array_with_multiple_entries():
+    result = _ok(
+        stdout='[{"Name": "db", "State": "exited"}, {"Name": "app", "State": "running"}]'
+    )
+    assert preview_deploy.parse_healthcheck(result) is True
+
+
 # ---------------------------------------------------------------------------
 # deploy-preview endpoint — input validation
 # ---------------------------------------------------------------------------
@@ -352,6 +370,61 @@ def test_successful_deploy_sets_metadata_and_releases_lock(
     )
     assert lock.lock_status == "released"
     assert lock.release_reason == "preview_deployed"
+
+
+def test_successful_deploy_records_commit_sha_from_branch_head(
+    client, db_session, monkeypatch, clean_repo
+):
+    """preview_commit_sha must reflect the PR branch HEAD post-checkout,
+    not the base branch HEAD that the lock captured pre-checkout."""
+    # Create a feature branch with a *new* commit on top of main so the
+    # branch HEAD differs from the base HEAD.
+    _git(clean_repo, "checkout", "-b", "feature/wi-preview")
+    (clean_repo / "feature.txt").write_text("feature work\n")
+    _git(clean_repo, "add", "feature.txt")
+    _git(clean_repo, "commit", "-m", "feature commit")
+    branch_head = _git(
+        clean_repo, "rev-parse", "feature/wi-preview"
+    ).stdout.strip()
+    _git(clean_repo, "checkout", "main")
+    base_head = _git(clean_repo, "rev-parse", "main").stdout.strip()
+    assert branch_head != base_head
+
+    item = _make_review_ready_item(db_session)
+    _stub_repo_resolution(monkeypatch, str(clean_repo))
+
+    # Real-ish checkout: actually run ``git checkout`` so HEAD moves to the
+    # PR branch before the commit_sha is captured.
+    def _real_checkout(repo_path, branch, timeout=30):
+        proc = subprocess.run(
+            ["git", "-C", repo_path, "checkout", branch],
+            capture_output=True,
+            text=True,
+        )
+        return preview_deploy.CommandResult(
+            returncode=proc.returncode,
+            stdout=proc.stdout,
+            stderr=proc.stderr,
+        )
+
+    monkeypatch.setattr(preview_deploy, "checkout_branch", _real_checkout)
+    monkeypatch.setattr(
+        preview_deploy, "compose_build_and_up", lambda *a, **kw: _ok()
+    )
+    monkeypatch.setattr(
+        preview_deploy,
+        "run_healthcheck",
+        lambda *a, **kw: _ok(stdout=_running_ps_json()),
+    )
+
+    response = client.post(
+        f"/api/work-items/{item.id}/deploy-preview", json={}
+    )
+
+    assert response.status_code == 200, response.text
+    db_session.refresh(item)
+    assert item.preview_commit_sha == branch_head
+    assert item.preview_commit_sha != base_head
 
 
 def test_failed_healthcheck_does_not_mark_deployed(

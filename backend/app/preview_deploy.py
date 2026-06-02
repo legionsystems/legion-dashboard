@@ -141,6 +141,20 @@ def checkout_branch(repo_path: str, branch: str, timeout: int = 30) -> CommandRe
     return _run(["git", "checkout", branch], cwd=repo_path, timeout=timeout)
 
 
+def current_commit_sha(repo_path: str, timeout: int = 10) -> Optional[str]:
+    """Return the current HEAD commit SHA in ``repo_path``, or None on error.
+
+    Used to stamp ``preview_commit_sha`` with the PR branch's HEAD *after*
+    checkout — the lock's ``commit_sha`` is captured before checkout and
+    reflects the base branch, not the PR branch.
+    """
+    result = _run(["git", "rev-parse", "HEAD"], cwd=repo_path, timeout=timeout)
+    if not result.ok:
+        return None
+    sha = result.stdout.strip()
+    return sha or None
+
+
 def compose_build_and_up(
     repo_path: str,
     service: str = PREVIEW_COMPOSE_SERVICE,
@@ -184,7 +198,13 @@ def run_healthcheck(
 
 
 def parse_healthcheck(result: CommandResult) -> bool:
-    """Return True when ``ps --format json`` shows a running container."""
+    """Return True when ``ps --format json`` shows a running container.
+
+    ``docker compose ps --format json`` emits either NDJSON (one object per
+    line) or a single JSON array (newer Compose versions, including the
+    single-service case). Handle both: a successful ``json.loads`` of a line
+    may return a list, in which case we iterate it directly.
+    """
     if not result.ok:
         return False
     import json
@@ -194,20 +214,13 @@ def parse_healthcheck(result: CommandResult) -> bool:
         if not line:
             continue
         try:
-            entry = json.loads(line)
+            parsed = json.loads(line)
         except json.JSONDecodeError:
-            # ``docker compose ps --format json`` may emit a JSON array.
-            try:
-                arr = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(arr, list):
-                for item in arr:
-                    if _entry_is_running(item):
-                        return True
             continue
-        if _entry_is_running(entry):
-            return True
+        entries = parsed if isinstance(parsed, list) else [parsed]
+        for entry in entries:
+            if _entry_is_running(entry):
+                return True
     return False
 
 

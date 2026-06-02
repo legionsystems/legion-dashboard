@@ -621,14 +621,16 @@ def deploy_preview_action(
             detail="Preview healthcheck failed — service is not running.",
         )
 
-    # Successful deploy: stamp metadata and release the lock cleanly.
+    # Successful deploy: stamp metadata and release the lock cleanly. The
+    # lock's commit_sha is captured at lock-acquire time (pre-checkout), so
+    # re-read HEAD here to record the PR branch's deployed commit.
     now = datetime.utcnow()
     item.preview_status = "deployed"
     item.preview_deployed = True
     item.preview_deployed_at = now
     item.preview_deployed_by = deployed_by
     item.preview_health_status = "healthy"
-    item.preview_commit_sha = lock_result.lock.commit_sha if lock_result.lock else None
+    item.preview_commit_sha = preview_deploy.current_commit_sha(repo_path)
     item.preview_error = None
     db.commit()
     db.refresh(item)
