@@ -44,7 +44,7 @@ DEFAULT_HOST_EXECUTOR_URL = "http://host.docker.internal:8766/preview"
 # Default executor timeout. The build + up + healthcheck can take several
 # minutes on a cold image cache; the dashboard waits the executor out
 # rather than racing it with a shorter HTTP timeout.
-DEFAULT_EXECUTOR_TIMEOUT_SECONDS = 900
+DEFAULT_EXECUTOR_TIMEOUT_SECONDS = 1500
 
 
 # ---------------------------------------------------------------------------

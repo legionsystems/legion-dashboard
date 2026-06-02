@@ -44,7 +44,7 @@ from typing import Optional, Tuple
 # Configuration
 # ---------------------------------------------------------------------------
 
-LISTEN_HOST = os.environ.get("LEGION_PREVIEW_EXECUTOR_HOST", "127.0.0.1")
+LISTEN_HOST = os.environ.get("LEGION_PREVIEW_EXECUTOR_HOST", "0.0.0.0")
 LISTEN_PORT = int(os.environ.get("LEGION_PREVIEW_EXECUTOR_PORT", "8766"))
 
 # Repo paths the executor is willing to act on. Arbitrary paths are refused.
