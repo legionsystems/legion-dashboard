@@ -262,7 +262,14 @@ def _create_builder_task(db: Session, work_item_id: int, request: SendToBuilderR
     skip_lock = status_override == "triage"
     acquired_lock: Optional[RepoLock] = None
     if not skip_gate:
-        safety = repo_safety.check_repo_clean(target_repo)
+        # Run the safety inspection on the host (via the preview executor)
+        # rather than inside the container. The container's /srv/repo mount
+        # is not a valid git worktree, so an in-container ``git status``
+        # would fail with ``fatal: not a git repository`` and the gate
+        # would 409 every Start Build with ``git_inspection_failed``. The
+        # host executor inspects the real worktree and returns the same
+        # RepoSafetyResult shape.
+        safety = repo_safety.check_repo_clean_via_executor(target_repo)
         if not safety.is_clean:
             raise HTTPException(
                 status_code=409,

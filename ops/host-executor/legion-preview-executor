@@ -62,9 +62,23 @@ DEFAULT_COMPOSE_SERVICE = "app"
 # ``healthcheck`` (slice 5) re-runs the post-merge container probe so the
 # dashboard's verify-merge endpoint can clear ``merged_deployment_failed``
 # without re-merging.
+# ``repo_safety_check`` (Start Build fix) inspects the host worktree so the
+# dashboard can gate Start Build without running git inside the container,
+# whose /srv/repo mount is not a valid git worktree.
 ALLOWED_ACTIONS = frozenset(
-    {"deploy_preview", "revert_preview", "merge_pr", "healthcheck"}
+    {
+        "deploy_preview",
+        "revert_preview",
+        "merge_pr",
+        "healthcheck",
+        "repo_safety_check",
+    }
 )
+
+# Files the safety gate intentionally ignores. Mirrors
+# ``backend/app/repo_safety._IGNORED_DIRTY_FILES`` so the host-side check
+# matches the dashboard's historical behaviour.
+_IGNORED_DIRTY_FILES = frozenset({".hermes-config.yaml"})
 
 # Conservative branch-name pattern: alnum, underscore, dash, dot, slash.
 # Refuses ``;``, ``&``, ``$``, spaces, etc. — defense in depth even though
@@ -410,6 +424,144 @@ def _perform_merge_pr(
     }
 
 
+def _perform_repo_safety_check(repo_path: str) -> dict:
+    """Inspect ``repo_path`` and return a RepoSafetyResult-shaped payload.
+
+    Runs the same git commands the dashboard's in-container
+    ``check_repo_clean`` would run — but on the host, where ``/srv/repo`` is
+    a real worktree. Always returns ``success=True``: the inspection itself
+    has run; whether the result is "clean" or "blocked" is in the body.
+
+    The shape mirrors :class:`backend.app.schemas.RepoSafetyResult` so the
+    dashboard can project the response straight into that dataclass. When
+    a git command fails outright (e.g. directory exists but is not a git
+    worktree), the response carries ``blocker_code='git_inspection_failed'``
+    and the offending stderr — the dashboard treats that as a hard block,
+    not as a "clean" repo.
+    """
+    action = "repo_safety_check"
+
+    # Current branch / commit are informational; failures here don't block
+    # the gate by themselves — we still record what we can.
+    rc, out, _err = _run(
+        ["git", "-C", repo_path, "branch", "--show-current"],
+        cwd=repo_path,
+        timeout=10,
+    )
+    current_branch = out.strip() if rc == 0 and out.strip() else None
+    rc, out, _err = _run(
+        ["git", "-C", repo_path, "rev-parse", "HEAD"],
+        cwd=repo_path,
+        timeout=10,
+    )
+    current_commit = out.strip() if rc == 0 and out.strip() else None
+
+    def _inspection_failed(cmd_label: str, err: str) -> dict:
+        msg = err.strip()[:200] or "git error"
+        return {
+            "success": True,
+            "action": action,
+            "repo_path": repo_path,
+            "is_clean": False,
+            "dirty_files": [],
+            "staged_files": [],
+            "untracked_files": [],
+            "current_branch": current_branch,
+            "current_commit": current_commit,
+            "blocker_code": "git_inspection_failed",
+            "blocker_message": f"Cannot inspect repo ({cmd_label}): {msg}",
+        }
+
+    rc, _out, err = _run(
+        ["git", "-C", repo_path, "diff", "--quiet"], cwd=repo_path, timeout=20
+    )
+    if rc not in (0, 1):
+        return _inspection_failed("git diff --quiet", err)
+    has_unstaged = rc == 1
+
+    rc, _out, err = _run(
+        ["git", "-C", repo_path, "diff", "--cached", "--quiet"],
+        cwd=repo_path,
+        timeout=20,
+    )
+    if rc not in (0, 1):
+        return _inspection_failed("git diff --cached --quiet", err)
+    has_staged = rc == 1
+
+    rc, out, err = _run(
+        ["git", "-C", repo_path, "ls-files", "--others", "--exclude-standard"],
+        cwd=repo_path,
+        timeout=20,
+    )
+    if rc != 0:
+        return _inspection_failed("git ls-files --others", err)
+    untracked_files = [
+        line
+        for line in (out or "").splitlines()
+        if line.strip()
+        and os.path.basename(line.strip()) not in _IGNORED_DIRTY_FILES
+    ]
+
+    rc, out, err = _run(
+        ["git", "-C", repo_path, "status", "--short"],
+        cwd=repo_path,
+        timeout=20,
+    )
+    if rc != 0:
+        return _inspection_failed("git status --short", err)
+    dirty_files: list = []
+    staged_files: list = []
+    for line in (out or "").splitlines():
+        if len(line) < 4:
+            continue
+        index_status = line[0]
+        worktree_status = line[1]
+        path = line[3:].strip()
+        if os.path.basename(path) in _IGNORED_DIRTY_FILES:
+            continue
+        if index_status not in (" ", "?"):
+            staged_files.append(path)
+        if worktree_status not in (" ", "?") and worktree_status != " ":
+            dirty_files.append(path)
+
+    # Re-evaluate against the ignored-file filter so an ignored-only diff
+    # does not trip the gate.
+    if has_unstaged and not dirty_files and not untracked_files:
+        has_unstaged = False
+    if has_staged and not staged_files:
+        has_staged = False
+
+    is_clean = not (has_staged or has_unstaged or untracked_files)
+    blocker_code: Optional[str] = None
+    blocker_message: Optional[str] = None
+    if not is_clean:
+        blocker_code = "blocked_dirty_repo"
+        parts = []
+        if staged_files:
+            parts.append(f"{len(staged_files)} staged")
+        if dirty_files:
+            parts.append(f"{len(dirty_files)} unstaged")
+        if untracked_files:
+            parts.append(f"{len(untracked_files)} untracked")
+        blocker_message = (
+            f"Repo {repo_path} has uncommitted changes: " + ", ".join(parts)
+        )
+
+    return {
+        "success": True,
+        "action": action,
+        "repo_path": repo_path,
+        "is_clean": is_clean,
+        "dirty_files": dirty_files,
+        "staged_files": staged_files,
+        "untracked_files": untracked_files,
+        "current_branch": current_branch,
+        "current_commit": current_commit,
+        "blocker_code": blocker_code,
+        "blocker_message": blocker_message,
+    }
+
+
 def _perform_healthcheck_only(repo_path: str, service: str) -> dict:
     """Run only the ``docker compose ps`` healthcheck and return the result.
 
@@ -634,11 +786,15 @@ class ExecutorHandler(BaseHTTPRequestHandler):
                 "error": "repo_path is not in the executor allowlist",
                 "error_code": "executor_bad_repo",
             })
-        if not isinstance(branch, str) or not BRANCH_RE.match(branch):
-            return _json_response(self, 400, {
-                "error": "branch failed validation",
-                "error_code": "executor_bad_branch",
-            })
+        # ``repo_safety_check`` and ``healthcheck`` are pure inspections — they
+        # do not need a branch ref. Skip branch validation for them so the
+        # dashboard can omit ``branch`` from the request body entirely.
+        if action not in ("repo_safety_check", "healthcheck"):
+            if not isinstance(branch, str) or not BRANCH_RE.match(branch):
+                return _json_response(self, 400, {
+                    "error": "branch failed validation",
+                    "error_code": "executor_bad_branch",
+                })
         if not isinstance(service, str) or not BRANCH_RE.match(service):
             return _json_response(self, 400, {
                 "error": "service failed validation",
@@ -652,9 +808,13 @@ class ExecutorHandler(BaseHTTPRequestHandler):
 
         # Per-action dispatch. ``merge_pr`` needs the operator-supplied
         # ``pr_number`` and ``base_branch``; ``healthcheck`` skips git/compose
-        # mutations entirely; ``deploy_preview`` / ``revert_preview`` use the
+        # mutations entirely; ``repo_safety_check`` runs a read-only git
+        # inspection; ``deploy_preview`` / ``revert_preview`` use the
         # branch-checkout + build flow.
-        if action == "merge_pr":
+        if action == "repo_safety_check":
+            log.info("executor request: action=%s repo=%s", action, repo_path)
+            body = _perform_repo_safety_check(repo_path)
+        elif action == "merge_pr":
             if not isinstance(pr_number, int) or isinstance(pr_number, bool) or pr_number <= 0:
                 return _json_response(self, 400, {
                     "error": "pr_number must be a positive integer for merge_pr",
