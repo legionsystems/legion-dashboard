@@ -35,6 +35,7 @@ services:
       LEGION_DOCKER_CONTROL_ENABLED: ${LEGION_DOCKER_CONTROL_ENABLED:-true}
       HERMES_HOME: /app/.hermes  # Point to mounted config location
       HERMES_KANBAN_BRIDGE_URL: http://host.docker.internal:8765
+      API_SERVER_KEY: ${API_SERVER_KEY:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:

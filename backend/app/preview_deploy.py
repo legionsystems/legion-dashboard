@@ -1,20 +1,28 @@
-"""Preview deployment helpers (workflow slice 4).
+"""Preview deployment helpers (workflow slices 4 + 4b).
 
 Operators trigger ``deploy-preview`` to bring up a Work Item's PR branch on
 the host's docker-compose stack, and ``revert-preview`` to roll back to the
-project's known-good base branch. The router uses the orchestration helpers
-in this module so the moving parts (git checkout, ``docker compose`` calls,
-healthcheck) can be exercised — and stubbed — in isolation by tests.
+project's known-good base branch. Slice 4b moved the side-effectful work
+(git checkout, ``docker compose`` build/up, healthcheck) out of the
+dashboard container — which mounts ``/srv/repo`` read-only and cannot run
+``docker compose`` against the host daemon for arbitrary branches — and
+into a host-side executor reachable at
+``http://host.docker.internal:8766/preview``.
 
-The module is deliberately thin: it shells out to ``git`` and
-``docker compose`` rather than wrapping them in heavier abstractions, so an
-operator sees exactly what would happen at the terminal.
+This module owns the dashboard side of that contract: the effective-state
+guards, the repo-to-compose resolution, and ``call_host_executor`` which
+serializes the request, sends it, and parses the response. The router
+in ``app.routers.work_items`` uses these helpers so the host-executor
+boundary is testable in isolation.
 """
 from __future__ import annotations
 
-import subprocess
+import json
+import os
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 
 from .models import WorkItem
 
@@ -27,6 +35,16 @@ REVERT_BASE_BRANCH = "feature/dashboard-bootstrap-control-plane"
 # Docker compose service name used by the dashboard's compose project. The
 # preview deploy rebuilds and restarts only this service.
 PREVIEW_COMPOSE_SERVICE = "app"
+
+# Default host-executor URL — overrideable via env so tests / staged
+# rollouts can point at a stub. The default targets the host loopback via
+# the ``host.docker.internal`` alias the compose file already configures.
+DEFAULT_HOST_EXECUTOR_URL = "http://host.docker.internal:8766/preview"
+
+# Default executor timeout. The build + up + healthcheck can take several
+# minutes on a cold image cache; the dashboard waits the executor out
+# rather than racing it with a shorter HTTP timeout.
+DEFAULT_EXECUTOR_TIMEOUT_SECONDS = 1500
 
 
 # ---------------------------------------------------------------------------
@@ -89,150 +107,133 @@ def resolve_preview_repo(work_item: WorkItem) -> Tuple[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Shell-out helpers
+# Host executor client
 # ---------------------------------------------------------------------------
 
 
 @dataclass
-class CommandResult:
-    """Captured outcome of a subprocess invocation."""
+class ExecutorResponse:
+    """Parsed response from the host-side preview executor.
 
-    returncode: int
-    stdout: str
-    stderr: str
-
-    @property
-    def ok(self) -> bool:
-        return self.returncode == 0
-
-
-def _run(cmd: List[str], cwd: str, timeout: int) -> CommandResult:
-    """Run ``cmd`` in ``cwd`` and return a :class:`CommandResult`.
-
-    A ``subprocess.TimeoutExpired`` is surfaced as a non-zero return code
-    with the timeout note in ``stderr`` so callers can treat timeouts the
-    same way they treat any other failure (non-zero -> abort).
+    ``success`` is the single boolean the router gates metadata writes on:
+    if False, the router must release the lock with a failed status and
+    must not stamp ``preview_deployed = True``. ``error_code`` is a stable
+    short identifier; ``error`` is the human-readable message. ``raw``
+    preserves the original payload for tests / debug logging.
     """
+
+    success: bool
+    commit_sha: Optional[str] = None
+    health_status: Optional[str] = None
+    error: Optional[str] = None
+    error_code: Optional[str] = None
+    raw: Optional[dict] = None
+
+
+def _executor_url() -> str:
+    return os.environ.get("LEGION_PREVIEW_EXECUTOR_URL", DEFAULT_HOST_EXECUTOR_URL)
+
+
+def _executor_api_key() -> str:
+    """Return the executor API key from the dashboard's environment.
+
+    The dashboard and executor share ``API_SERVER_KEY``. Returning an empty
+    string when unset lets the executor return its own 401 rather than the
+    dashboard crashing on a missing env var — surfaces the misconfig the
+    same way as a stale key.
+    """
+    return os.environ.get("API_SERVER_KEY", "")
+
+
+def call_host_executor(
+    action: str,
+    repo_path: str,
+    branch: str,
+    service: Optional[str] = None,
+    api_key: Optional[str] = None,
+    timeout: int = DEFAULT_EXECUTOR_TIMEOUT_SECONDS,
+    url: Optional[str] = None,
+) -> ExecutorResponse:
+    """POST a preview action to the host executor and parse the response.
+
+    Returns an :class:`ExecutorResponse` in every case — network errors,
+    non-2xx HTTP responses, and malformed JSON all yield ``success=False``
+    with a descriptive ``error`` / ``error_code``. The router translates
+    that into a 5xx without leaking secrets.
+
+    The API key falls back to ``API_SERVER_KEY`` from the environment so
+    production code does not need to pass it explicitly; tests override it
+    via the ``api_key`` argument or by monkeypatching this whole function.
+    """
+    request_payload = {
+        "action": action,
+        "repo_path": repo_path,
+        "branch": branch,
+    }
+    if service is not None:
+        request_payload["service"] = service
+
+    body = json.dumps(request_payload).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "X-Api-Key": api_key if api_key is not None else _executor_api_key(),
+    }
+    target = url or _executor_url()
+    req = urllib.request.Request(target, data=body, headers=headers, method="POST")
+
     try:
-        proc = subprocess.run(
-            cmd,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-        return CommandResult(
-            returncode=proc.returncode,
-            stdout=proc.stdout or "",
-            stderr=proc.stderr or "",
-        )
-    except subprocess.TimeoutExpired as exc:
-        return CommandResult(
-            returncode=124,
-            stdout=(exc.stdout.decode() if isinstance(exc.stdout, bytes) else (exc.stdout or "")),
-            stderr=f"timed out after {timeout}s",
-        )
-    except FileNotFoundError as exc:
-        return CommandResult(returncode=127, stdout="", stderr=str(exc))
-
-
-def checkout_branch(repo_path: str, branch: str, timeout: int = 30) -> CommandResult:
-    """Check out ``branch`` in ``repo_path``."""
-    return _run(["git", "checkout", branch], cwd=repo_path, timeout=timeout)
-
-
-def current_commit_sha(repo_path: str, timeout: int = 10) -> Optional[str]:
-    """Return the current HEAD commit SHA in ``repo_path``, or None on error.
-
-    Used to stamp ``preview_commit_sha`` with the PR branch's HEAD *after*
-    checkout — the lock's ``commit_sha`` is captured before checkout and
-    reflects the base branch, not the PR branch.
-    """
-    result = _run(["git", "rev-parse", "HEAD"], cwd=repo_path, timeout=timeout)
-    if not result.ok:
-        return None
-    sha = result.stdout.strip()
-    return sha or None
-
-
-def compose_build_and_up(
-    repo_path: str,
-    service: str = PREVIEW_COMPOSE_SERVICE,
-    timeout: int = 600,
-) -> CommandResult:
-    """Run ``docker compose build <service> && docker compose up -d <service>``.
-
-    Returns the first non-zero CommandResult, or the ``up -d`` result on
-    success. Callers treat a non-zero return as an abort signal.
-    """
-    build = _run(
-        ["docker", "compose", "build", service], cwd=repo_path, timeout=timeout
-    )
-    if not build.ok:
-        return build
-    return _run(
-        ["docker", "compose", "up", "-d", service],
-        cwd=repo_path,
-        timeout=timeout,
-    )
-
-
-def run_healthcheck(
-    repo_path: str,
-    service: str = PREVIEW_COMPOSE_SERVICE,
-    timeout: int = 30,
-) -> CommandResult:
-    """Verify the preview service is up.
-
-    ``docker compose ps`` is enough for the operator's purposes: a healthy
-    service yields a ``running`` row. We don't probe an in-container HTTP
-    endpoint here because the dashboard's own startup health is observable
-    via the existing apps page — duplicating it would couple this module to
-    a hostname/port mapping the operator may not have configured yet.
-    """
-    return _run(
-        ["docker", "compose", "ps", "--format", "json", service],
-        cwd=repo_path,
-        timeout=timeout,
-    )
-
-
-def parse_healthcheck(result: CommandResult) -> bool:
-    """Return True when ``ps --format json`` shows a running container.
-
-    ``docker compose ps --format json`` emits either NDJSON (one object per
-    line) or a single JSON array (newer Compose versions, including the
-    single-service case). Handle both: a successful ``json.loads`` of a line
-    may return a list, in which case we iterate it directly.
-    """
-    if not result.ok:
-        return False
-    import json
-
-    for line in result.stdout.strip().splitlines():
-        line = line.strip()
-        if not line:
-            continue
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw_text = resp.read().decode("utf-8")
+            status_code = resp.status
+    except urllib.error.HTTPError as exc:
+        # Executor returned a non-2xx with (hopefully) a JSON body. Try to
+        # surface the structured error; fall back to the HTTP status.
         try:
-            parsed = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        entries = parsed if isinstance(parsed, list) else [parsed]
-        for entry in entries:
-            if _entry_is_running(entry):
-                return True
-    return False
+            err_body = exc.read().decode("utf-8") if exc.fp is not None else ""
+            data = json.loads(err_body) if err_body else {}
+        except (ValueError, AttributeError):
+            data = {}
+        return ExecutorResponse(
+            success=False,
+            error=str(data.get("error") or f"executor HTTP {exc.code}"),
+            error_code=str(data.get("error_code") or "executor_http_error"),
+            raw=data if isinstance(data, dict) else None,
+        )
+    except urllib.error.URLError as exc:
+        return ExecutorResponse(
+            success=False,
+            error=f"executor unreachable: {exc.reason}",
+            error_code="executor_unreachable",
+        )
+    except (TimeoutError, OSError) as exc:
+        return ExecutorResponse(
+            success=False,
+            error=f"executor request failed: {exc}",
+            error_code="executor_unreachable",
+        )
 
+    try:
+        data = json.loads(raw_text)
+    except ValueError:
+        return ExecutorResponse(
+            success=False,
+            error="executor returned non-JSON response",
+            error_code="executor_bad_response",
+            raw={"status": status_code, "body": raw_text[:200]},
+        )
+    if not isinstance(data, dict):
+        return ExecutorResponse(
+            success=False,
+            error="executor returned non-object JSON",
+            error_code="executor_bad_response",
+            raw={"status": status_code},
+        )
 
-def _entry_is_running(entry: object) -> bool:
-    if not isinstance(entry, dict):
-        return False
-    state = (
-        entry.get("State")
-        or entry.get("state")
-        or entry.get("status")
-        or ""
+    return ExecutorResponse(
+        success=bool(data.get("success")),
+        commit_sha=data.get("commit_sha") or None,
+        health_status=data.get("health_status") or None,
+        error=data.get("error") or None,
+        error_code=data.get("error_code") or None,
+        raw=data,
     )
-    return str(state).lower() == "running"
-
-

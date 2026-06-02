@@ -1,0 +1,41 @@
+[Unit]
+Description=LEGION Preview Deployment Executor (host-side)
+Documentation=https://github.com/legionsystems/legion-dashboard/tree/main/ops/host-executor
+After=network.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+# API_SERVER_KEY is loaded from an EnvironmentFile so the secret never
+# appears on the command line or in systemd journal headers. The file
+# must be root:root and mode 0600 — operator provisions it during host
+# bootstrap (see ops/host-executor/README for the expected shape).
+EnvironmentFile=/etc/legion/preview-executor.env
+ExecStart=/usr/bin/python3 /root/.hermes/LEGION_TOOLS/bin/legion-preview-executor
+Restart=on-failure
+RestartSec=5
+
+# Logging — keep stderr out of the journal at INFO and use a dedicated
+# log file so the dashboard's debug loop can tail it without sudo.
+StandardOutput=append:/var/log/legion-preview-executor.log
+StandardError=append:/var/log/legion-preview-executor.log
+
+# Security hardening. The executor must be able to:
+#   * write inside /srv/repo (git checkout)
+#   * talk to /var/run/docker.sock (docker compose)
+#   * append to its own log file
+# Anything else is read-only.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/srv/repo /var/log /var/run/docker.sock
+PrivateTmp=true
+
+# Resource limits — the executor itself is small; docker compose does
+# the heavy lifting in separate containers.
+MemoryMax=512M
+CPUQuota=75%
+
+[Install]
+WantedBy=multi-user.target
