@@ -208,6 +208,10 @@ def call_host_executor(
     except urllib.error.HTTPError as exc:
         # Executor returned a non-2xx with (hopefully) a JSON body. Try to
         # surface the structured error; fall back to the HTTP status.
+        # For merge_pr, the executor may include merge_commit_sha even on
+        # failure (e.g., merge succeeded but post-merge deploy failed), so
+        # we must preserve it to distinguish blocked_merge from
+        # merged_deployment_failed.
         try:
             err_body = exc.read().decode("utf-8") if exc.fp is not None else ""
             data = json.loads(err_body) if err_body else {}
@@ -218,6 +222,7 @@ def call_host_executor(
             error=str(data.get("error") or f"executor HTTP {exc.code}"),
             error_code=str(data.get("error_code") or "executor_http_error"),
             raw=data if isinstance(data, dict) else None,
+            merge_commit_sha=data.get("merge_commit_sha") or None,
         )
     except urllib.error.URLError as exc:
         return ExecutorResponse(
