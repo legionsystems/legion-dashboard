@@ -6,6 +6,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from ..database import get_db
+from ..lifecycle import compute_effective_state
 from ..debate import (
     attach_operator_inputs_to_run,
     execution_bridge_configured,
@@ -109,6 +110,7 @@ def _serialize_with_debate(db: Session, item: WorkItem) -> WorkItemResponse:
     latest = _latest_debate_for(db, item.id)
     if latest is not None:
         response.latest_debate = DebateRunSummary.model_validate(latest)
+    response.effective_state = compute_effective_state(item, latest)
     return response
 
 
@@ -194,6 +196,7 @@ def _serialize_many_with_debate(
         run = runs_by_work_item.get(it.id)
         if run is not None:
             resp.latest_debate = DebateRunSummary.model_validate(run)
+        resp.effective_state = compute_effective_state(it, run)
         out.append(resp)
     return out
 

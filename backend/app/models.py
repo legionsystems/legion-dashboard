@@ -60,6 +60,22 @@ class WorkItem(Base):
     pr_url = Column(String(500), nullable=True)
     merge_commit_sha = Column(String(40), nullable=True)
 
+    # Workflow lifecycle metadata (slice 1: foundation).
+    # All columns are nullable; later slices populate them as operators
+    # certify, repos lock, previews deploy, and merges complete.
+    dashboard_lifecycle_status = Column(String(40), nullable=True)
+    effective_state = Column(String(40), nullable=True)
+    pr_number = Column(Integer, nullable=True)
+    code_review_status = Column(String(30), nullable=True)
+    branch_name = Column(String(200), nullable=True)
+    preview_required = Column(Boolean, nullable=True)
+    preview_deployed = Column(Boolean, nullable=True)
+    operator_certified = Column(Boolean, nullable=True)
+    ready_to_merge = Column(Boolean, nullable=True)
+    certified_at = Column(DateTime, nullable=True)
+    certified_by = Column(String(100), nullable=True)
+    certification_note = Column(Text, nullable=True)
+
     # Archive lifecycle
     archived = Column(Boolean, nullable=False, default=False, index=True)
     archived_at = Column(DateTime, nullable=True)

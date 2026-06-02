@@ -82,7 +82,24 @@ class WorkItemResponse(WorkItemBase):
     merge_commit_sha: Optional[str] = None
     created_at: datetime
     updated_at: datetime
-    
+
+    # Workflow lifecycle metadata (slice 1).
+    # `effective_state` is the projected/derived state computed by
+    # `app.lifecycle.compute_effective_state` at response time. The other
+    # fields are persisted nullable columns that later slices will populate.
+    dashboard_lifecycle_status: Optional[str] = None
+    effective_state: Optional[str] = None
+    pr_number: Optional[int] = None
+    code_review_status: Optional[str] = None
+    branch_name: Optional[str] = None
+    preview_required: Optional[bool] = None
+    preview_deployed: Optional[bool] = None
+    operator_certified: Optional[bool] = None
+    ready_to_merge: Optional[bool] = None
+    certified_at: Optional[datetime] = None
+    certified_by: Optional[str] = None
+    certification_note: Optional[str] = None
+
     # Archive lifecycle fields
     archived: bool = False
     archived_at: Optional[datetime] = None
