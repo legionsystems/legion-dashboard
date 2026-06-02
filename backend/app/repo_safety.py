@@ -109,44 +109,65 @@ def check_repo_clean(repo_path: str) -> RepoSafetyResult:
         commit_proc.stdout.strip() if commit_proc.returncode == 0 else None
     )
 
-    # Unstaged changes — `git diff --quiet` exits 1 when changes exist.
+    def _git_inspection_failed(cmd: str, proc: subprocess.CompletedProcess) -> RepoSafetyResult:
+        err = (proc.stderr or "").strip() or f"git exited {proc.returncode}"
+        return RepoSafetyResult(
+            repo_path=repo_path,
+            is_clean=False,
+            current_branch=current_branch,
+            current_commit=current_commit,
+            blocker_code="git_inspection_failed",
+            blocker_message=f"Cannot inspect repo ({cmd}): {err[:200]}",
+        )
+
+    # Unstaged changes — `git diff --quiet` exits 0 (clean), 1 (changes),
+    # anything else (e.g. 128 "not a git repo", 129 usage error) is a real
+    # git failure that we must NOT treat as "dirty"; block as
+    # ``git_inspection_failed`` so the operator sees the underlying error
+    # instead of a misleading dirty-repo report.
     unstaged_proc = _run_git(repo_path, ["diff", "--quiet"])
-    has_unstaged = unstaged_proc.returncode != 0
+    if unstaged_proc.returncode not in (0, 1):
+        return _git_inspection_failed("git diff --quiet", unstaged_proc)
+    has_unstaged = unstaged_proc.returncode == 1
 
-    # Staged changes — `git diff --cached --quiet` exits 1 when changes exist.
+    # Staged changes — same 0/1/other convention as above.
     staged_proc = _run_git(repo_path, ["diff", "--cached", "--quiet"])
-    has_staged = staged_proc.returncode != 0
+    if staged_proc.returncode not in (0, 1):
+        return _git_inspection_failed("git diff --cached --quiet", staged_proc)
+    has_staged = staged_proc.returncode == 1
 
-    # Untracked, non-ignored files.
+    # Untracked, non-ignored files. ls-files only returns non-zero on error.
     untracked_proc = _run_git(
         repo_path, ["ls-files", "--others", "--exclude-standard"]
     )
-    untracked_raw: List[str] = []
-    if untracked_proc.returncode == 0:
-        untracked_raw = [
-            line for line in untracked_proc.stdout.splitlines() if line.strip()
-        ]
+    if untracked_proc.returncode != 0:
+        return _git_inspection_failed("git ls-files --others", untracked_proc)
+    untracked_raw = [
+        line for line in untracked_proc.stdout.splitlines() if line.strip()
+    ]
     untracked_files = _filter_ignored(untracked_raw)
 
     # Parse `git status --short` to produce dirty/staged file lists. Format:
-    # ``XY path`` where X = index status, Y = worktree status.
+    # ``XY path`` where X = index status, Y = worktree status. Non-zero
+    # here means we cannot trust the dirty/staged split — block.
     status_proc = _run_git(repo_path, ["status", "--short"])
+    if status_proc.returncode != 0:
+        return _git_inspection_failed("git status --short", status_proc)
     dirty_files: List[str] = []
     staged_files: List[str] = []
-    if status_proc.returncode == 0:
-        for line in status_proc.stdout.splitlines():
-            if len(line) < 4:
-                continue
-            index_status = line[0]
-            worktree_status = line[1]
-            path = line[3:].strip()
-            name = os.path.basename(path)
-            if name in _IGNORED_DIRTY_FILES:
-                continue
-            if index_status not in (" ", "?"):
-                staged_files.append(path)
-            if worktree_status not in (" ", "?") and worktree_status != " ":
-                dirty_files.append(path)
+    for line in status_proc.stdout.splitlines():
+        if len(line) < 4:
+            continue
+        index_status = line[0]
+        worktree_status = line[1]
+        path = line[3:].strip()
+        name = os.path.basename(path)
+        if name in _IGNORED_DIRTY_FILES:
+            continue
+        if index_status not in (" ", "?"):
+            staged_files.append(path)
+        if worktree_status not in (" ", "?") and worktree_status != " ":
+            dirty_files.append(path)
 
     # Re-evaluate has_staged / has_unstaged against the ignored-file filter so
     # an ignored-only diff does not trip the gate.
@@ -233,18 +254,51 @@ def acquire_repo_lock(
         )
 
     if existing_any is not None:
-        # Recycle the prior row — preserves the unique repo_path constraint
-        # while resetting the lifecycle fields for the new acquisition.
-        existing_any.repo_name = repo_name
-        existing_any.work_item_id = work_item_id
-        existing_any.task_id = task_id
-        existing_any.branch_name = branch_name
-        existing_any.commit_sha = commit_sha
-        existing_any.lock_owner = lock_owner
-        existing_any.lock_status = "active"
-        existing_any.started_at = datetime.utcnow()
-        existing_any.released_at = None
-        existing_any.release_reason = None
+        # Recycle the prior row atomically: the UPDATE's WHERE clause re-asserts
+        # the non-active state we read into ``existing_any``. If a concurrent
+        # caller already flipped the row to ``active`` between our SELECT and
+        # this UPDATE, rowcount will be 0 — we surface the same
+        # ``blocked_repo_busy`` outcome callers handle for the early-active
+        # branch instead of admitting two owners.
+        now = datetime.utcnow()
+        updated = (
+            session.query(RepoLock)
+            .filter(
+                RepoLock.id == existing_any.id,
+                RepoLock.lock_status != "active",
+            )
+            .update(
+                {
+                    RepoLock.repo_name: repo_name,
+                    RepoLock.work_item_id: work_item_id,
+                    RepoLock.task_id: task_id,
+                    RepoLock.branch_name: branch_name,
+                    RepoLock.commit_sha: commit_sha,
+                    RepoLock.lock_owner: lock_owner,
+                    RepoLock.lock_status: "active",
+                    RepoLock.started_at: now,
+                    RepoLock.released_at: None,
+                    RepoLock.release_reason: None,
+                },
+                synchronize_session=False,
+            )
+        )
+        if updated == 0:
+            session.rollback()
+            existing = (
+                session.query(RepoLock)
+                .filter(RepoLock.repo_path == repo_path)
+                .one_or_none()
+            )
+            return LockResult(
+                acquired=False,
+                existing_lock=existing,
+                blocker_code="blocked_repo_busy",
+                blocker_message=(
+                    f"Repo {repo_path} was locked by a concurrent build "
+                    "during recycle"
+                ),
+            )
         session.commit()
         session.refresh(existing_any)
         return LockResult(acquired=True, lock=existing_any)

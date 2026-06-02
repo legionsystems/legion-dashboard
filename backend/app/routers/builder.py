@@ -255,6 +255,11 @@ def _create_builder_task(db: Session, work_item_id: int, request: SendToBuilderR
     # ------------------------------------------------------------------
     target_repo, repo_name = _resolve_target_repo(work_item)
     skip_gate = os.environ.get("LEGION_SKIP_REPO_SAFETY_GATE") == "1"
+    # Triage-only sends queue a Hermes card without starting a build, so they
+    # must not lock the repo (or be blocked by an in-flight build's lock).
+    # We still run the dirty/branch checks so an operator sees the same gate
+    # feedback whether they triage or start immediately.
+    skip_lock = status_override == "triage"
     acquired_lock: Optional[RepoLock] = None
     if not skip_gate:
         safety = repo_safety.check_repo_clean(target_repo)
@@ -299,48 +304,49 @@ def _create_builder_task(db: Session, work_item_id: int, request: SendToBuilderR
                 },
             )
 
-        existing_lock = repo_safety.check_repo_busy(db, target_repo)
-        if existing_lock is not None:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "blocker_code": "blocked_repo_busy",
-                    "blocker_message": (
-                        f"Repo {target_repo} is already locked by an "
-                        f"in-flight build (lock id {existing_lock.id})"
-                    ),
-                    "repo_path": target_repo,
-                    "existing_lock_id": existing_lock.id,
-                    "existing_lock_branch": existing_lock.branch_name,
-                    "existing_lock_work_item_id": existing_lock.work_item_id,
-                },
-            )
+        if not skip_lock:
+            existing_lock = repo_safety.check_repo_busy(db, target_repo)
+            if existing_lock is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "blocker_code": "blocked_repo_busy",
+                        "blocker_message": (
+                            f"Repo {target_repo} is already locked by an "
+                            f"in-flight build (lock id {existing_lock.id})"
+                        ),
+                        "repo_path": target_repo,
+                        "existing_lock_id": existing_lock.id,
+                        "existing_lock_branch": existing_lock.branch_name,
+                        "existing_lock_work_item_id": existing_lock.work_item_id,
+                    },
+                )
 
-        lock_result = repo_safety.acquire_repo_lock(
-            session=db,
-            repo_path=target_repo,
-            repo_name=repo_name,
-            branch_name=safety.current_branch or "unknown",
-            commit_sha=safety.current_commit or "unknown",
-            work_item_id=work_item_id,
-            task_id=None,  # populated below after Hermes responds
-            lock_owner=request.hermes_assignee or "builder",
-        )
-        if not lock_result.acquired:
-            # Race lost between check_repo_busy and the INSERT. Treat the
-            # same as busy.
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "blocker_code": lock_result.blocker_code or "blocked_repo_busy",
-                    "blocker_message": (
-                        lock_result.blocker_message
-                        or f"Repo {target_repo} became busy during lock acquire"
-                    ),
-                    "repo_path": target_repo,
-                },
+            lock_result = repo_safety.acquire_repo_lock(
+                session=db,
+                repo_path=target_repo,
+                repo_name=repo_name,
+                branch_name=safety.current_branch or "unknown",
+                commit_sha=safety.current_commit or "unknown",
+                work_item_id=work_item_id,
+                task_id=None,  # populated below after Hermes responds
+                lock_owner=request.hermes_assignee or "builder",
             )
-        acquired_lock = lock_result.lock
+            if not lock_result.acquired:
+                # Race lost between check_repo_busy and the INSERT. Treat the
+                # same as busy.
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "blocker_code": lock_result.blocker_code or "blocked_repo_busy",
+                        "blocker_message": (
+                            lock_result.blocker_message
+                            or f"Repo {target_repo} became busy during lock acquire"
+                        ),
+                        "repo_path": target_repo,
+                    },
+                )
+            acquired_lock = lock_result.lock
     
     # Get latest completed debate run for this work item
     from ..models import DebateRun

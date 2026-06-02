@@ -598,6 +598,175 @@ def test_lock_released_on_build_failure(
     assert lock.release_reason == "build_failed"
 
 
+def test_acquire_recycle_race_blocks_loser_atomically(db_session, monkeypatch):
+    """The recycle path's UPDATE re-checks lock_status so a race cannot admit
+    two concurrent owners.
+
+    We simulate the race by making the loser's ``existing_any`` lookup return
+    a stub row whose ``lock_status`` reads as 'released' while the real DB row
+    is already 'active' (acquired by the winner). The loser's conditional
+    UPDATE must hit rowcount=0 and surface blocked_repo_busy.
+    """
+    winner = _acquire(
+        db_session, "/tmp/repo-recycle-race", task_id="recycle-winner"
+    )
+    assert winner.acquired is True
+    winner_id = winner.lock.id
+
+    stale_row = RepoLock(
+        id=winner_id,
+        repo_path="/tmp/repo-recycle-race",
+        repo_name="legion-dashboard",
+        branch_name="main",
+        commit_sha="b" * 40,
+        lock_status="released",
+    )
+
+    real_query = db_session.query
+    call_count = {"n": 0}
+
+    class _StubFilter:
+        def filter(self, *_a, **_kw):
+            return self
+
+        def one_or_none(self):
+            return stale_row
+
+    def fake_query(*args, **kwargs):
+        # First call in acquire_repo_lock is the existing_any lookup.
+        # Return the stale (non-active) stub so the caller takes the
+        # recycle branch; all later queries go to the real session so the
+        # conditional UPDATE / fallback lookup hit the real DB.
+        if call_count["n"] == 0 and args and args[0] is RepoLock:
+            call_count["n"] += 1
+            return _StubFilter()
+        return real_query(*args, **kwargs)
+
+    monkeypatch.setattr(db_session, "query", fake_query)
+
+    loser = _acquire(
+        db_session, "/tmp/repo-recycle-race", task_id="recycle-loser"
+    )
+
+    assert loser.acquired is False
+    assert loser.blocker_code == "blocked_repo_busy"
+    assert "concurrent" in (loser.blocker_message or "").lower()
+    assert loser.existing_lock is not None
+    assert loser.existing_lock.task_id == "recycle-winner"
+
+    # The winner's lock is untouched.
+    still_active = repo_safety.check_repo_busy(
+        db_session, "/tmp/repo-recycle-race"
+    )
+    assert still_active is not None
+    assert still_active.id == winner_id
+    assert still_active.lock_status == "active"
+    assert still_active.task_id == "recycle-winner"
+
+
+# ---------------------------------------------------------------------------
+# Unit tests — check_repo_clean git-error handling
+# ---------------------------------------------------------------------------
+
+
+def test_git_inspection_error_blocks_build(tmp_path):
+    """A directory that is not a git repo must surface as git_inspection_failed,
+    not as a misleading dirty-repo report."""
+    not_a_repo = tmp_path / "plain-dir"
+    not_a_repo.mkdir()
+    (not_a_repo / "README.md").write_text("hello\n")
+
+    result = repo_safety.check_repo_clean(str(not_a_repo))
+
+    assert result.is_clean is False
+    assert result.blocker_code == "git_inspection_failed"
+    assert result.blocker_message is not None
+    assert "Cannot inspect repo" in result.blocker_message
+    # The dirty/staged file lists must NOT be populated from a failed inspection.
+    assert result.dirty_files == []
+    assert result.staged_files == []
+    assert result.untracked_files == []
+
+
+def test_git_diff_nonzero_nonone_exit_treated_as_error(clean_repo, monkeypatch):
+    """A diff returncode that is neither 0 (clean) nor 1 (dirty) must block
+    via git_inspection_failed instead of being silently treated as dirty."""
+    real_run_git = repo_safety._run_git
+
+    def fake_run_git(repo_path, args):
+        if args[:2] == ["diff", "--quiet"]:
+            return subprocess.CompletedProcess(
+                args=["git"] + list(args),
+                returncode=128,
+                stdout="",
+                stderr="fatal: bad object HEAD\n",
+            )
+        return real_run_git(repo_path, args)
+
+    monkeypatch.setattr(repo_safety, "_run_git", fake_run_git)
+
+    result = repo_safety.check_repo_clean(str(clean_repo))
+
+    assert result.is_clean is False
+    assert result.blocker_code == "git_inspection_failed"
+    assert "git diff --quiet" in (result.blocker_message or "")
+    assert "fatal" in (result.blocker_message or "")
+
+
+# ---------------------------------------------------------------------------
+# Integration tests — triage sends must not lock the repo
+# ---------------------------------------------------------------------------
+
+
+def test_triage_send_does_not_lock_repo(
+    client, db_session, monkeypatch, clean_repo
+):
+    """send-to-builder queues a triage card and must NOT acquire a repo lock —
+    no build is in flight yet."""
+    item = _make_approved_work_item(db_session)
+    _patch_target_repo(monkeypatch, str(clean_repo))
+    _stub_hermes(monkeypatch, task_id="hermes-triage-1")
+
+    response = client.post(
+        f"/api/builder/work-items/{item.id}/send-to-builder", json={}
+    )
+
+    assert response.status_code == 200, response.text
+    assert (
+        db_session.query(RepoLock)
+        .filter(RepoLock.repo_path == str(clean_repo))
+        .count()
+        == 0
+    )
+
+
+def test_triage_send_succeeds_when_other_build_holds_lock(
+    client, db_session, monkeypatch, clean_repo
+):
+    """A triage send must not 409 just because another build holds the lock —
+    it's queueing for later, not starting now."""
+    _acquire(db_session, str(clean_repo), task_id="prior-build")
+
+    item = _make_approved_work_item(db_session)
+    _patch_target_repo(monkeypatch, str(clean_repo))
+    _stub_hermes(monkeypatch, task_id="hermes-triage-2")
+
+    response = client.post(
+        f"/api/builder/work-items/{item.id}/send-to-builder", json={}
+    )
+
+    assert response.status_code == 200, response.text
+    # The prior build's lock is the only lock on the repo and is unchanged.
+    locks = (
+        db_session.query(RepoLock)
+        .filter(RepoLock.repo_path == str(clean_repo))
+        .all()
+    )
+    assert len(locks) == 1
+    assert locks[0].task_id == "prior-build"
+    assert locks[0].lock_status == "active"
+
+
 def test_branch_mismatch_blocks_build(
     client, db_session, monkeypatch, clean_repo
 ):
