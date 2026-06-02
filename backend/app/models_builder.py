@@ -50,7 +50,10 @@ class BuilderTask(Base):
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
     completed_at = Column(DateTime, nullable=True)
     is_valid = Column(Boolean, nullable=True, default=True)  # Marks contaminated/test records invalid
-    
+
+    # Review task reference
+    review_task_id = Column(String(50), nullable=True, index=True)  # Hermes task ID for Codex review
+
     # Work item relationship
     work_item = relationship("WorkItem", back_populates="builder_tasks")
 

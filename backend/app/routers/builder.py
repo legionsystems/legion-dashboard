@@ -204,6 +204,246 @@ def _create_hermes_task(title: str, body: str, assignee: Optional[str] = None, i
         )
 
 
+def _generate_review_prompt(
+    work_item: WorkItem,
+    builder_task_id: str,
+    target_repo: str,
+    pr_number: Optional[int] = None,
+    branch_name: Optional[str] = None,
+) -> str:
+    """Generate the Codex review wrapper prompt for a review task.
+
+    The review task body instructs the reviewer profile to orchestrate a
+    Codex CLI review. The reviewer must not perform an LLM-only review;
+    Codex must produce the verdict. If Codex tooling fails, the task is
+    blocked with a tooling error.
+
+    Args:
+        work_item: The WorkItem being reviewed.
+        builder_task_id: The Hermes task ID of the builder task.
+        target_repo: Absolute path to the git repo on the target host.
+        pr_number: PR number under review (optional).
+        branch_name: Head branch that was built (optional).
+
+    Returns:
+        The full review task body string.
+    """
+    pr_ref = f"PR #{pr_number}" if pr_number else "the implementation branch"
+    branch_ref = branch_name or "the feature branch"
+    report_path = (
+        f"/root/.hermes/LEGION_TOOLS/"
+        f"review-report-wi-{work_item.id}-builder-{builder_task_id}.md"
+    )
+
+    prompt = f"""PROMPT ID: LEGION-REVIEW-WI-{work_item.id}-CARD-001
+PROMPT TYPE: codex-required-review
+ASSIGNEE ROLE: orchestrator (do not perform LLM-only review)
+BUILDER TASK: {builder_task_id}
+WORK ITEM: WI-{work_item.id}
+TARGET REPO: {target_repo}
+TARGET PR: {pr_number or "N/A"}
+BASE BRANCH: main
+HEAD BRANCH: {branch_ref}
+EXPECTED REPORT: {report_path}
+REVIEW VERDICT: PENDING
+
+SAFETY GATE — READ FIRST
+
+1. You are a review orchestrator. You MUST use the Codex CLI review
+   wrapper to perform this review. Do NOT fall back to LLM-only review.
+2. If Codex CLI is not available or fails, block this task with a tooling
+   error. Do not proceed with a manual review.
+3. Do not modify any files. This is read-only review.
+4. Do not expose API keys, provider secrets, or private data in logs.
+5. Record Codex verdict, report path, model/tool provenance, and reviewed
+   commit on this task before completing.
+
+ACCEPTANCE CRITERIA
+
+- Builder-created review tasks explicitly require the Codex review wrapper.
+- Review task body includes repo path, PR number, base branch, head branch,
+  and expected report path.
+- Reviewer profile is only used to orchestrate the review, not to replace
+  Codex.
+- Review cannot certify an implementation unless Codex returns APPROVE or
+  APPROVE_WITH_NON_BLOCKING_NOTES.
+- Codex verdict, report path, model/tool provenance, and reviewed commit are
+  recorded on the review task.
+- If Codex returns mandatory edits, needs rework, or blocked, the review
+  task requests changes and does not certify.
+- If Codex tooling fails, the task is blocked with a tooling error rather
+  than falling back to LLM-only review.
+
+REVIEW WORKFLOW
+
+PHASE 1 — PREPARE
+- Verify Codex CLI is available on the target host.
+- Fetch the PR diff: git diff main...{branch_ref}
+- Identify changed files, scope, and potential risk areas.
+
+PHASE 2 — CODEX REVIEW
+- Invoke Codex CLI review wrapper against {target_repo}.
+- Pass the PR diff, changed files, and work item context to Codex.
+- Codex must produce a structured verdict: APPROVE,
+  APPROVE_WITH_NON_BLOCKING_NOTES, MANDATORY_EDITS, NEEDS_REWORK, or
+  BLOCKED.
+
+PHASE 3 — RECORD
+- Write review report to {report_path} with:
+  - Codex verdict
+  - Codex model/tool provenance
+  - Reviewed commit SHA
+  - Findings (blocking and non-blocking)
+  - Mandatory edits (if any)
+- Record the verdict, report path, provenance, and commit on this Kanban
+  task's result/comments.
+
+PHASE 4 — CERTIFY OR REQUEST CHANGES
+- If Codex returns APPROVE: mark this task complete with certification.
+- If Codex returns APPROVE_WITH_NON_BLOCKING_NOTES: mark complete with
+  notes for the operator.
+- If Codex returns MANDATORY_EDITS, NEEDS_REWORK, or BLOCKED: mark this
+  task as changes requested. Do NOT certify.
+- If Codex tooling fails: BLOCK this task with reason
+  "codex_tooling_failed: <error details>". Do NOT fall back to LLM-only.
+
+OUT OF SCOPE
+- Do not merge, push, or create PRs.
+- Do not implement any changes.
+- Do not modify Hermes source/config.
+- Do not certify based on LLM-only review.
+
+WORK ITEM CONTEXT
+- ID: {work_item.id}
+- Title: {work_item.title}
+- Type: {work_item.type}
+- Priority: {work_item.priority}
+- Acceptance Notes: {work_item.acceptance_notes or "None provided"}
+
+FINAL RESPONSE
+Return only the clean LEGION TASK RESULT block.
+"""
+    return prompt
+
+
+def _is_reviewer_tool_capable(reviewer_profile: Optional[str]) -> bool:
+    """Validate that the reviewer profile is tool-capable.
+
+    The reviewer profile must be able to orchestrate Codex CLI. This means
+    the profile must exist and have access to the Codex CLI tools. For now,
+    we validate that a reviewer profile is explicitly set (not None and not
+    'default') and that it is one of the known tool-capable profiles.
+
+    Args:
+        reviewer_profile: The Hermes profile name for the reviewer.
+
+    Returns:
+        True if the reviewer profile is tool-capable.
+
+    Raises:
+        HTTPException: If the reviewer profile is not set or not tool-capable.
+    """
+    if not reviewer_profile:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Review task creation requires a tool-capable reviewer profile. "
+                "No reviewer_profile is set on the work item."
+            ),
+        )
+    # Profiles that are known to support Codex CLI orchestration.
+    # The 'reviewer' profile is the dedicated review orchestrator.
+    # The 'builder' profile is technically capable but should not be used
+    # for review (same-model blocking is enforced elsewhere).
+    _TOOL_CAPABLE_REVIEWER_PROFILES = frozenset({"reviewer"})
+    if reviewer_profile not in _TOOL_CAPABLE_REVIEWER_PROFILES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Reviewer profile '{reviewer_profile}' is not tool-capable for "
+                "Codex review orchestration. Set reviewer_profile to 'reviewer'."
+            ),
+        )
+    return True
+
+
+def _create_review_task(
+    db: Session,
+    work_item: WorkItem,
+    builder_task: BuilderTask,
+    target_repo: str,
+) -> Optional[str]:
+    """Create a Hermes Kanban review task with Codex review wrapper prompt.
+
+    Called immediately after the builder task is created. The review task
+    is assigned to the reviewer profile (from work_item.reviewer_profile)
+    and is placed in Ready status (not Todo).
+
+    The review task body (generated by ``_generate_review_prompt``) includes:
+    - Repo path, PR number, base branch, head branch, expected report path
+    - Explicit requirement for the Codex review wrapper
+    - Instructions to block on tooling failure rather than fall back to LLM-only
+
+    Args:
+        db: Database session.
+        work_item: The WorkItem being built.
+        builder_task: The just-created BuilderTask ORM instance (already
+            persisted with an ID and hermes_task_id).
+        target_repo: Absolute path to the git repo on the target host.
+
+    Returns:
+        The Hermes task ID of the created review task, or None if no
+        reviewer profile is configured on the work item (review deferred).
+
+    Raises:
+        HTTPException: If the reviewer profile is set but not tool-capable,
+            or if the Hermes bridge call fails.
+    """
+    reviewer_profile = work_item.reviewer_profile
+
+    # If no reviewer profile is set, skip review task creation.
+    # The operator can create a review task manually later.
+    if not reviewer_profile:
+        return None
+
+    # Validate the reviewer profile is tool-capable.
+    _is_reviewer_tool_capable(reviewer_profile)
+
+    # Generate the Codex review wrapper prompt.
+    review_body = _generate_review_prompt(
+        work_item=work_item,
+        builder_task_id=builder_task.hermes_task_id,
+        target_repo=target_repo,
+        pr_number=work_item.pr_number,
+        branch_name=work_item.branch_name or builder_task.branch_name,
+    )
+
+    # Create the Hermes review task in Ready status (not Todo).
+    review_title = f"REVIEW-WI-{work_item.id} — {work_item.title[:80]}"
+    review_idem_key = (
+        f"legion-dashboard-wi-{work_item.id}-"
+        f"review-{builder_task.hermes_task_id}-v1"
+    )
+
+    review_result = _create_hermes_task(
+        title=review_title,
+        body=review_body,
+        assignee=reviewer_profile,
+        idempotency_key=review_idem_key,
+        priority=work_item.priority,
+        # No status_override — review tasks go to Ready by default.
+    )
+
+    review_task_id = review_result.get("task_id")
+    if not review_task_id:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Hermes review task created but no task_id returned",
+        )
+
+    return review_task_id
+
+
 def _resolve_target_repo(work_item: WorkItem) -> tuple[str, str]:
     """Pick the (repo_path, repo_name) tuple for a work item.
 
@@ -419,6 +659,40 @@ def _create_builder_task(db: Session, work_item_id: int, request: SendToBuilderR
     if acquired_lock is not None and hermes_result.get("task_id"):
         acquired_lock.task_id = str(hermes_result["task_id"])
         db.commit()
+
+    # ------------------------------------------------------------------
+    # Create the Codex review task (if reviewer profile is configured).
+    # The review task is created in Ready status and references this
+    # builder task. It is NOT parent/child-linked to the builder task
+    # so it can be claimed independently.
+    #
+    # If the work item has a reviewer_profile set, the review task is
+    # created immediately. If the reviewer profile is not set, review
+    # task creation is deferred (operator can trigger manually later).
+    #
+    # If the reviewer profile is set but not tool-capable, or if the
+    # Hermes bridge call fails, the error propagates and the builder
+    # task is already committed — the operator can retry review task
+    # creation via the UI or retry the start-build.
+    # ------------------------------------------------------------------
+    try:
+        review_task_id = _create_review_task(
+            db=db,
+            work_item=work_item,
+            builder_task=builder_task,
+            target_repo=target_repo,
+        )
+        if review_task_id is not None:
+            builder_task.review_task_id = review_task_id
+            db.commit()
+            db.refresh(builder_task)
+    except Exception:
+        # Review task creation failed — the builder task is still valid.
+        # Rollback any partial state from the review task creation attempt
+        # but keep the builder task. The operator can retry.
+        db.rollback()
+        # Refresh the builder_task to ensure it's in a clean state
+        db.refresh(builder_task)
 
     # Project Hermes status to Work Item status (reusable lifecycle transition)
     sync_work_item_status_from_builder(

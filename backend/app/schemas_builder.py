@@ -42,6 +42,7 @@ class BuilderTaskResponse(BuilderTaskBase):
     created_at: datetime
     updated_at: datetime
     completed_at: Optional[datetime] = None
+    review_task_id: Optional[str] = None
 
     class Config:
         from_attributes = True

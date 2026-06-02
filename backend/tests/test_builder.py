@@ -296,3 +296,285 @@ def test_start_build_proceeds_when_executor_reports_clean(
     # the dashboard trusts the host's view rather than the container's.
     assert lock.branch_name == "feature/host-side-gate"
     assert lock.commit_sha == "d" * 40
+
+
+# ---------------------------------------------------------------------------
+# Review task creation tests — Codex review wrapper
+# ---------------------------------------------------------------------------
+
+
+def test_review_task_created_when_reviewer_profile_set(
+    client, db_session, monkeypatch
+):
+    """When work_item.reviewer_profile is 'reviewer', start-build must
+    also create a Hermes review task with the Codex review wrapper prompt.
+    """
+    item = _make_approved_work_item(
+        db_session,
+        reviewer_profile="reviewer",
+        pr_number=42,
+        branch_name="main",  # Match the executor's current_branch to pass the gate
+    )
+    _patch_target_repo(monkeypatch, "/srv/repo/legion-dashboard")
+    _stub_hermes(monkeypatch, task_id="hermes-builder-1")
+    _stub_executor(
+        monkeypatch,
+        preview_deploy.ExecutorResponse(
+            success=True,
+            raw={
+                "success": True,
+                "action": "repo_safety_check",
+                "is_clean": True,
+                "dirty_files": [],
+                "staged_files": [],
+                "untracked_files": [],
+                "current_branch": "main",
+                "current_commit": "a" * 40,
+                "blocker_code": None,
+                "blocker_message": None,
+            },
+        ),
+    )
+
+    # Stub _create_hermes_task to capture the review task call.
+    import app.routers.builder as builder_module
+    original_create = builder_module._create_hermes_task
+    hermes_calls = []
+
+    def spy_create_hermes(**kwargs):
+        hermes_calls.append(kwargs)
+        task_id = kwargs.get("idempotency_key", "unknown")
+        # Return different IDs for builder vs review tasks.
+        if "review" in task_id:
+            return {"task_id": "hermes-review-1", "status": "ready", "assignee": "reviewer"}
+        return {"task_id": "hermes-builder-1", "status": "ready", "assignee": "builder"}
+
+    monkeypatch.setattr(builder_module, "_create_hermes_task", spy_create_hermes)
+
+    response = client.post(
+        f"/api/builder/work-items/{item.id}/start-build", json={}
+    )
+    assert response.status_code == 200, response.text
+
+    # Two Hermes tasks must have been created: builder + review.
+    assert len(hermes_calls) == 2
+
+    # The second call is the review task.
+    review_call = hermes_calls[1]
+    assert review_call["assignee"] == "reviewer"
+    assert "REVIEW-WI-" in review_call["title"]
+    assert review_call.get("status_override") is None  # Ready by default
+
+    # The review body must require Codex.
+    review_body = review_call["body"]
+    assert "codex-required-review" in review_body
+    assert "PROMPT ID: LEGION-REVIEW-WI-" in review_body
+    assert "TARGET REPO: /srv/repo/legion-dashboard" in review_body
+    assert "TARGET PR: 42" in review_body
+    assert "BASE BRANCH: main" in review_body
+    assert "HEAD BRANCH: main" in review_body
+    assert "BUILDER TASK: hermes-builder-1" in review_body
+    assert "WORK ITEM: WI-" in review_body
+    assert "Codex CLI review" in review_body
+    assert "EXPECTED REPORT:" in review_body
+    assert "REVIEW VERDICT: PENDING" in review_body
+
+    # The builder task record must reference the review task.
+    builder_tasks = (
+        db_session.query(BuilderTask)
+        .filter(BuilderTask.work_item_id == item.id)
+        .all()
+    )
+    assert len(builder_tasks) == 1
+    assert builder_tasks[0].review_task_id == "hermes-review-1"
+
+
+def test_review_task_not_created_when_no_reviewer_profile(
+    client, db_session, monkeypatch
+):
+    """When work_item.reviewer_profile is None, no review task is created.
+    The start-build still succeeds and only the builder task is created.
+    """
+    item = _make_approved_work_item(db_session)
+    _patch_target_repo(monkeypatch, "/srv/repo/legion-dashboard")
+    _stub_hermes(monkeypatch, task_id="hermes-builder-only")
+    _stub_executor(
+        monkeypatch,
+        preview_deploy.ExecutorResponse(
+            success=True,
+            raw={
+                "success": True,
+                "action": "repo_safety_check",
+                "is_clean": True,
+                "dirty_files": [],
+                "staged_files": [],
+                "untracked_files": [],
+                "current_branch": "main",
+                "current_commit": "b" * 40,
+                "blocker_code": None,
+                "blocker_message": None,
+            },
+        ),
+    )
+
+    import app.routers.builder as builder_module
+    original_create = builder_module._create_hermes_task
+    hermes_calls = []
+
+    def spy_create_hermes(**kwargs):
+        hermes_calls.append(kwargs)
+        return {"task_id": "hermes-builder-only", "status": "ready", "assignee": "builder"}
+
+    monkeypatch.setattr(builder_module, "_create_hermes_task", spy_create_hermes)
+
+    response = client.post(
+        f"/api/builder/work-items/{item.id}/start-build", json={}
+    )
+    assert response.status_code == 200, response.text
+
+    # Only one Hermes task: the builder (no review task).
+    assert len(hermes_calls) == 1
+    assert hermes_calls[0]["assignee"] == "builder"
+
+    # The builder task has no review_task_id.
+    builder_tasks = (
+        db_session.query(BuilderTask)
+        .filter(BuilderTask.work_item_id == item.id)
+        .all()
+    )
+    assert len(builder_tasks) == 1
+    assert builder_tasks[0].review_task_id is None
+
+
+def test_review_task_fails_with_non_tool_capable_profile(
+    client, db_session, monkeypatch
+):
+    """When work_item.reviewer_profile is set to a non-tool-capable value
+    (e.g., 'default' or 'builder'), the review task creation must fail
+    without preventing the builder task from being created.
+    """
+    item = _make_approved_work_item(
+        db_session,
+        reviewer_profile="default",  # Not in _TOOL_CAPABLE_REVIEWER_PROFILES
+    )
+    _patch_target_repo(monkeypatch, "/srv/repo/legion-dashboard")
+    _stub_hermes(monkeypatch, task_id="hermes-builder-fallback")
+    _stub_executor(
+        monkeypatch,
+        preview_deploy.ExecutorResponse(
+            success=True,
+            raw={
+                "success": True,
+                "action": "repo_safety_check",
+                "is_clean": True,
+                "dirty_files": [],
+                "staged_files": [],
+                "untracked_files": [],
+                "current_branch": "main",
+                "current_commit": "c" * 40,
+                "blocker_code": None,
+                "blocker_message": None,
+            },
+        ),
+    )
+
+    response = client.post(
+        f"/api/builder/work-items/{item.id}/start-build", json={}
+    )
+    assert response.status_code == 200, response.text
+
+    # The builder task was created despite review task failure.
+    builder_tasks = (
+        db_session.query(BuilderTask)
+        .filter(BuilderTask.work_item_id == item.id)
+        .all()
+    )
+    assert len(builder_tasks) == 1
+    assert builder_tasks[0].hermes_task_id == "hermes-builder-fallback"
+    # review_task_id is None because review task creation failed.
+    assert builder_tasks[0].review_task_id is None
+
+
+def test_review_task_body_contains_report_path_and_provenance_fields(
+    client, db_session, monkeypatch
+):
+    """The review task body must include the expected report path and
+    require Codex model/tool provenance recording.
+    """
+    item = _make_approved_work_item(
+        db_session,
+        reviewer_profile="reviewer",
+        pr_number=99,
+    )
+    _patch_target_repo(monkeypatch, "/srv/repo/legion-dashboard")
+    _stub_hermes(monkeypatch, task_id="hermes-builder-body")
+    _stub_executor(
+        monkeypatch,
+        preview_deploy.ExecutorResponse(
+            success=True,
+            raw={
+                "success": True,
+                "action": "repo_safety_check",
+                "is_clean": True,
+                "dirty_files": [],
+                "staged_files": [],
+                "untracked_files": [],
+                "current_branch": "main",
+                "current_commit": "e" * 40,
+                "blocker_code": None,
+                "blocker_message": None,
+            },
+        ),
+    )
+
+    import app.routers.builder as builder_module
+    review_bodies = []
+
+    def spy_create_hermes(**kwargs):
+        task_id = kwargs.get("idempotency_key", "unknown")
+        if "review" in task_id:
+            review_bodies.append(kwargs.get("body", ""))
+            return {"task_id": "hermes-review-body", "status": "ready", "assignee": "reviewer"}
+        return {"task_id": "hermes-builder-body", "status": "ready", "assignee": "builder"}
+
+    monkeypatch.setattr(builder_module, "_create_hermes_task", spy_create_hermes)
+
+    response = client.post(
+        f"/api/builder/work-items/{item.id}/start-build", json={}
+    )
+    assert response.status_code == 200, response.text
+
+    assert len(review_bodies) == 1
+    body = review_bodies[0]
+
+    # Report path format.
+    assert "review-report-wi-" in body
+    assert "-builder-hermes-builder-body.md" in body
+
+    # Provenance recording requirement.
+    assert "model/tool provenance" in body
+    assert "Codex model/tool provenance" in body
+
+    # Codex verdict options.
+    assert "APPROVE" in body
+    assert "APPROVE_WITH_NON_BLOCKING_NOTES" in body
+    assert "MANDATORY_EDITS" in body
+    assert "NEEDS_REWORK" in body
+    assert "BLOCKED" in body
+
+    # Blocking on tooling failure.
+    assert "codex_tooling_failed" in body
+    assert "Do NOT fall back to LLM-only review" in body
+
+    # Work item context is included.
+    assert f"ID: {item.id}" in body
+    assert f"Title: {item.title}" in body
+    assert f"Type: {item.type}" in body
+
+    # Safety constraints.
+    assert "Do not modify Hermes source/config" in body
+    assert "Do not merge, push, or create PRs" in body
+
+    # PR and repo references.
+    assert "TARGET REPO: /srv/repo/legion-dashboard" in body
+    assert "TARGET PR: 99" in body
