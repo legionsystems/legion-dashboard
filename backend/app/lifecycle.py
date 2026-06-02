@@ -17,20 +17,31 @@ State precedence (highest first)
 2. ``merged``           — ``merge_commit_sha`` is set.
 3. ``ready_to_merge``   — explicit operator gate.
 4. ``certified``        — operator has signed off.
-5. ``changes_requested``/``review_failed``/``code_reviewed`` — derived from
-   ``code_review_status``.
-6. ``preview_ready``    — preview has been deployed.
-7. ``preview_pending``  — preview is required but not yet deployed.
-8. ``in_review``        — a PR exists (number or URL) but no terminal review.
-9. ``blocked``          — Kanban ``status`` is ``blocked``.
-10. ``building``        — Kanban ``status`` indicates implementation in flight.
-11. ``implemented``     — Kanban ``status`` indicates completion.
-12. ``review_needed``   — Kanban ``status`` is review/review_needed.
-13. ``approved``        — operator has approved but no builder activity yet.
-14. ``debating``        — a debate run is currently active.
-15. ``debated``         — a debate has completed and no later state applies.
-16. ``drafting``        — fallback for fresh/draft items.
-17. Otherwise: the raw Kanban status (lowercased) is returned so we never
+5. ``rejected``         — operator rejected the work outright (slice 2).
+6. ``changes_requested``/``review_failed``/``code_reviewed`` — derived from
+   ``code_review_status``. Listed above ``needs_rework`` so that a fresh
+   code-review verdict on a reworked item supersedes the stale operator
+   change request.
+7. ``preview_ready``    — preview has been deployed. Overrides a prior
+   operator change request: a new preview deploy means the builder
+   addressed the change request and the work is back in review.
+8. ``preview_pending``  — preview is required but not yet deployed.
+9. ``needs_rework``     — operator sent the work back with a change request
+   (slice 2). Only applies when no review-ready signal above (code-review
+   verdict, preview deploy) has arrived since the change request.
+10. ``in_review``       — a PR exists (number or URL) but no terminal review.
+    A bare PR is *not* a review-ready signal and does not override
+    ``needs_rework`` — otherwise the very PR that triggered the change
+    request would silently clear it.
+11. ``blocked``         — Kanban ``status`` is ``blocked``.
+12. ``building``        — Kanban ``status`` indicates implementation in flight.
+13. ``implemented``     — Kanban ``status`` indicates completion.
+14. ``review_needed``   — Kanban ``status`` is review/review_needed.
+15. ``approved``        — operator has approved but no builder activity yet.
+16. ``debating``        — a debate run is currently active.
+17. ``debated``         — a debate has completed and no later state applies.
+18. ``drafting``        — fallback for fresh/draft items.
+19. Otherwise: the raw Kanban status (lowercased) is returned so we never
     silently swallow an unknown state.
 """
 from __future__ import annotations
@@ -96,7 +107,14 @@ def compute_effective_state(
     if getattr(work_item, "operator_certified", None) is True:
         return "certified"
 
-    # 5. Code review verdict, when present, supersedes the generic PR state.
+    # 5. Operator rejection (slice 2) — operator abandoned the work outright.
+    if getattr(work_item, "rejected_at", None) is not None:
+        return "rejected"
+
+    # 6. Code review verdict, when present, supersedes both the generic PR
+    # state and any earlier operator change request. An approved (or failed,
+    # or automated changes_requested) review after a rework cycle means the
+    # builder addressed the operator's notes and the work is back in review.
     code_review = _norm(getattr(work_item, "code_review_status", None))
     if code_review == "approved":
         return "code_reviewed"
@@ -105,7 +123,10 @@ def compute_effective_state(
     if code_review == "failed":
         return "review_failed"
 
-    # 6/7. Preview flags (slice 4 surfaces these).
+    # 7/8. Preview flags (slice 4 surfaces these). A new preview deploy after
+    # a rework cycle is a review-ready signal and must override any earlier
+    # operator change request — otherwise the lifecycle would stay pinned in
+    # ``needs_rework`` forever.
     preview_required = getattr(work_item, "preview_required", None) is True
     preview_deployed = getattr(work_item, "preview_deployed", None) is True
     if preview_deployed:
@@ -113,7 +134,17 @@ def compute_effective_state(
     if preview_required:
         return "preview_pending"
 
-    # 8. PR exists but no review/preview verdict yet.
+    # 9. Operator change request (slice 2) — operator sent the work back for
+    # rework. Only applies when no later review-ready signal (preview deploy
+    # or code review verdict above) has arrived. Distinct from the
+    # ``changes_requested`` verdict derived from ``code_review_status``
+    # (an automated/agent verdict).
+    if getattr(work_item, "changes_requested_at", None) is not None:
+        return "needs_rework"
+
+    # 10. PR exists but no review/preview verdict yet. A bare PR is NOT a
+    # review-ready signal — if it were, this branch would let an operator
+    # change request be silently overridden by the PR that triggered it.
     pr_number = getattr(work_item, "pr_number", None)
     pr_url = _norm(getattr(work_item, "pr_url", None))
     if pr_number or pr_url:

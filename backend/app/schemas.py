@@ -100,6 +100,14 @@ class WorkItemResponse(WorkItemBase):
     certified_by: Optional[str] = None
     certification_note: Optional[str] = None
 
+    # Operator rejection / change-request metadata (slice 2).
+    rejected_at: Optional[datetime] = None
+    rejected_by: Optional[str] = None
+    rejection_reason: Optional[str] = None
+    changes_requested_at: Optional[datetime] = None
+    changes_requested_by: Optional[str] = None
+    change_request: Optional[str] = None
+
     # Archive lifecycle fields
     archived: bool = False
     archived_at: Optional[datetime] = None
@@ -110,6 +118,35 @@ class WorkItemResponse(WorkItemBase):
     # or None when no debate has been queued. Used by the list page to show
     # the debate indicator without an extra round trip.
     latest_debate: Optional["DebateRunSummary"] = None
+
+
+class CertifyRequest(BaseModel):
+    """Operator marks a Work Item as certified (ready to merge gate)."""
+    certification_note: Optional[str] = None
+
+
+class RejectRequest(BaseModel):
+    """Operator rejects a Work Item outright — abandon the work."""
+    rejection_reason: str
+
+    @field_validator("rejection_reason")
+    @classmethod
+    def _reason_nonempty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("rejection_reason must not be empty")
+        return v
+
+
+class RejectWithChangesRequest(BaseModel):
+    """Operator sends a Work Item back with a change request — needs rework."""
+    change_request: str
+
+    @field_validator("change_request")
+    @classmethod
+    def _change_request_nonempty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("change_request must not be empty")
+        return v
 
 
 class WorkItemArchiveRequest(BaseModel):

@@ -76,6 +76,14 @@ class WorkItem(Base):
     certified_by = Column(String(100), nullable=True)
     certification_note = Column(Text, nullable=True)
 
+    # Operator rejection / change-request metadata (slice 2).
+    rejected_at = Column(DateTime, nullable=True)
+    rejected_by = Column(String(100), nullable=True)
+    rejection_reason = Column(Text, nullable=True)
+    changes_requested_at = Column(DateTime, nullable=True)
+    changes_requested_by = Column(String(100), nullable=True)
+    change_request = Column(Text, nullable=True)
+
     # Archive lifecycle
     archived = Column(Boolean, nullable=False, default=False, index=True)
     archived_at = Column(DateTime, nullable=True)

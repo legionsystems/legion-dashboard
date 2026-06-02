@@ -32,6 +32,7 @@ from ..schemas import (
     BlockRequest,
     BulkArchiveRequest,
     BulkArchiveTestItemsRequest,
+    CertifyRequest,
     DebateRunBulkHideRequest,
     DebateRunCreate,
     DebateRunDetail,
@@ -42,6 +43,8 @@ from ..schemas import (
     FollowUpResponse,
     OperatorDebateInputCreate,
     OperatorDebateInputResponse,
+    RejectRequest,
+    RejectWithChangesRequest,
     WorkItemArchiveRequest,
     WorkItemClassificationUpdate,
     WorkItemCreate,
@@ -322,6 +325,103 @@ def block_work_item(
     if payload and payload.override_reason is not None:
         item.override_reason = payload.override_reason
         item.override_timestamp = datetime.utcnow()
+    db.commit()
+    db.refresh(item)
+    return _serialize_with_debate(db, item)
+
+
+# ---------------------------------------------------------------------------
+# Operator certification / rejection / change-request endpoints (slice 2)
+# ---------------------------------------------------------------------------
+#
+# These actions reflect operator-only decisions on the Work Item and never
+# touch the underlying PR (no merge, close, or branch ops). The effective
+# state surfaces the result; later slices may use these flags as gates.
+
+# Effective states from which an operator can certify, reject, or request
+# changes. Anything else (drafting, building, merged, certified, rejected,
+# needs_rework, archived, etc.) is a 409.
+_CERTIFICATION_SOURCE_STATES = frozenset(
+    {"in_review", "preview_ready", "code_reviewed"}
+)
+
+
+def _ensure_certification_source_state(item: WorkItem) -> str:
+    """Validate the item is in a state where certification actions apply.
+
+    Returns the computed effective_state on success; raises 409 otherwise.
+    The latest debate is intentionally ignored — debate state never gates a
+    certification decision.
+    """
+    state = compute_effective_state(item, None)
+    if state not in _CERTIFICATION_SOURCE_STATES:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Work item is in state '{state}'; certification actions "
+                "require state in_review, preview_ready, or code_reviewed."
+            ),
+        )
+    return state
+
+
+@router.post("/{work_item_id}/certify", response_model=WorkItemResponse)
+def certify_work_item(
+    work_item_id: int,
+    payload: CertifyRequest,
+    db: Session = Depends(get_db),
+):
+    item = _get_or_404(db, work_item_id)
+    _ensure_certification_source_state(item)
+
+    item.operator_certified = True
+    item.certified_at = datetime.utcnow()
+    item.certification_note = payload.certification_note
+    db.commit()
+    db.refresh(item)
+    return _serialize_with_debate(db, item)
+
+
+@router.post("/{work_item_id}/reject", response_model=WorkItemResponse)
+def reject_work_item(
+    work_item_id: int,
+    payload: RejectRequest,
+    db: Session = Depends(get_db),
+):
+    item = _get_or_404(db, work_item_id)
+    _ensure_certification_source_state(item)
+
+    item.rejected_at = datetime.utcnow()
+    item.rejection_reason = payload.rejection_reason
+    db.commit()
+    db.refresh(item)
+    return _serialize_with_debate(db, item)
+
+
+@router.post(
+    "/{work_item_id}/reject-with-changes",
+    response_model=WorkItemResponse,
+)
+def reject_work_item_with_changes(
+    work_item_id: int,
+    payload: RejectWithChangesRequest,
+    db: Session = Depends(get_db),
+):
+    item = _get_or_404(db, work_item_id)
+    _ensure_certification_source_state(item)
+
+    item.changes_requested_at = datetime.utcnow()
+    item.change_request = payload.change_request
+    # Clear stale review-ready signals so the lifecycle returns ``needs_rework``
+    # instead of remaining pinned at ``code_reviewed`` or ``preview_ready`` —
+    # those signals predate this change request and would otherwise outrank it
+    # in precedence (see lifecycle.compute_effective_state). ``preview_required``
+    # is also cleared so the lifecycle does not fall through to
+    # ``preview_pending`` (which outranks ``needs_rework``) once the deploy
+    # flag is gone.
+    item.code_review_status = None
+    item.preview_deployed = False
+    item.preview_required = False
     db.commit()
     db.refresh(item)
     return _serialize_with_debate(db, item)

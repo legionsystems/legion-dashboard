@@ -56,3 +56,24 @@ export function uploadFile(path, file, onProgress) {
 export function getAttachmentDownloadUrl(workItemId, attachmentId) {
   return `${BASE_URL}/work-items/${workItemId}/attachments/${attachmentId}`;
 }
+
+// Operator certification actions (slice 2). Each posts to a dedicated
+// endpoint and returns the updated work item.
+export function certifyWorkItem(id, certificationNote) {
+  const body = certificationNote != null && certificationNote !== ""
+    ? { certification_note: certificationNote }
+    : {};
+  return postJson(`/work-items/${id}/certify`, body);
+}
+
+export function rejectWorkItem(id, rejectionReason) {
+  return postJson(`/work-items/${id}/reject`, {
+    rejection_reason: rejectionReason,
+  });
+}
+
+export function rejectWorkItemWithChanges(id, changeRequest) {
+  return postJson(`/work-items/${id}/reject-with-changes`, {
+    change_request: changeRequest,
+  });
+}

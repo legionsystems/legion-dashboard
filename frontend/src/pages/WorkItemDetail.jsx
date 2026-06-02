@@ -1,6 +1,14 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { getJson, postJson, deleteRequest, getAttachmentDownloadUrl } from "../api/client.js";
+import {
+  getJson,
+  postJson,
+  deleteRequest,
+  getAttachmentDownloadUrl,
+  certifyWorkItem,
+  rejectWorkItem,
+  rejectWorkItemWithChanges,
+} from "../api/client.js";
 import { StatusBadge, TypeBadge } from "../components/badges.jsx";
 import { Panel, FieldRow } from "../components/panel.jsx";
 import { Button, OperatorButton } from "../components/buttons.jsx";
@@ -10,6 +18,137 @@ import {
   EmptyState,
 } from "../components/states.jsx";
 import DebatePanel from "../components/DebatePanel.jsx";
+
+// Effective states from which the certify/reject/reject-with-changes
+// actions are valid. Mirrors backend ``_CERTIFICATION_SOURCE_STATES``.
+const CERTIFICATION_SOURCE_STATES = new Set([
+  "in_review",
+  "preview_ready",
+  "code_reviewed",
+]);
+
+const CERTIFICATION_ACTIONS = {
+  certify: {
+    headline: "CERTIFY WORK ITEM",
+    body:
+      "Mark this Work Item as operator-certified. A note is optional and " +
+      "will be shown on the item.",
+    confirmVariant: "success",
+    confirmLabel: "CERTIFY",
+    inputLabel: "CERTIFICATION NOTE (OPTIONAL)",
+    placeholder: "Optional context (e.g. 'Smoke tested in staging')",
+    required: false,
+  },
+  reject: {
+    headline: "REJECT WORK ITEM",
+    body:
+      "Reject this Work Item outright. The work will be abandoned. A " +
+      "reason is required and will be visible to other operators.",
+    confirmVariant: "danger",
+    confirmLabel: "REJECT",
+    inputLabel: "REJECTION REASON (REQUIRED)",
+    placeholder: "Why is this being rejected?",
+    required: true,
+  },
+  reject_with_changes: {
+    headline: "REQUEST CHANGES",
+    body:
+      "Send this Work Item back to the builder with a change request. " +
+      "Describe what needs to change before it can be re-reviewed.",
+    confirmVariant: "danger",
+    confirmLabel: "REQUEST CHANGES",
+    inputLabel: "CHANGE REQUEST (REQUIRED)",
+    placeholder: "What needs to change?",
+    required: true,
+  },
+};
+
+function CertificationActionModal({ action, busy, onConfirm, onCancel }) {
+  const [text, setText] = useState("");
+  const copy = action ? CERTIFICATION_ACTIONS[action] : null;
+
+  useEffect(() => {
+    function onKey(e) {
+      if (e.key === "Escape") onCancel?.();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onCancel]);
+
+  useEffect(() => {
+    setText("");
+  }, [action]);
+
+  if (!copy) return null;
+  const disabled = busy || (copy.required && !text.trim());
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-end md:items-center justify-center bg-canvas/80 backdrop-blur-sm p-4"
+      onClick={busy ? undefined : onCancel}
+    >
+      <div
+        className="w-full max-w-lg border border-edge-strong bg-surface shadow-inset"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="cert-modal-headline"
+      >
+        <header className="flex items-center justify-between gap-3 border-b border-edge px-4 py-3">
+          <div>
+            <div className="label-tel-strong text-fg-primary">[ CONFIRM ]</div>
+            <h2
+              id="cert-modal-headline"
+              className="mt-1 font-display text-lg font-bold tracking-tight"
+            >
+              {copy.headline}
+            </h2>
+          </div>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={busy}
+            className="font-mono text-fg-muted hover:text-fg-primary disabled:opacity-40"
+            aria-label="Close"
+          >
+            ✕
+          </button>
+        </header>
+
+        <div className="px-4 py-4 space-y-3">
+          <p className="text-sm text-fg-secondary">{copy.body}</p>
+          <div className="space-y-1">
+            <label className="label-tel block" htmlFor="cert-modal-input">
+              {copy.inputLabel}
+            </label>
+            <textarea
+              id="cert-modal-input"
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              placeholder={copy.placeholder}
+              rows={4}
+              disabled={busy}
+              className="w-full px-3 py-2 text-sm bg-canvas border border-edge outline-none focus:border-edge-strong font-mono disabled:opacity-60"
+            />
+          </div>
+        </div>
+
+        <footer className="flex items-center justify-end gap-2 border-t border-edge px-4 py-3">
+          <Button variant="ghost" onClick={onCancel} disabled={busy}>
+            CANCEL
+          </Button>
+          <Button
+            variant={copy.confirmVariant}
+            onClick={() => onConfirm(text.trim())}
+            disabled={disabled}
+          >
+            {busy ? "WORKING…" : copy.confirmLabel}
+          </Button>
+        </footer>
+      </div>
+    </div>
+  );
+}
 
 function formatTime(iso) {
   if (!iso) return null;
@@ -38,6 +177,8 @@ export default function WorkItemDetail() {
   const [builderTask, setBuilderTask] = useState(null);
   const [builderBusy, setBuilderBusy] = useState(false);
   const [attachments, setAttachments] = useState([]);
+  const [certAction, setCertAction] = useState(null); // 'certify' | 'reject' | 'reject_with_changes' | null
+  const [certBusy, setCertBusy] = useState(false);
 
   function refresh() {
     setError(null);
@@ -118,9 +259,30 @@ export default function WorkItemDetail() {
       .finally(() => setBuilderBusy(false));
   }
 
+  function submitCertificationAction(text) {
+    if (!certAction) return;
+    setCertBusy(true);
+    setError(null);
+    const promise =
+      certAction === "certify"
+        ? certifyWorkItem(id, text || null)
+        : certAction === "reject"
+        ? rejectWorkItem(id, text)
+        : rejectWorkItemWithChanges(id, text);
+    promise
+      .then(() => {
+        setCertAction(null);
+        refresh();
+      })
+      .catch((err) => setError(err.message))
+      .finally(() => setCertBusy(false));
+  }
+
   const canStartBuild = item?.approved_by_operator && !builderTask;
   const blockedTypes = new Set(["note"]);
   const canStartBuildType = !blockedTypes.has(item?.type?.toLowerCase());
+  const canCertify =
+    !!item && CERTIFICATION_SOURCE_STATES.has(item.effective_state);
 
   if (error && !item) {
     return (
@@ -232,8 +394,32 @@ export default function WorkItemDetail() {
               {busy === "approve" ? "APPROVING…" : "APPROVE"}
             </Button>
           )}
+          {canCertify && (
+            <>
+              <Button
+                variant="success"
+                onClick={() => setCertAction("certify")}
+              >
+                CERTIFY
+              </Button>
+              <Button
+                variant="danger"
+                onClick={() => setCertAction("reject_with_changes")}
+              >
+                REQUEST CHANGES
+              </Button>
+              <Button
+                variant="danger"
+                onClick={() => setCertAction("reject")}
+              >
+                REJECT
+              </Button>
+            </>
+          )}
         </div>
       </div>
+
+      {error && item && <ErrorBanner message={error} />}
 
       {builderTask && (
         <Panel title="BUILDER" subtitle="// Hermes Kanban bridge">
@@ -365,6 +551,15 @@ export default function WorkItemDetail() {
       </Panel>
 
       <DebatePanel workItemId={item.id} />
+
+      <CertificationActionModal
+        action={certAction}
+        busy={certBusy}
+        onConfirm={submitCertificationAction}
+        onCancel={() => {
+          if (!certBusy) setCertAction(null);
+        }}
+      />
     </div>
   );
 }
