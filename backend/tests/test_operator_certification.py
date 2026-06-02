@@ -353,6 +353,39 @@ def test_reject_with_changes_success_from_in_review(client, db_session):
     assert body["effective_state"] == "needs_rework"
 
 
+def test_reject_with_changes_from_preview_ready_returns_needs_rework(
+    client, db_session
+):
+    """Operator requesting changes on a ``preview_ready`` item must move the
+    item back to ``needs_rework`` — otherwise the stale preview deploy keeps
+    the lifecycle pinned at ``preview_ready`` and the operator's change
+    request is silently invisible. Same regression applies when the source
+    state is ``code_reviewed``.
+    """
+    created = _create(client, title="Preview ready then rework")
+    _set_in_review(
+        db_session,
+        created["id"],
+        preview_deployed=True,
+        code_review_status="approved",
+    )
+    fetched = client.get(f"/api/work-items/{created['id']}")
+    # code_reviewed wins over preview_ready in lifecycle precedence, but the
+    # bug applies to either source state.
+    assert fetched.json()["effective_state"] in ("preview_ready", "code_reviewed")
+
+    response = client.post(
+        f"/api/work-items/{created['id']}/reject-with-changes",
+        json={"change_request": "Needs another pass."},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["effective_state"] == "needs_rework"
+    assert body["changes_requested_at"] is not None
+    assert body["change_request"] == "Needs another pass."
+
+
 def test_reject_with_changes_invalid_transition_from_draft_returns_409(client):
     created = _create(client, title="Still drafting")
 

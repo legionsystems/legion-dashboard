@@ -412,6 +412,12 @@ def reject_work_item_with_changes(
 
     item.changes_requested_at = datetime.utcnow()
     item.change_request = payload.change_request
+    # Clear stale review-ready signals so the lifecycle returns ``needs_rework``
+    # instead of remaining pinned at ``code_reviewed`` or ``preview_ready`` —
+    # those signals predate this change request and would otherwise outrank it
+    # in precedence (see lifecycle.compute_effective_state).
+    item.code_review_status = None
+    item.preview_deployed = False
     db.commit()
     db.refresh(item)
     return _serialize_with_debate(db, item)
