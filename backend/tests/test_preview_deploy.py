@@ -12,10 +12,11 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from typing import Optional
 
 import pytest
 
-from app import preview_deploy
+from app import preview_deploy, repo_safety
 from app.models import RepoLock, WorkItem
 
 
@@ -89,20 +90,59 @@ def _executor_failure(
     )
 
 
-def _stub_executor(monkeypatch, response: preview_deploy.ExecutorResponse):
-    """Monkeypatch ``call_host_executor`` to return ``response``.
+def _stub_executor(
+    monkeypatch,
+    response: preview_deploy.ExecutorResponse,
+    *,
+    repo_safety_check: Optional[preview_deploy.ExecutorResponse] = None,
+):
+    """Monkeypatch ``call_host_executor`` and record every call.
 
-    Also records each call so tests can assert on the arguments the router
-    forwarded to the executor.
+    The preview gate now delegates its safety inspection to the executor
+    (``action="repo_safety_check"``), so the stub must answer two distinct
+    actions: the read-only safety check and the actual deploy/revert work.
+    By default, ``repo_safety_check`` is satisfied by running the real
+    :func:`repo_safety.check_repo_clean` against the supplied ``repo_path``,
+    so tests that physically dirty the temp worktree (the pattern used by
+    the existing dirty-repo coverage) still exercise the real gate logic.
+    Tests can override that with ``repo_safety_check=`` to inject an
+    arbitrary executor payload (e.g. ``executor_unreachable``).
+
+    ``response`` is returned verbatim for every other action.
     """
     calls = []
 
     def _fake_call(**kwargs):
         calls.append(kwargs)
+        if kwargs.get("action") == "repo_safety_check":
+            if repo_safety_check is not None:
+                return repo_safety_check
+            real = repo_safety.check_repo_clean(kwargs["repo_path"])
+            return preview_deploy.ExecutorResponse(
+                success=True,
+                raw={
+                    "success": True,
+                    "action": "repo_safety_check",
+                    "repo_path": real.repo_path,
+                    "is_clean": real.is_clean,
+                    "dirty_files": list(real.dirty_files),
+                    "staged_files": list(real.staged_files),
+                    "untracked_files": list(real.untracked_files),
+                    "current_branch": real.current_branch,
+                    "current_commit": real.current_commit,
+                    "blocker_code": real.blocker_code,
+                    "blocker_message": real.blocker_message,
+                },
+            )
         return response
 
     monkeypatch.setattr(preview_deploy, "call_host_executor", _fake_call)
     return calls
+
+
+def _action_calls(calls, action: str):
+    """Filter ``calls`` to just the entries for ``action``."""
+    return [c for c in calls if c.get("action") == action]
 
 
 def _stub_repo_resolution(monkeypatch, repo_path: str):
@@ -241,8 +281,10 @@ def test_deploy_blocked_when_repo_dirty(client, db_session, monkeypatch, clean_r
     detail = response.json()["detail"]
     assert detail["blocker_code"] == "blocked_dirty_repo"
     assert "README.md" in detail["dirty_files"]
-    # No executor call, no lock acquired on the dirty path.
-    assert calls == []
+    # No deploy_preview call, no lock acquired on the dirty path. The gate
+    # did inspect the worktree via the executor (repo_safety_check), so
+    # that call is expected.
+    assert _action_calls(calls, "deploy_preview") == []
     assert (
         db_session.query(RepoLock)
         .filter(RepoLock.repo_path == str(clean_repo))
@@ -276,8 +318,9 @@ def test_deploy_blocked_when_repo_busy(client, db_session, monkeypatch, clean_re
     assert response.status_code == 409
     detail = response.json()["detail"]
     assert detail["blocker_code"] == "blocked_repo_busy"
-    # The pre-existing lock is unchanged and the executor was never called.
-    assert calls == []
+    # The pre-existing lock is unchanged and the deploy action was never
+    # called (the gate did issue a repo_safety_check; that's expected).
+    assert _action_calls(calls, "deploy_preview") == []
     locks = (
         db_session.query(RepoLock)
         .filter(RepoLock.repo_path == str(clean_repo))
@@ -323,12 +366,14 @@ def test_successful_deploy_stamps_metadata_and_releases_lock(
     # returned, not the base branch HEAD captured at lock-acquire time.
     assert body["preview_commit_sha"] == branch_head_sha
 
-    # Executor was called exactly once with the PR branch.
-    assert len(calls) == 1
-    call = calls[0]
-    assert call["action"] == "deploy_preview"
+    # Executor was called exactly once for the deploy action, with the PR
+    # branch. The gate also issued a single repo_safety_check beforehand.
+    deploy_calls = _action_calls(calls, "deploy_preview")
+    assert len(deploy_calls) == 1
+    call = deploy_calls[0]
     assert call["repo_path"] == str(clean_repo)
     assert call["branch"] == item.branch_name
+    assert len(_action_calls(calls, "repo_safety_check")) == 1
 
     # Lock was acquired and then released.
     lock = (
@@ -438,10 +483,12 @@ def test_revert_calls_executor_with_base_branch_and_records_metadata(
     )
 
     assert response.status_code == 200, response.text
-    # The revert flow called the executor with the project's base branch.
-    assert len(calls) == 1
-    assert calls[0]["action"] == "revert_preview"
-    assert calls[0]["branch"] == preview_deploy.REVERT_BASE_BRANCH
+    # The revert flow called the executor with the project's base branch
+    # (preceded by a single repo_safety_check from the gate).
+    revert_calls = _action_calls(calls, "revert_preview")
+    assert len(revert_calls) == 1
+    assert revert_calls[0]["branch"] == preview_deploy.REVERT_BASE_BRANCH
+    assert len(_action_calls(calls, "repo_safety_check")) == 1
 
     body = response.json()
     assert body["preview_status"] == "reverted"
@@ -487,8 +534,9 @@ def test_revert_blocked_when_repo_busy(client, db_session, monkeypatch, clean_re
     assert response.status_code == 409
     detail = response.json()["detail"]
     assert detail["blocker_code"] == "blocked_repo_busy"
-    # The executor must NOT have been called.
-    assert calls == []
+    # The executor must NOT have been called for the revert action (the
+    # gate did issue a repo_safety_check; that's expected).
+    assert _action_calls(calls, "revert_preview") == []
     db_session.refresh(item)
     assert item.preview_deployed is True
 
@@ -559,8 +607,304 @@ def test_revert_blocks_merged_work_item(client, db_session, monkeypatch, clean_r
     assert response.status_code == 409
     detail = response.json()["detail"]
     assert "merged" in detail.lower()
-    # The lock was never acquired, the executor was never called.
+    # The lock was never acquired and the executor was never called at all
+    # — the merged-state guard runs before the safety gate, so even the
+    # repo_safety_check is skipped.
     assert calls == []
+    assert (
+        db_session.query(RepoLock)
+        .filter(RepoLock.repo_path == str(clean_repo))
+        .count()
+        == 0
+    )
+    db_session.refresh(item)
+    assert item.preview_deployed is True
+    assert item.preview_status == "deployed"
+
+
+# ---------------------------------------------------------------------------
+# preview gate — host-executor repo safety boundary (regression for PR #31's
+# sibling fix on the preview path).
+#
+# The dashboard container mounts /srv/repo read-only and is not a valid git
+# worktree, so calling ``check_repo_clean`` from inside the container would
+# return ``git_inspection_failed`` and 409 every preview deploy / revert.
+# The gate must instead delegate to the host preview executor (same channel
+# used for deploy_preview / revert_preview / merge_pr) via
+# ``check_repo_clean_via_executor``. The tests below pin that contract.
+# ---------------------------------------------------------------------------
+
+
+def _clean_safety_response() -> preview_deploy.ExecutorResponse:
+    """A canned ``repo_safety_check`` payload that reports the repo clean."""
+    return preview_deploy.ExecutorResponse(
+        success=True,
+        raw={
+            "success": True,
+            "action": "repo_safety_check",
+            "is_clean": True,
+            "dirty_files": [],
+            "staged_files": [],
+            "untracked_files": [],
+            "current_branch": "feature/wi-preview",
+            "current_commit": "e" * 40,
+            "blocker_code": None,
+            "blocker_message": None,
+        },
+    )
+
+
+def test_deploy_gate_delegates_safety_check_to_host_executor(
+    client, db_session, monkeypatch, clean_repo
+):
+    """The preview gate must inspect the worktree via the host executor; it
+    must NOT call the in-container ``check_repo_clean`` directly. Pinning
+    this prevents a regression to the bug PR #31 fixed for Start Build."""
+    item = _make_review_ready_item(db_session)
+    _stub_repo_resolution(monkeypatch, str(clean_repo))
+
+    direct_calls = []
+    real_check = repo_safety.check_repo_clean
+
+    def _spy_direct(path):
+        direct_calls.append(path)
+        return real_check(path)
+
+    monkeypatch.setattr(repo_safety, "check_repo_clean", _spy_direct)
+
+    calls = _stub_executor(
+        monkeypatch,
+        _executor_success(commit_sha="b" * 40),
+        repo_safety_check=_clean_safety_response(),
+    )
+
+    response = client.post(f"/api/work-items/{item.id}/deploy-preview", json={})
+    assert response.status_code == 200, response.text
+
+    # The gate dispatched exactly one repo_safety_check to the executor,
+    # against the resolved repo path.
+    safety_calls = _action_calls(calls, "repo_safety_check")
+    assert len(safety_calls) == 1
+    assert safety_calls[0]["repo_path"] == str(clean_repo)
+    assert "branch" not in safety_calls[0] or safety_calls[0].get("branch") is None
+
+    # The in-container direct inspector was never reached from the gate.
+    assert direct_calls == []
+
+
+def test_deploy_blocked_when_executor_reports_dirty_repo(
+    client, db_session, monkeypatch, clean_repo
+):
+    """A dirty-repo response from the executor 409s deploy with the same
+    shape as the in-container gate, does not advance the Work Item, and
+    does not dispatch a deploy_preview action."""
+    item = _make_review_ready_item(db_session)
+    _stub_repo_resolution(monkeypatch, str(clean_repo))
+
+    calls = _stub_executor(
+        monkeypatch,
+        _executor_success(),
+        repo_safety_check=preview_deploy.ExecutorResponse(
+            success=True,
+            raw={
+                "success": True,
+                "action": "repo_safety_check",
+                "is_clean": False,
+                "dirty_files": ["app/main.py"],
+                "staged_files": [],
+                "untracked_files": [],
+                "current_branch": "main",
+                "current_commit": "c" * 40,
+                "blocker_code": "blocked_dirty_repo",
+                "blocker_message": (
+                    f"Repo {clean_repo} has uncommitted changes: 1 unstaged"
+                ),
+            },
+        ),
+    )
+
+    response = client.post(f"/api/work-items/{item.id}/deploy-preview", json={})
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["blocker_code"] == "blocked_dirty_repo"
+    assert "app/main.py" in detail["dirty_files"]
+    assert detail["current_branch"] == "main"
+
+    # No deploy action and no lock acquired — the gate refused before
+    # dispatching any side-effectful work.
+    assert _action_calls(calls, "deploy_preview") == []
+    assert (
+        db_session.query(RepoLock)
+        .filter(RepoLock.repo_path == str(clean_repo))
+        .count()
+        == 0
+    )
+    db_session.refresh(item)
+    assert item.preview_status is None
+    assert item.preview_deployed in (None, False)
+
+
+def test_deploy_blocked_when_executor_unreachable_at_gate(
+    client, db_session, monkeypatch, clean_repo
+):
+    """An unreachable executor during the safety check fails closed: 409
+    with ``executor_unreachable``, no lock, no state advance, and no
+    deploy_preview action dispatched."""
+    item = _make_review_ready_item(db_session)
+    _stub_repo_resolution(monkeypatch, str(clean_repo))
+
+    calls = _stub_executor(
+        monkeypatch,
+        _executor_success(),
+        repo_safety_check=preview_deploy.ExecutorResponse(
+            success=False,
+            error="executor unreachable: Connection refused",
+            error_code="executor_unreachable",
+        ),
+    )
+
+    response = client.post(f"/api/work-items/{item.id}/deploy-preview", json={})
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["blocker_code"] == "executor_unreachable"
+    assert "unreachable" in (detail["blocker_message"] or "").lower()
+
+    assert _action_calls(calls, "deploy_preview") == []
+    assert (
+        db_session.query(RepoLock)
+        .filter(RepoLock.repo_path == str(clean_repo))
+        .count()
+        == 0
+    )
+    db_session.refresh(item)
+    assert item.preview_status is None
+    assert item.preview_deployed in (None, False)
+
+
+def test_revert_gate_delegates_safety_check_to_host_executor(
+    client, db_session, monkeypatch, clean_repo
+):
+    """Revert mirror of the deploy gate: must use the executor, not direct
+    ``check_repo_clean``."""
+    item = _make_review_ready_item(
+        db_session, preview_deployed=True, preview_status="deployed"
+    )
+    _stub_repo_resolution(monkeypatch, str(clean_repo))
+
+    direct_calls = []
+    real_check = repo_safety.check_repo_clean
+
+    def _spy_direct(path):
+        direct_calls.append(path)
+        return real_check(path)
+
+    monkeypatch.setattr(repo_safety, "check_repo_clean", _spy_direct)
+
+    calls = _stub_executor(
+        monkeypatch,
+        _executor_success(),
+        repo_safety_check=_clean_safety_response(),
+    )
+
+    response = client.post(
+        f"/api/work-items/{item.id}/revert-preview",
+        json={"reason": "smoke test", "reverted_by": "operator-bob"},
+    )
+    assert response.status_code == 200, response.text
+
+    safety_calls = _action_calls(calls, "repo_safety_check")
+    assert len(safety_calls) == 1
+    assert safety_calls[0]["repo_path"] == str(clean_repo)
+    assert direct_calls == []
+
+
+def test_revert_blocked_when_executor_reports_dirty_repo(
+    client, db_session, monkeypatch, clean_repo
+):
+    """Revert mirror of the dirty-repo deploy block: 409 with the structured
+    blocker detail, no revert_preview dispatch, no state advance."""
+    item = _make_review_ready_item(
+        db_session, preview_deployed=True, preview_status="deployed"
+    )
+    _stub_repo_resolution(monkeypatch, str(clean_repo))
+
+    calls = _stub_executor(
+        monkeypatch,
+        _executor_success(),
+        repo_safety_check=preview_deploy.ExecutorResponse(
+            success=True,
+            raw={
+                "success": True,
+                "action": "repo_safety_check",
+                "is_clean": False,
+                "dirty_files": ["app/main.py"],
+                "staged_files": [],
+                "untracked_files": [],
+                "current_branch": "main",
+                "current_commit": "c" * 40,
+                "blocker_code": "blocked_dirty_repo",
+                "blocker_message": (
+                    f"Repo {clean_repo} has uncommitted changes: 1 unstaged"
+                ),
+            },
+        ),
+    )
+
+    response = client.post(
+        f"/api/work-items/{item.id}/revert-preview",
+        json={"reason": "operator force revert"},
+    )
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["blocker_code"] == "blocked_dirty_repo"
+    assert "app/main.py" in detail["dirty_files"]
+
+    assert _action_calls(calls, "revert_preview") == []
+    assert (
+        db_session.query(RepoLock)
+        .filter(RepoLock.repo_path == str(clean_repo))
+        .count()
+        == 0
+    )
+    db_session.refresh(item)
+    # State stays at ``deployed`` — revert did not advance past the gate.
+    assert item.preview_deployed is True
+    assert item.preview_status == "deployed"
+
+
+def test_revert_blocked_when_executor_unreachable_at_gate(
+    client, db_session, monkeypatch, clean_repo
+):
+    """Revert mirror of the executor-unreachable deploy block: gate fails
+    closed with 409 ``executor_unreachable`` and the revert does not run."""
+    item = _make_review_ready_item(
+        db_session, preview_deployed=True, preview_status="deployed"
+    )
+    _stub_repo_resolution(monkeypatch, str(clean_repo))
+
+    calls = _stub_executor(
+        monkeypatch,
+        _executor_success(),
+        repo_safety_check=preview_deploy.ExecutorResponse(
+            success=False,
+            error="executor unreachable: Connection refused",
+            error_code="executor_unreachable",
+        ),
+    )
+
+    response = client.post(
+        f"/api/work-items/{item.id}/revert-preview",
+        json={"reason": "rolling back"},
+    )
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["blocker_code"] == "executor_unreachable"
+
+    assert _action_calls(calls, "revert_preview") == []
     assert (
         db_session.query(RepoLock)
         .filter(RepoLock.repo_path == str(clean_repo))

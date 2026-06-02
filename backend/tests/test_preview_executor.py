@@ -63,13 +63,37 @@ def executor_module():
 # ---------------------------------------------------------------------------
 
 
+_CLEAN_SAFETY_BODY: dict = {
+    "success": True,
+    "action": "repo_safety_check",
+    "is_clean": True,
+    "dirty_files": [],
+    "staged_files": [],
+    "untracked_files": [],
+    "current_branch": None,
+    "current_commit": None,
+    "blocker_code": None,
+    "blocker_message": None,
+}
+
+
 class _StubExecutor:
-    """Minimal HTTP server that records requests and returns a configured reply."""
+    """Minimal HTTP server that records requests and returns a configured reply.
+
+    The dashboard now issues a ``repo_safety_check`` to the executor before
+    every deploy/revert; this stub answers that action with a clean payload
+    by default so router-level tests can prime ``next_body`` for the actual
+    side-effectful action without separately satisfying the gate. Tests
+    that want to exercise a non-clean / non-200 safety check can set
+    ``safety_body`` and ``safety_status`` explicitly.
+    """
 
     def __init__(self):
         self.requests: list[dict] = []
         self.next_status = 200
         self.next_body: dict = {"success": True}
+        self.safety_status = 200
+        self.safety_body: dict = dict(_CLEAN_SAFETY_BODY)
         self._server: HTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -94,8 +118,15 @@ class _StubExecutor:
                         "json": payload,
                     }
                 )
-                body = json.dumps(stub.next_body).encode("utf-8")
-                self.send_response(stub.next_status)
+                action = (
+                    payload.get("action") if isinstance(payload, dict) else None
+                )
+                if action == "repo_safety_check":
+                    body_data, status = stub.safety_body, stub.safety_status
+                else:
+                    body_data, status = stub.next_body, stub.next_status
+                body = json.dumps(body_data).encode("utf-8")
+                self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
@@ -554,10 +585,14 @@ def test_router_marks_success_only_after_executor_acks(
     body = response.json()
     assert body["preview_deployed"] is True
     assert body["preview_commit_sha"] == "e" * 40
-    # The dashboard forwarded the configured key to the executor.
-    assert len(stub_executor.requests) == 1
-    assert stub_executor.requests[0]["headers"].get("X-Api-Key") == "shared-key"
-    assert stub_executor.requests[0]["json"]["action"] == "deploy_preview"
+    # The dashboard forwarded the configured key on the deploy call (the
+    # gate's prior repo_safety_check uses the same header).
+    deploy_requests = [
+        r for r in stub_executor.requests
+        if r["json"].get("action") == "deploy_preview"
+    ]
+    assert len(deploy_requests) == 1
+    assert deploy_requests[0]["headers"].get("X-Api-Key") == "shared-key"
 
 
 def test_router_does_not_stamp_success_on_executor_failure(
