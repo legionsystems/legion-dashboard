@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Optional
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .models import RepoLock
@@ -259,7 +260,28 @@ def acquire_repo_lock(
         lock_status="active",
     )
     session.add(lock)
-    session.commit()
+    try:
+        session.commit()
+    except IntegrityError:
+        # Concurrent acquirer beat us to the unique repo_path constraint.
+        # Surface this as the same blocker callers handle for an existing
+        # active lock, rather than letting the constraint violation become
+        # a 500 at the API edge.
+        session.rollback()
+        existing = (
+            session.query(RepoLock)
+            .filter(RepoLock.repo_path == repo_path)
+            .one_or_none()
+        )
+        return LockResult(
+            acquired=False,
+            existing_lock=existing,
+            blocker_code="blocked_repo_busy",
+            blocker_message=(
+                f"Repo {repo_path} was locked by a concurrent build "
+                "during acquire"
+            ),
+        )
     session.refresh(lock)
     return LockResult(acquired=True, lock=lock)
 
@@ -269,15 +291,27 @@ def release_repo_lock(
     repo_path: str,
     release_reason: Optional[str] = None,
     final_status: str = "released",
+    expected_task_id: Optional[str] = None,
 ) -> Optional[RepoLock]:
     """Release the active lock on ``repo_path``.
 
-    Returns the updated row, or None when there was no active lock to release.
+    Returns the updated row, or None when there was no active lock to release
+    (either because no lock exists, or because the active lock is owned by a
+    different task than ``expected_task_id``).
+
     ``final_status`` defaults to ``"released"``; callers can pass
     ``"failed"`` / ``"aborted"`` to keep the lock_status semantically distinct.
+
+    ``expected_task_id`` guards against a stale terminal-status sync from an
+    older builder run releasing the *new* build's lock. When provided, the
+    release only proceeds if the active lock's ``task_id`` matches. The
+    manual-clear endpoint omits this so an operator can always force-release.
     """
     lock = check_repo_busy(session, repo_path)
     if lock is None:
+        return None
+    if expected_task_id is not None and lock.task_id != expected_task_id:
+        # Lock belongs to a different task — don't release someone else's lock.
         return None
     lock.lock_status = final_status
     lock.released_at = datetime.utcnow()

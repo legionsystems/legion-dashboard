@@ -571,11 +571,19 @@ def sync_builder_task(
     }
     if builder_task.target_repo and builder_task.hermes_status in terminal_release:
         final_status, reason = terminal_release[builder_task.hermes_status]
+        # Pass the Hermes task_id so we only release the lock if it's still
+        # owned by *this* builder task. If a newer build already took the
+        # lock for the same repo, leave that newer lock alone.
         repo_safety.release_repo_lock(
             db,
             builder_task.target_repo,  # type: ignore[arg-type]
             release_reason=reason,
             final_status=final_status,
+            expected_task_id=(
+                str(builder_task.hermes_task_id)
+                if builder_task.hermes_task_id is not None
+                else None
+            ),
         )
 
     # Project Hermes status to Work Item status (reusable lifecycle transition)

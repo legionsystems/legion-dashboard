@@ -204,6 +204,126 @@ def test_release_no_active_lock_returns_none(db_session):
     assert out is None
 
 
+def test_release_with_expected_task_id_matches(db_session):
+    """When expected_task_id matches the active lock, release proceeds."""
+    res = _acquire(db_session, "/tmp/repo-owner-match", task_id="hermes-owner-1")
+    assert res.acquired is True
+
+    released = repo_safety.release_repo_lock(
+        db_session,
+        "/tmp/repo-owner-match",
+        release_reason="owner_terminal",
+        expected_task_id="hermes-owner-1",
+    )
+
+    assert released is not None
+    assert released.lock_status == "released"
+    assert released.release_reason == "owner_terminal"
+
+
+def test_release_with_expected_task_id_mismatch_leaves_lock_intact(db_session):
+    """A stale terminal sync from an older task must not release another build's lock."""
+    # Build A acquires, completes, releases.
+    a = _acquire(db_session, "/tmp/repo-stale", task_id="hermes-task-A")
+    assert a.acquired is True
+    repo_safety.release_repo_lock(
+        db_session,
+        "/tmp/repo-stale",
+        release_reason="a_done",
+        expected_task_id="hermes-task-A",
+    )
+
+    # Build B acquires the same repo (recycles the row).
+    b = _acquire(db_session, "/tmp/repo-stale", task_id="hermes-task-B")
+    assert b.acquired is True
+    b_lock_id = b.lock.id
+
+    # A late terminal sync for A arrives, claiming to release the lock.
+    out = repo_safety.release_repo_lock(
+        db_session,
+        "/tmp/repo-stale",
+        release_reason="stale_a_done",
+        expected_task_id="hermes-task-A",
+    )
+
+    # The mismatch is detected; B's lock is left untouched.
+    assert out is None
+    still_active = repo_safety.check_repo_busy(db_session, "/tmp/repo-stale")
+    assert still_active is not None
+    assert still_active.id == b_lock_id
+    assert still_active.lock_status == "active"
+    assert still_active.task_id == "hermes-task-B"
+
+
+def test_release_with_no_expected_task_id_still_releases(db_session):
+    """Manual-clear path (no expected_task_id) always releases the active lock."""
+    res = _acquire(db_session, "/tmp/repo-manual", task_id="hermes-anything")
+    assert res.acquired is True
+
+    released = repo_safety.release_repo_lock(
+        db_session, "/tmp/repo-manual", release_reason="operator_clear"
+    )
+
+    assert released is not None
+    assert released.lock_status == "released"
+
+
+def test_acquire_integrity_error_race_returns_blocked(db_session, monkeypatch):
+    """Two acquires racing past existing_any return blocked_repo_busy, not 500.
+
+    Simulates the race: both callers query ``existing_any`` and see no row,
+    so both proceed to INSERT. The second commit must hit the unique
+    ``repo_path`` constraint and be translated into a ``blocked_repo_busy``
+    LockResult, not a 500.
+
+    We simulate this by force-returning ``None`` from the ``existing_any``
+    lookup on the loser's call — letting the real DB-level unique constraint
+    raise ``IntegrityError`` at commit time.
+    """
+    # Winner acquires first via the normal path.
+    winner = _acquire(
+        db_session, "/tmp/repo-race", task_id="hermes-concurrent-winner"
+    )
+    assert winner.acquired is True
+
+    # Patch the ORM lookup the loser does at the top of acquire_repo_lock so
+    # the loser believes the repo is free, then proceeds to INSERT and hits
+    # the DB-level unique constraint.
+    real_query = db_session.query
+
+    class _FakeFilterReturnsNone:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def filter(self, *_args, **_kwargs):  # noqa: D401
+            return self
+
+        def one_or_none(self):
+            return None
+
+    call_count = {"n": 0}
+
+    def fake_query(*args, **kwargs):
+        # The first query in acquire_repo_lock is the existing_any lookup.
+        # Return None so the loser falls through to the INSERT branch.
+        # All subsequent queries (e.g. the post-rollback lookup) use the
+        # real query so the existing winner is discoverable.
+        if call_count["n"] == 0 and args and args[0] is RepoLock:
+            call_count["n"] += 1
+            return _FakeFilterReturnsNone()
+        return real_query(*args, **kwargs)
+
+    monkeypatch.setattr(db_session, "query", fake_query)
+
+    result = _acquire(db_session, "/tmp/repo-race", task_id="hermes-loser")
+
+    assert result.acquired is False
+    assert result.blocker_code == "blocked_repo_busy"
+    assert "concurrent" in (result.blocker_message or "").lower()
+    assert result.existing_lock is not None
+    assert result.existing_lock.task_id == "hermes-concurrent-winner"
+
+
 # ---------------------------------------------------------------------------
 # Endpoint tests — /api/repo-safety/check and /api/repo-locks
 # ---------------------------------------------------------------------------
