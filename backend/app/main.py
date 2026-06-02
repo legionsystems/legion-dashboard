@@ -1,3 +1,4 @@
+import hashlib
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -16,6 +17,29 @@ from .routers import builder as builder_router
 from .routers import repo_safety as repo_safety_router
 
 Base.metadata.create_all(bind=engine)
+
+
+def _sha256_fingerprint(value: str) -> str:
+    """Return a stable SHA-256 hex digest for use as a non-secret config fingerprint."""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+
+
+def _executor_auth_diagnostics() -> dict:
+    """Return executor auth status without exposing the actual key."""
+    key = os.environ.get("API_SERVER_KEY", "")
+    if not key:
+        return {
+            "executor_key_configured": False,
+            "executor_key_fingerprint": None,
+            "executor_key_preview": "MISSING — set API_SERVER_KEY in .env or environment",
+        }
+    return {
+        "executor_key_configured": True,
+        "executor_key_fingerprint": _sha256_fingerprint(key),
+        # First 6 chars only — enough to compare against the executor config
+        # without exposing the secret in logs or API responses.
+        "executor_key_preview": key[:6] + "...",
+    }
 
 
 def seed_apps() -> None:
@@ -91,7 +115,9 @@ def api_status():
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    diagnostics = _executor_auth_diagnostics()
+    status = "ok" if diagnostics["executor_key_configured"] else "degraded"
+    return {"status": status, "executor_auth": diagnostics}
 
 
 @app.get("/version")

@@ -79,9 +79,14 @@ npm run build
 
 ```bash
 cp .env.example .env
+# Edit .env and set API_SERVER_KEY to match /etc/legion/preview-executor.env
 docker compose up --build
 # App → http://localhost:8720
 ```
+
+The `.env` file is read by Docker Compose. `API_SERVER_KEY` must be set
+and must match the key in `/etc/legion/preview-executor.env` on the host —
+without it the dashboard cannot authenticate to the host executor.
 
 ## Design language
 
