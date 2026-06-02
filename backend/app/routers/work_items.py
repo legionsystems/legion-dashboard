@@ -456,7 +456,7 @@ def _preview_gate_or_409(
     any blocker. On success the caller owns the returned lock and must
     release it before returning.
     """
-    safety = repo_safety.check_repo_clean(repo_path)
+    safety = repo_safety.check_repo_clean_via_executor(repo_path)
     if not safety.is_clean:
         raise HTTPException(
             status_code=409,
