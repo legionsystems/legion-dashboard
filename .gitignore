@@ -18,6 +18,9 @@ env/
 # Env
 .env
 .env.local
+.hermes-config.yaml
+.hermes-config.local.yaml
+*.secret.yaml
 
 # Node
 node_modules/
