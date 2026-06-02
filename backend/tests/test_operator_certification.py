@@ -386,6 +386,35 @@ def test_reject_with_changes_from_preview_ready_returns_needs_rework(
     assert body["change_request"] == "Needs another pass."
 
 
+def test_reject_with_changes_clears_preview_required_flag(client, db_session):
+    """When the source state is ``preview_ready`` (preview deployed AND
+    required), reject-with-changes must clear ``preview_required`` too — not
+    just ``preview_deployed``. Otherwise the next lifecycle pass falls through
+    to ``preview_pending`` (which outranks ``needs_rework`` in precedence) and
+    the operator's change request is silently masked as "waiting on preview".
+    """
+    created = _create(client, title="Preview required then rework")
+    _set_in_review(
+        db_session,
+        created["id"],
+        preview_required=True,
+        preview_deployed=True,
+    )
+    fetched = client.get(f"/api/work-items/{created['id']}")
+    assert fetched.json()["effective_state"] == "preview_ready"
+
+    response = client.post(
+        f"/api/work-items/{created['id']}/reject-with-changes",
+        json={"change_request": "Tighten copy and resubmit."},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["effective_state"] == "needs_rework"
+    assert body["preview_required"] is False
+    assert body["preview_deployed"] is False
+
+
 def test_reject_with_changes_invalid_transition_from_draft_returns_409(client):
     created = _create(client, title="Still drafting")
 

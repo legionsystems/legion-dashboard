@@ -415,9 +415,13 @@ def reject_work_item_with_changes(
     # Clear stale review-ready signals so the lifecycle returns ``needs_rework``
     # instead of remaining pinned at ``code_reviewed`` or ``preview_ready`` —
     # those signals predate this change request and would otherwise outrank it
-    # in precedence (see lifecycle.compute_effective_state).
+    # in precedence (see lifecycle.compute_effective_state). ``preview_required``
+    # is also cleared so the lifecycle does not fall through to
+    # ``preview_pending`` (which outranks ``needs_rework``) once the deploy
+    # flag is gone.
     item.code_review_status = None
     item.preview_deployed = False
+    item.preview_required = False
     db.commit()
     db.refresh(item)
     return _serialize_with_debate(db, item)
