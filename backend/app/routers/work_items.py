@@ -663,6 +663,17 @@ def revert_preview_action(
             detail="Work item has no active preview deployment to revert.",
         )
 
+    state = compute_effective_state(item, None)
+    if preview_deploy.is_preview_state_blocked(state):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Work item is in state '{state}'; preview revert is not "
+                "allowed for merged, implemented, certified, archived, "
+                "rejected, or ready-to-merge items."
+            ),
+        )
+
     repo_path, repo_name = preview_deploy.resolve_preview_repo(item)
     lock_result = _preview_gate_or_409(
         db, repo_path, repo_name, preview_deploy.REVERT_BASE_BRANCH

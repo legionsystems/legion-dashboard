@@ -698,3 +698,36 @@ def test_failed_revert_healthcheck_marks_revert_error(
     )
     assert lock.lock_status == "failed"
     assert lock.release_reason == "revert_healthcheck_failed"
+
+
+def test_revert_blocks_merged_work_item(
+    client, db_session, monkeypatch, clean_repo
+):
+    """A merged Work Item must not be revertable, even if still flagged deployed."""
+    item = _make_review_ready_item(
+        db_session,
+        preview_deployed=True,
+        preview_status="deployed",
+        merge_commit_sha="d" * 40,
+    )
+    _stub_repo_resolution(monkeypatch, str(clean_repo))
+    _stub_shell_success(monkeypatch)
+
+    response = client.post(
+        f"/api/work-items/{item.id}/revert-preview",
+        json={"reason": "attempted revert after merge"},
+    )
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert "merged" in detail.lower()
+    # The lock was never acquired and the item was not mutated.
+    assert (
+        db_session.query(RepoLock)
+        .filter(RepoLock.repo_path == str(clean_repo))
+        .count()
+        == 0
+    )
+    db_session.refresh(item)
+    assert item.preview_deployed is True
+    assert item.preview_status == "deployed"
