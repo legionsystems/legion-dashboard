@@ -152,7 +152,7 @@ export default function WorkItemDetail() {
               ← BACK
             </Link>
             <TypeBadge type={item.type} />
-            <StatusBadge status={item.status} />
+            <StatusBadge status={item.effective_state || item.status} />
             {item.approved_by_operator && (
               <span className="text-xs text-st-completed font-mono">✓ APPROVED</span>
             )}
