@@ -398,3 +398,110 @@ def test_reject_with_changes_not_found(client):
         json={"change_request": "x"},
     )
     assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Rework cycle — operator requests changes, builder addresses them, item
+# becomes certifiable again. Regression coverage for the P1 lifecycle bug
+# where ``needs_rework`` permanently pinned items.
+# ---------------------------------------------------------------------------
+
+
+_CHANGE_REQUEST_TEXT = "Please add input validation and re-submit."
+
+
+def test_certify_while_needs_rework_returns_409(client, db_session):
+    created = _create(client, title="Rework then certify")
+    _set_in_review(db_session, created["id"])
+    rework = client.post(
+        f"/api/work-items/{created['id']}/reject-with-changes",
+        json={"change_request": _CHANGE_REQUEST_TEXT},
+    )
+    assert rework.status_code == 200
+    assert rework.json()["effective_state"] == "needs_rework"
+
+    response = client.post(
+        f"/api/work-items/{created['id']}/certify",
+        json={},
+    )
+
+    assert response.status_code == 409
+
+
+def test_preview_deployed_after_rework_unblocks_certify(client, db_session):
+    """After the builder pushes a preview that addresses the operator's
+    change request, the item moves from ``needs_rework`` to
+    ``preview_ready`` and certification succeeds. The original change
+    request text must remain on the record as an audit trail.
+    """
+    created = _create(client, title="Rework then preview")
+    _set_in_review(db_session, created["id"])
+    rework = client.post(
+        f"/api/work-items/{created['id']}/reject-with-changes",
+        json={"change_request": _CHANGE_REQUEST_TEXT},
+    )
+    assert rework.status_code == 200
+
+    # Builder addresses the change request and a preview is deployed.
+    item = (
+        db_session.query(WorkItem).filter(WorkItem.id == created["id"]).one()
+    )
+    item.preview_required = True
+    item.preview_deployed = True
+    db_session.commit()
+
+    fetched = client.get(f"/api/work-items/{created['id']}")
+    assert fetched.status_code == 200
+    body = fetched.json()
+    assert body["effective_state"] == "preview_ready"
+    # Audit trail preserved.
+    assert body["changes_requested_at"] is not None
+    assert body["change_request"] == _CHANGE_REQUEST_TEXT
+
+    response = client.post(
+        f"/api/work-items/{created['id']}/certify",
+        json={},
+    )
+
+    assert response.status_code == 200, response.text
+    certified = response.json()
+    assert certified["effective_state"] == "certified"
+    # Change-request audit trail still preserved after certification.
+    assert certified["change_request"] == _CHANGE_REQUEST_TEXT
+    assert certified["changes_requested_at"] is not None
+
+
+def test_code_review_approved_after_rework_unblocks_certify(client, db_session):
+    """After an approved code review lands on a reworked item, the item
+    moves from ``needs_rework`` to ``code_reviewed`` and certification
+    succeeds. Audit trail of the original change request is preserved.
+    """
+    created = _create(client, title="Rework then code review")
+    _set_in_review(db_session, created["id"])
+    rework = client.post(
+        f"/api/work-items/{created['id']}/reject-with-changes",
+        json={"change_request": _CHANGE_REQUEST_TEXT},
+    )
+    assert rework.status_code == 200
+
+    item = (
+        db_session.query(WorkItem).filter(WorkItem.id == created["id"]).one()
+    )
+    item.code_review_status = "approved"
+    db_session.commit()
+
+    fetched = client.get(f"/api/work-items/{created['id']}")
+    assert fetched.status_code == 200
+    body = fetched.json()
+    assert body["effective_state"] == "code_reviewed"
+    assert body["change_request"] == _CHANGE_REQUEST_TEXT
+
+    response = client.post(
+        f"/api/work-items/{created['id']}/certify",
+        json={},
+    )
+
+    assert response.status_code == 200, response.text
+    certified = response.json()
+    assert certified["effective_state"] == "certified"
+    assert certified["change_request"] == _CHANGE_REQUEST_TEXT

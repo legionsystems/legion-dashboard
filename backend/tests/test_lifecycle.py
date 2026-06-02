@@ -8,6 +8,7 @@ fixture for every case), we drive the function with a lightweight
 Each test asserts a single precedence rule so a regression makes the failure
 obvious.
 """
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -84,6 +85,97 @@ def test_ready_to_merge_outranks_certified():
 def test_certified_outranks_code_review_approved():
     item = _wi(operator_certified=True, code_review_status="approved")
     assert compute_effective_state(item) == "certified"
+
+
+# ---------------------------------------------------------------------------
+# Operator change request (needs_rework) — slice 2.
+#
+# A stale operator change request must not permanently pin the lifecycle:
+# later review-ready signals (preview_deployed, code_review_status) must
+# override ``needs_rework`` so the operator can certify after the builder
+# addresses the change request.
+# ---------------------------------------------------------------------------
+
+
+_CHANGE_REQUEST_AT = datetime(2026, 6, 1, 12, 0, 0)
+
+
+def test_needs_rework_when_only_operator_change_request_set():
+    item = _wi(
+        changes_requested_at=_CHANGE_REQUEST_AT,
+        change_request="Please add input validation.",
+    )
+    assert compute_effective_state(item) == "needs_rework"
+
+
+def test_bare_pr_does_not_override_operator_change_request():
+    # A bare PR (no preview signal, no code-review verdict) is not a
+    # review-ready signal — the operator's change request still wins.
+    item = _wi(
+        pr_number=42,
+        changes_requested_at=_CHANGE_REQUEST_AT,
+        change_request="Please add input validation.",
+    )
+    assert compute_effective_state(item) == "needs_rework"
+
+
+def test_preview_deployed_overrides_stale_change_request():
+    item = _wi(
+        pr_number=42,
+        changes_requested_at=_CHANGE_REQUEST_AT,
+        change_request="Please add input validation.",
+        preview_required=True,
+        preview_deployed=True,
+    )
+    assert compute_effective_state(item) == "preview_ready"
+
+
+def test_preview_pending_overrides_stale_change_request():
+    # When preview is required but not yet deployed, the builder is
+    # actively working — surface ``preview_pending`` so the operator
+    # knows what they are waiting on rather than the stale rework state.
+    item = _wi(
+        pr_number=42,
+        changes_requested_at=_CHANGE_REQUEST_AT,
+        change_request="Please add input validation.",
+        preview_required=True,
+        preview_deployed=False,
+    )
+    assert compute_effective_state(item) == "preview_pending"
+
+
+def test_code_review_approved_overrides_stale_change_request():
+    item = _wi(
+        pr_number=42,
+        changes_requested_at=_CHANGE_REQUEST_AT,
+        change_request="Please add input validation.",
+        code_review_status="approved",
+    )
+    assert compute_effective_state(item) == "code_reviewed"
+
+
+def test_code_review_changes_requested_overrides_operator_change_request():
+    # Automated/agent ``changes_requested`` verdict is distinct from the
+    # operator's change request and takes precedence over a stale one.
+    item = _wi(
+        pr_number=42,
+        changes_requested_at=_CHANGE_REQUEST_AT,
+        change_request="Please add input validation.",
+        code_review_status="changes_requested",
+    )
+    assert compute_effective_state(item) == "changes_requested"
+
+
+def test_rejected_still_wins_over_change_request_and_preview():
+    # ``rejected`` is terminal — even if a preview is deployed later,
+    # rejection is still the right state.
+    item = _wi(
+        pr_number=42,
+        changes_requested_at=_CHANGE_REQUEST_AT,
+        rejected_at=datetime(2026, 6, 2, 12, 0, 0),
+        preview_deployed=True,
+    )
+    assert compute_effective_state(item) == "rejected"
 
 
 # ---------------------------------------------------------------------------
