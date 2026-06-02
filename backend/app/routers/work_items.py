@@ -34,6 +34,7 @@ from ..schemas import (
     BulkArchiveRequest,
     BulkArchiveTestItemsRequest,
     CertifyRequest,
+    CompleteRequest,
     DebateRunBulkHideRequest,
     DebateRunCreate,
     DebateRunDetail,
@@ -43,11 +44,13 @@ from ..schemas import (
     DeployPreviewRequest,
     FollowUpCreate,
     FollowUpResponse,
+    MergeRequest,
     OperatorDebateInputCreate,
     OperatorDebateInputResponse,
     RejectRequest,
     RejectWithChangesRequest,
     RevertPreviewRequest,
+    VerifyMergeRequest,
     WorkItemArchiveRequest,
     WorkItemClassificationUpdate,
     WorkItemCreate,
@@ -700,6 +703,299 @@ def revert_preview_action(
         db, repo_path, release_reason="preview_reverted", final_status="released"
     )
 
+    return _serialize_with_debate(db, item)
+
+
+# ---------------------------------------------------------------------------
+# Merge / complete endpoints (slice 5)
+# ---------------------------------------------------------------------------
+#
+# ``merge`` lands a certified, ready-to-merge Work Item's PR via the host
+# executor (gh pr merge + base branch deploy + healthcheck) and ``complete``
+# closes out the lifecycle once the post-merge deploy has been verified.
+# Both endpoints reuse the same repo safety gate as preview deploy.
+
+
+# Effective states from which ``merge`` is allowed. ``blocked_merge`` is
+# included so a prior failed merge attempt can be retried without manual DB
+# surgery; the operator-supplied PR metadata still has to validate.
+_MERGE_TERMINAL_BLOCK_STATES = frozenset(
+    {"complete", "merged", "merged_deployment_failed", "archived"}
+)
+
+
+@router.post("/{work_item_id}/merge", response_model=WorkItemResponse)
+def merge_work_item(
+    work_item_id: int,
+    payload: MergeRequest,
+    db: Session = Depends(get_db),
+):
+    """Merge a certified, ready-to-merge Work Item's PR via the host executor.
+
+    Validates that the Work Item is operator-certified AND ready-to-merge,
+    that it carries PR metadata matching the operator's expectations, that
+    the repo safety gate is open, and that the executor confirms the merge
+    succeeded before stamping ``merge_commit_sha`` on the row.
+    """
+    item = _get_or_404(db, work_item_id)
+
+    # Terminal-state guard: a merged / complete / archived item must not be
+    # re-merged. Other guards below give more specific errors for items
+    # that simply have not been certified yet.
+    state = compute_effective_state(item, None)
+    if state in _MERGE_TERMINAL_BLOCK_STATES:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Work item is in state '{state}'; merge is not allowed for "
+                "merged, complete, merged_deployment_failed, or archived items."
+            ),
+        )
+
+    if item.operator_certified is not True or item.ready_to_merge is not True:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Work item must be operator_certified AND ready_to_merge "
+                "before merging."
+            ),
+        )
+
+    if not preview_deploy.is_merge_state_allowed(state):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Work item is in state '{state}'; merge requires "
+                "ready_to_merge, certified, or blocked_merge."
+            ),
+        )
+
+    if not item.branch_name or item.pr_number is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Work item is missing PR metadata. Both branch_name and "
+                "pr_number must be set before merging."
+            ),
+        )
+
+    if payload.expected_pr_number != item.pr_number:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Expected PR #{payload.expected_pr_number} does not match "
+                f"the Work Item's PR #{item.pr_number}."
+            ),
+        )
+    if payload.expected_branch != item.branch_name:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Expected branch '{payload.expected_branch}' does not "
+                f"match the Work Item's branch '{item.branch_name}'."
+            ),
+        )
+
+    repo_path, repo_name = preview_deploy.resolve_preview_repo(item)
+    lock_result = _preview_gate_or_409(
+        db, repo_path, repo_name, payload.expected_base_branch
+    )
+
+    item.merge_status = "merging"
+    item.merge_error = None
+    db.commit()
+
+    def _abort_no_sha(reason: str, error_detail: str) -> None:
+        """Mark merge as failed BEFORE any SHA was recorded."""
+        item.merge_status = "failed"
+        item.merge_error = error_detail[:2000]
+        db.commit()
+        repo_safety.release_repo_lock(
+            db, repo_path, release_reason=reason, final_status="failed"
+        )
+
+    result = preview_deploy.call_host_executor(
+        action="merge_pr",
+        repo_path=repo_path,
+        branch=payload.expected_base_branch,
+        pr_number=item.pr_number,
+        base_branch=payload.expected_base_branch,
+    )
+
+    # Executor returned a merge SHA even though the post-merge work failed
+    # (build / up / healthcheck). The merge itself landed — record the SHA
+    # and surface ``merged_deployment_failed`` so the operator can fix the
+    # deploy without retrying the merge.
+    if result.merge_commit_sha:
+        now = datetime.utcnow()
+        item.merge_commit_sha = result.merge_commit_sha
+        item.merged_at = now
+        item.merged_by = payload.merged_by
+        item.merge_note = payload.merge_note
+        item.post_merge_verified_at = now
+        item.post_merge_verified_by = payload.merged_by
+        if result.success:
+            item.merge_status = "merged"
+            item.post_merge_health_status = result.health_status or "healthy"
+            item.merge_error = None
+            db.commit()
+            db.refresh(item)
+            repo_safety.release_repo_lock(
+                db,
+                repo_path,
+                release_reason="merge_succeeded",
+                final_status="released",
+            )
+            return _serialize_with_debate(db, item)
+
+        # Merge SHA present but executor failure → ``merged_deployment_failed``.
+        item.merge_status = "merged_deployment_failed"
+        item.post_merge_health_status = result.health_status or "unhealthy"
+        item.merge_error = (
+            f"executor {result.error_code or 'merge_post_failed'}: "
+            f"{result.error or 'post-merge step failed'}"
+        )[:2000]
+        db.commit()
+        db.refresh(item)
+        repo_safety.release_repo_lock(
+            db,
+            repo_path,
+            release_reason=result.error_code or "merge_post_failed",
+            final_status="failed",
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Merge landed but post-merge deploy failed: "
+                f"{result.error or 'unknown error'}"
+            ),
+        )
+
+    # No merge SHA — the merge never happened. Surface a blocked_merge state.
+    reason = result.error_code or "merge_executor_failed"
+    detail_msg = result.error or "host executor reported failure"
+    _abort_no_sha(reason, f"executor {reason}: {detail_msg}")
+    raise HTTPException(
+        status_code=502 if reason == "executor_unreachable" else 500,
+        detail=f"Merge failed: {detail_msg}",
+    )
+
+
+@router.post("/{work_item_id}/complete", response_model=WorkItemResponse)
+def complete_work_item(
+    work_item_id: int,
+    payload: CompleteRequest,
+    db: Session = Depends(get_db),
+):
+    """Mark a merged Work Item as complete after post-merge verification.
+
+    Requires that a merge SHA is recorded, that the effective state is
+    ``merged``, and that the post-merge healthcheck succeeded. Records
+    completion metadata; no executor call.
+    """
+    item = _get_or_404(db, work_item_id)
+
+    if not item.merge_commit_sha:
+        raise HTTPException(
+            status_code=409,
+            detail="Work item has no merge_commit_sha; cannot mark complete.",
+        )
+
+    state = compute_effective_state(item, None)
+    if state == "complete":
+        raise HTTPException(
+            status_code=409,
+            detail="Work item is already complete.",
+        )
+    if state != "merged":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Work item is in state '{state}'; complete requires state "
+                "'merged' with a passing post-merge healthcheck."
+            ),
+        )
+
+    health = (item.post_merge_health_status or "").lower()
+    if health != "healthy":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Post-merge health status is '{item.post_merge_health_status}'; "
+                "complete requires a passing post-merge healthcheck."
+            ),
+        )
+
+    now = datetime.utcnow()
+    item.completed_at = now
+    item.completed_by = payload.completed_by
+    item.completion_note = payload.completion_note
+    db.commit()
+    db.refresh(item)
+    return _serialize_with_debate(db, item)
+
+
+@router.post("/{work_item_id}/verify-merge", response_model=WorkItemResponse)
+def verify_merge_action(
+    work_item_id: int,
+    payload: Optional[VerifyMergeRequest] = None,
+    db: Session = Depends(get_db),
+):
+    """Re-run the post-merge healthcheck after a failed post-merge deploy.
+
+    Allows the operator to fix a broken deploy (e.g. fix the base branch by
+    hand on the host) and clear ``merged_deployment_failed`` without
+    re-merging the PR. The merge SHA is preserved either way; only
+    ``post_merge_health_status`` and ``post_merge_verified_*`` move.
+    """
+    item = _get_or_404(db, work_item_id)
+
+    state = compute_effective_state(item, None)
+    if state != "merged_deployment_failed":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Work item is in state '{state}'; verify-merge requires "
+                "state 'merged_deployment_failed'."
+            ),
+        )
+
+    repo_path, _repo_name = preview_deploy.resolve_preview_repo(item)
+    # The executor's healthcheck only reads ``docker compose ps`` — it does
+    # not mutate git state, so the dashboard does not acquire the repo lock
+    # here. ``branch`` is a placeholder to satisfy the executor's request
+    # validation; the healthcheck path ignores it.
+    result = preview_deploy.call_host_executor(
+        action="healthcheck",
+        repo_path=repo_path,
+        branch=preview_deploy.REVERT_BASE_BRANCH,
+    )
+
+    verified_by = payload.verified_by if payload else None
+    now = datetime.utcnow()
+    if not result.success:
+        item.post_merge_health_status = result.health_status or "unhealthy"
+        item.merge_error = (
+            f"executor {result.error_code or 'healthcheck_failed'}: "
+            f"{result.error or 'post-merge healthcheck failed'}"
+        )[:2000]
+        db.commit()
+        db.refresh(item)
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Post-merge healthcheck still failing: "
+                f"{result.error or 'unknown error'}"
+            ),
+        )
+
+    item.merge_status = "merged"
+    item.post_merge_health_status = result.health_status or "healthy"
+    item.post_merge_verified_at = now
+    item.post_merge_verified_by = verified_by
+    item.merge_error = None
+    db.commit()
+    db.refresh(item)
     return _serialize_with_debate(db, item)
 
 

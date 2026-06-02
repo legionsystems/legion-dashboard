@@ -102,6 +102,23 @@ class WorkItem(Base):
     preview_reverted_by = Column(String(100), nullable=True)
     preview_revert_reason = Column(Text, nullable=True)
 
+    # Merge / complete metadata (slice 5). The ``merge`` action records when
+    # and how a PR landed; ``post_merge_verified_*`` carries the post-merge
+    # healthcheck result; ``complete`` records the operator's terminal
+    # acknowledgement after a clean post-merge deploy. All nullable so prior
+    # rows are unaffected.
+    merge_status = Column(String(30), nullable=True)
+    merged_at = Column(DateTime, nullable=True)
+    merged_by = Column(String(100), nullable=True)
+    merge_note = Column(Text, nullable=True)
+    merge_error = Column(Text, nullable=True)
+    post_merge_verified_at = Column(DateTime, nullable=True)
+    post_merge_verified_by = Column(String(100), nullable=True)
+    post_merge_health_status = Column(String(30), nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    completed_by = Column(String(100), nullable=True)
+    completion_note = Column(Text, nullable=True)
+
     # Archive lifecycle
     archived = Column(Boolean, nullable=False, default=False, index=True)
     archived_at = Column(DateTime, nullable=True)

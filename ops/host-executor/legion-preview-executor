@@ -58,7 +58,13 @@ ALLOWED_REPOS = {
 DEFAULT_COMPOSE_SERVICE = "app"
 
 # Action allowlist mirrors backend/app/schemas.py::ALLOWED_EXECUTOR_ACTIONS.
-ALLOWED_ACTIONS = frozenset({"deploy_preview", "revert_preview"})
+# ``merge_pr`` (slice 5) lands a certified PR and deploys the base branch.
+# ``healthcheck`` (slice 5) re-runs the post-merge container probe so the
+# dashboard's verify-merge endpoint can clear ``merged_deployment_failed``
+# without re-merging.
+ALLOWED_ACTIONS = frozenset(
+    {"deploy_preview", "revert_preview", "merge_pr", "healthcheck"}
+)
 
 # Conservative branch-name pattern: alnum, underscore, dash, dot, slash.
 # Refuses ``;``, ``&``, ``$``, spaces, etc. — defense in depth even though
@@ -69,8 +75,11 @@ BRANCH_RE = re.compile(r"^[A-Za-z0-9._/\-]{1,200}$")
 # the slow ones; ``ps`` is fast.
 GIT_FETCH_TIMEOUT_SECONDS = 120
 GIT_CHECKOUT_TIMEOUT_SECONDS = 60
+GIT_PULL_TIMEOUT_SECONDS = 120
 COMPOSE_BUILD_UP_TIMEOUT_SECONDS = 1200
 HEALTHCHECK_TIMEOUT_SECONDS = 30
+# ``gh`` CLI calls (``pr view``, ``pr merge``) for the merge_pr action.
+GH_TIMEOUT_SECONDS = 180
 
 
 log = logging.getLogger("legion-preview-executor")
@@ -181,6 +190,248 @@ def _healthcheck(repo_path: str, service: str) -> Tuple[bool, str]:
 # ---------------------------------------------------------------------------
 # Action runner
 # ---------------------------------------------------------------------------
+
+
+def _gh_pr_view(repo_path: str, pr_number: int) -> Tuple[int, dict, str]:
+    """Run ``gh pr view`` with the merge-flow fields and parse the JSON.
+
+    Returns ``(returncode, parsed_dict, stderr_or_parse_error)``. Callers
+    treat any non-zero rc or empty dict as failure. ``mergeCommit`` is
+    populated by GitHub only after the PR has been merged; pre-merge calls
+    use the other fields for validation.
+    """
+    rc, out, err = _run(
+        [
+            "gh",
+            "pr",
+            "view",
+            str(pr_number),
+            "--json",
+            "state,mergeable,baseRefName,headRefName,mergeCommit",
+        ],
+        cwd=repo_path,
+        timeout=GH_TIMEOUT_SECONDS,
+    )
+    if rc != 0:
+        return rc, {}, err
+    try:
+        data = json.loads(out or "{}")
+    except ValueError:
+        return rc, {}, "gh pr view returned non-JSON"
+    if not isinstance(data, dict):
+        return rc, {}, "gh pr view returned non-object JSON"
+    return rc, data, ""
+
+
+def _perform_merge_pr(
+    repo_path: str,
+    base_branch: str,
+    pr_number: int,
+    service: str,
+) -> dict:
+    """Execute the merge_pr action and return the response body.
+
+    Steps:
+      1. Defense-in-depth dirty check.
+      2. ``gh pr view`` (pre-merge) confirms the PR is OPEN, mergeable, and
+         that its base branch matches the operator-supplied ``base_branch``.
+      3. ``gh pr merge --merge --delete-branch`` to land the PR and clean up.
+      4. ``gh pr view`` again — immediately — to read the GitHub-canonical
+         ``mergeCommit.oid``. The SHA is captured here so every later
+         failure return can include it.
+      5. ``git checkout`` + ``git pull --ff-only`` of the base branch.
+      6. ``docker compose build`` + ``up -d`` to ship the new base.
+      7. Healthcheck.
+
+    Returns a dict mirroring the deploy_preview shape, with the merge SHA in
+    ``merge_commit_sha`` so the dashboard can stamp it. If the merge landed
+    but a later step failed (checkout, pull, build, up, healthcheck),
+    ``merge_commit_sha`` is still set so the dashboard records
+    ``merged_deployment_failed`` instead of ``blocked_merge``.
+    """
+    action = "merge_pr"
+    dirty = _git_clean(repo_path)
+    if dirty:
+        return {
+            "success": False,
+            "action": action,
+            "error": f"dirty repo: {dirty}",
+            "error_code": "executor_dirty_repo",
+        }
+
+    rc, pr_info, gh_err = _gh_pr_view(repo_path, pr_number)
+    if rc != 0 or not pr_info:
+        return {
+            "success": False,
+            "action": action,
+            "error": f"gh pr view failed (rc={rc}): {gh_err.strip()[:300]}",
+            "error_code": "executor_gh_pr_view_failed",
+        }
+    state = str(pr_info.get("state") or "").upper()
+    if state != "OPEN":
+        return {
+            "success": False,
+            "action": action,
+            "error": f"PR #{pr_number} is not OPEN (state={state})",
+            "error_code": "executor_pr_not_open",
+        }
+    mergeable = str(pr_info.get("mergeable") or "").upper()
+    if mergeable not in ("MERGEABLE", "UNKNOWN"):
+        return {
+            "success": False,
+            "action": action,
+            "error": f"PR #{pr_number} mergeable={mergeable}",
+            "error_code": "executor_pr_not_mergeable",
+        }
+    actual_base = str(pr_info.get("baseRefName") or "")
+    if actual_base != base_branch:
+        return {
+            "success": False,
+            "action": action,
+            "error": (
+                f"PR #{pr_number} base mismatch: expected {base_branch}, "
+                f"got {actual_base}"
+            ),
+            "error_code": "executor_pr_base_mismatch",
+        }
+
+    rc, _out, err = _run(
+        ["gh", "pr", "merge", str(pr_number), "--merge", "--delete-branch"],
+        cwd=repo_path,
+        timeout=GH_TIMEOUT_SECONDS,
+    )
+    if rc != 0:
+        return {
+            "success": False,
+            "action": action,
+            "error": f"gh pr merge failed (rc={rc}): {err.strip()[:300]}",
+            "error_code": "executor_gh_pr_merge_failed",
+        }
+
+    # Merge has landed on GitHub. Capture the SHA NOW (before any local
+    # checkout/pull) so every subsequent failure return carries it. The
+    # dashboard distinguishes ``blocked_merge`` (no SHA, merge never
+    # happened) from ``merged_deployment_failed`` (SHA present, post-merge
+    # work failed) using this field.
+    rc, post_info, gh_err = _gh_pr_view(repo_path, pr_number)
+    if rc != 0 or not post_info:
+        return {
+            "success": False,
+            "action": action,
+            "error": f"gh pr view (post-merge) failed (rc={rc}): {gh_err.strip()[:300]}",
+            "error_code": "executor_gh_pr_view_failed",
+        }
+    merge_commit = post_info.get("mergeCommit") or {}
+    merge_sha = (
+        str(merge_commit.get("oid") or "").strip() if isinstance(merge_commit, dict) else ""
+    )
+    if not merge_sha:
+        return {
+            "success": False,
+            "action": action,
+            "error": "gh pr view returned no mergeCommit.oid after merge",
+            "error_code": "executor_gh_pr_view_failed",
+        }
+
+    rc, _out, err = _run(
+        ["git", "-C", repo_path, "checkout", base_branch],
+        cwd=repo_path,
+        timeout=GIT_CHECKOUT_TIMEOUT_SECONDS,
+    )
+    if rc != 0:
+        return {
+            "success": False,
+            "action": action,
+            "merge_commit_sha": merge_sha,
+            "error": f"git checkout {base_branch} failed (rc={rc}): {err.strip()[:300]}",
+            "error_code": "executor_git_checkout_failed",
+        }
+
+    rc, _out, err = _run(
+        ["git", "-C", repo_path, "pull", "--ff-only", "origin", base_branch],
+        cwd=repo_path,
+        timeout=GIT_PULL_TIMEOUT_SECONDS,
+    )
+    if rc != 0:
+        return {
+            "success": False,
+            "action": action,
+            "merge_commit_sha": merge_sha,
+            "error": f"git pull failed (rc={rc}): {err.strip()[:300]}",
+            "error_code": "executor_git_pull_failed",
+        }
+
+    rc, _out, err = _run(
+        ["docker", "compose", "build", service],
+        cwd=repo_path,
+        timeout=COMPOSE_BUILD_UP_TIMEOUT_SECONDS,
+    )
+    if rc != 0:
+        return {
+            "success": False,
+            "action": action,
+            "merge_commit_sha": merge_sha,
+            "error": f"docker compose build failed (rc={rc}): {err.strip()[:300]}",
+            "error_code": "executor_compose_build_failed",
+        }
+
+    rc, _out, err = _run(
+        ["docker", "compose", "up", "-d", service],
+        cwd=repo_path,
+        timeout=COMPOSE_BUILD_UP_TIMEOUT_SECONDS,
+    )
+    if rc != 0:
+        return {
+            "success": False,
+            "action": action,
+            "merge_commit_sha": merge_sha,
+            "error": f"docker compose up failed (rc={rc}): {err.strip()[:300]}",
+            "error_code": "executor_compose_up_failed",
+        }
+
+    healthy, health_msg = _healthcheck(repo_path, service)
+    if not healthy:
+        return {
+            "success": False,
+            "action": action,
+            "merge_commit_sha": merge_sha,
+            "health_status": "unhealthy",
+            "error": f"healthcheck failed: {health_msg}",
+            "error_code": "executor_healthcheck_failed",
+        }
+
+    return {
+        "success": True,
+        "action": action,
+        "merge_commit_sha": merge_sha,
+        "commit_sha": merge_sha,
+        "branch": base_branch,
+        "health_status": "healthy",
+    }
+
+
+def _perform_healthcheck_only(repo_path: str, service: str) -> dict:
+    """Run only the ``docker compose ps`` healthcheck and return the result.
+
+    Used by the dashboard's ``verify-merge`` endpoint after the operator
+    has manually fixed a failed post-merge deploy. No git or compose state
+    is mutated; the executor just reports whether the service is running.
+    """
+    action = "healthcheck"
+    healthy, health_msg = _healthcheck(repo_path, service)
+    if not healthy:
+        return {
+            "success": False,
+            "action": action,
+            "health_status": "unhealthy",
+            "error": f"healthcheck failed: {health_msg}",
+            "error_code": "executor_healthcheck_failed",
+        }
+    return {
+        "success": True,
+        "action": action,
+        "health_status": "healthy",
+    }
 
 
 def _perform_action(action: str, repo_path: str, branch: str, service: str) -> dict:
@@ -370,6 +621,8 @@ class ExecutorHandler(BaseHTTPRequestHandler):
         repo_path = payload.get("repo_path")
         branch = payload.get("branch")
         service = payload.get("service") or DEFAULT_COMPOSE_SERVICE
+        pr_number = payload.get("pr_number")
+        base_branch = payload.get("base_branch")
 
         if action not in ALLOWED_ACTIONS:
             return _json_response(self, 400, {
@@ -397,8 +650,35 @@ class ExecutorHandler(BaseHTTPRequestHandler):
                 "error_code": "executor_repo_missing",
             })
 
-        log.info("executor request: action=%s repo=%s branch=%s", action, repo_path, branch)
-        body = _perform_action(action, repo_path, branch, service)
+        # Per-action dispatch. ``merge_pr`` needs the operator-supplied
+        # ``pr_number`` and ``base_branch``; ``healthcheck`` skips git/compose
+        # mutations entirely; ``deploy_preview`` / ``revert_preview`` use the
+        # branch-checkout + build flow.
+        if action == "merge_pr":
+            if not isinstance(pr_number, int) or isinstance(pr_number, bool) or pr_number <= 0:
+                return _json_response(self, 400, {
+                    "error": "pr_number must be a positive integer for merge_pr",
+                    "error_code": "executor_bad_pr_number",
+                })
+            if not isinstance(base_branch, str) or not BRANCH_RE.match(base_branch):
+                return _json_response(self, 400, {
+                    "error": "base_branch failed validation",
+                    "error_code": "executor_bad_base_branch",
+                })
+            log.info(
+                "executor request: action=%s repo=%s pr=%s base=%s",
+                action, repo_path, pr_number, base_branch,
+            )
+            body = _perform_merge_pr(repo_path, base_branch, pr_number, service)
+        elif action == "healthcheck":
+            log.info("executor request: action=%s repo=%s", action, repo_path)
+            body = _perform_healthcheck_only(repo_path, service)
+        else:
+            log.info(
+                "executor request: action=%s repo=%s branch=%s",
+                action, repo_path, branch,
+            )
+            body = _perform_action(action, repo_path, branch, service)
         status = 200 if body.get("success") else 500
         return _json_response(self, status, body)
 

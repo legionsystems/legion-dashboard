@@ -12,6 +12,8 @@ import {
   releaseRepoLock,
   deployPreview,
   revertPreview,
+  mergeWorkItem,
+  completeWorkItem,
   ApiError,
 } from "../api/client.js";
 import { StatusBadge, TypeBadge } from "../components/badges.jsx";
@@ -45,6 +47,15 @@ const PREVIEW_DEPLOY_SOURCE_STATES = new Set([
   "review_failed",
   "needs_rework",
 ]);
+
+// Effective states from which the Merge button is shown. The backend also
+// enforces operator_certified AND ready_to_merge as a hard gate; the UI is
+// stricter here so a half-certified item does not advertise Merge.
+const MERGE_SOURCE_STATES = new Set(["ready_to_merge", "certified", "blocked_merge"]);
+
+// WI #002 was merged/completed before the merge/complete actions existed.
+// Hide the new buttons for it so operators do not accidentally re-merge.
+const PRE_SLICE5_LANDED_IDS = new Set([2]);
 
 const CERTIFICATION_ACTIONS = {
   certify: {
@@ -204,6 +215,13 @@ export default function WorkItemDetail() {
   const [previewBusy, setPreviewBusy] = useState(null); // 'deploy' | 'revert' | null
   const [showRevertInput, setShowRevertInput] = useState(false);
   const [revertReason, setRevertReason] = useState("");
+  const [showMergeModal, setShowMergeModal] = useState(false);
+  const [mergeBaseBranch, setMergeBaseBranch] = useState("");
+  const [mergeNote, setMergeNote] = useState("");
+  const [mergeBusy, setMergeBusy] = useState(false);
+  const [completeBusy, setCompleteBusy] = useState(false);
+  const [completionNote, setCompletionNote] = useState("");
+  const [showCompleteInput, setShowCompleteInput] = useState(false);
 
   function refresh() {
     setError(null);
@@ -351,6 +369,49 @@ export default function WorkItemDetail() {
       .finally(() => setPreviewBusy(null));
   }
 
+  function runMerge() {
+    if (!item || !mergeBaseBranch.trim()) return;
+    setMergeBusy(true);
+    setGateError(null);
+    setError(null);
+    mergeWorkItem(id, {
+      prNumber: item.pr_number,
+      branch: item.branch_name,
+      baseBranch: mergeBaseBranch.trim(),
+      mergeNote: mergeNote.trim() || null,
+    })
+      .then(() => {
+        setShowMergeModal(false);
+        setMergeBaseBranch("");
+        setMergeNote("");
+        refresh();
+      })
+      .catch((err) => {
+        if (err instanceof ApiError && err.status === 409 && err.body) {
+          const detail = err.body.detail ?? err.body;
+          if (detail && typeof detail === "object" && detail.blocker_code) {
+            setGateError(detail);
+            return;
+          }
+        }
+        setError(err.message);
+      })
+      .finally(() => setMergeBusy(false));
+  }
+
+  function runComplete() {
+    setCompleteBusy(true);
+    setError(null);
+    completeWorkItem(id, { completionNote: completionNote.trim() || null })
+      .then(() => {
+        setShowCompleteInput(false);
+        setCompletionNote("");
+        refresh();
+      })
+      .catch((err) => setError(err.message))
+      .finally(() => setCompleteBusy(false));
+  }
+
   function submitCertificationAction(text) {
     if (!certAction) return;
     setCertBusy(true);
@@ -389,6 +450,31 @@ export default function WorkItemDetail() {
     hasPreviewMetadata && previewStateAllowsDeploy && !item.preview_deployed;
   const canRevertPreview =
     !!item && item.preview_deployed === true && previewStateAllowsDeploy;
+
+  // Merge / complete (slice 5). Hide for WI-002 (pre-slice-5 landed) and
+  // anything missing the PR metadata the backend requires. The backend
+  // additionally enforces operator_certified AND ready_to_merge; the UI
+  // surfaces the button only when both flags are true so a half-certified
+  // item does not get a misleading control.
+  const itemId = item ? Number(item.id) : null;
+  const isPreSlice5Landed =
+    itemId != null && PRE_SLICE5_LANDED_IDS.has(itemId);
+  const hasMergeMetadata =
+    !!item && !!item.branch_name && item.pr_number != null;
+  const canMerge =
+    !!item &&
+    !isPreSlice5Landed &&
+    hasMergeMetadata &&
+    item.operator_certified === true &&
+    item.ready_to_merge === true &&
+    MERGE_SOURCE_STATES.has(item.effective_state);
+  const canComplete =
+    !!item &&
+    !isPreSlice5Landed &&
+    item.effective_state === "merged" &&
+    !!item.merge_commit_sha &&
+    (item.post_merge_health_status || "").toLowerCase() === "healthy";
+  const isComplete = !!item && item.effective_state === "complete";
 
   if (error && !item) {
     return (
@@ -542,8 +628,159 @@ export default function WorkItemDetail() {
               REVERT PREVIEW
             </Button>
           )}
+          {canMerge && (
+            <Button
+              variant="success"
+              onClick={() => setShowMergeModal(true)}
+              title="Merge the PR and deploy the base branch"
+            >
+              MERGE
+            </Button>
+          )}
+          {canComplete && !showCompleteInput && (
+            <Button
+              variant="success"
+              onClick={() => setShowCompleteInput(true)}
+              title="Mark this work item as complete"
+            >
+              COMPLETE
+            </Button>
+          )}
+          {isComplete && (
+            <span
+              className="px-2 py-1 text-xs font-mono uppercase tracking-telemetry text-st-completed border border-st-completed"
+              title="Work item is complete"
+            >
+              ✓ COMPLETE
+            </span>
+          )}
         </div>
       </div>
+
+      {canComplete && showCompleteInput && (
+        <div className="border border-edge bg-surface px-4 py-3 space-y-2">
+          <div className="label-tel-strong text-fg-primary">
+            [ COMPLETE WORK ITEM — POST-MERGE VERIFIED ]
+          </div>
+          <textarea
+            value={completionNote}
+            onChange={(e) => setCompletionNote(e.target.value)}
+            placeholder="Optional completion note (recorded on the work item)"
+            rows={3}
+            disabled={completeBusy}
+            className="w-full px-3 py-2 text-sm bg-canvas border border-edge outline-none focus:border-edge-strong font-mono disabled:opacity-60"
+          />
+          <div className="flex items-center gap-2">
+            <Button
+              variant="success"
+              onClick={runComplete}
+              disabled={completeBusy}
+            >
+              {completeBusy ? "COMPLETING…" : "CONFIRM COMPLETE"}
+            </Button>
+            <Button
+              variant="ghost"
+              onClick={() => {
+                setShowCompleteInput(false);
+                setCompletionNote("");
+              }}
+              disabled={completeBusy}
+            >
+              CANCEL
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {showMergeModal && item && (
+        <div
+          className="fixed inset-0 z-50 flex items-end md:items-center justify-center bg-canvas/80 backdrop-blur-sm p-4"
+          onClick={mergeBusy ? undefined : () => setShowMergeModal(false)}
+        >
+          <div
+            className="w-full max-w-lg border border-edge-strong bg-surface shadow-inset"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="merge-modal-headline"
+          >
+            <header className="flex items-center justify-between gap-3 border-b border-edge px-4 py-3">
+              <div>
+                <div className="label-tel-strong text-fg-primary">[ CONFIRM ]</div>
+                <h2
+                  id="merge-modal-headline"
+                  className="mt-1 font-display text-lg font-bold tracking-tight"
+                >
+                  MERGE WORK ITEM
+                </h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowMergeModal(false)}
+                disabled={mergeBusy}
+                className="font-mono text-fg-muted hover:text-fg-primary disabled:opacity-40"
+                aria-label="Close"
+              >
+                ✕
+              </button>
+            </header>
+
+            <div className="px-4 py-4 space-y-3">
+              <p className="text-sm text-fg-secondary">
+                This will merge PR #{item.pr_number} ({item.branch_name})
+                into the supplied base branch via the host executor, then
+                rebuild and bring up the dashboard service. The merge SHA
+                is recorded on success.
+              </p>
+              <div className="space-y-1">
+                <label className="label-tel block" htmlFor="merge-base-input">
+                  EXPECTED BASE BRANCH (REQUIRED)
+                </label>
+                <input
+                  id="merge-base-input"
+                  type="text"
+                  value={mergeBaseBranch}
+                  onChange={(e) => setMergeBaseBranch(e.target.value)}
+                  placeholder="e.g. main"
+                  disabled={mergeBusy}
+                  className="w-full px-3 py-2 text-sm bg-canvas border border-edge outline-none focus:border-edge-strong font-mono disabled:opacity-60"
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="label-tel block" htmlFor="merge-note-input">
+                  MERGE NOTE (OPTIONAL)
+                </label>
+                <textarea
+                  id="merge-note-input"
+                  value={mergeNote}
+                  onChange={(e) => setMergeNote(e.target.value)}
+                  placeholder="Optional note (recorded on the work item)"
+                  rows={3}
+                  disabled={mergeBusy}
+                  className="w-full px-3 py-2 text-sm bg-canvas border border-edge outline-none focus:border-edge-strong font-mono disabled:opacity-60"
+                />
+              </div>
+            </div>
+
+            <footer className="flex items-center justify-end gap-2 border-t border-edge px-4 py-3">
+              <Button
+                variant="ghost"
+                onClick={() => setShowMergeModal(false)}
+                disabled={mergeBusy}
+              >
+                CANCEL
+              </Button>
+              <Button
+                variant="success"
+                onClick={runMerge}
+                disabled={mergeBusy || !mergeBaseBranch.trim()}
+              >
+                {mergeBusy ? "MERGING…" : "CONFIRM MERGE"}
+              </Button>
+            </footer>
+          </div>
+        </div>
+      )}
 
       {canRevertPreview && showRevertInput && (
         <div className="border border-edge bg-surface px-4 py-3 space-y-2">
@@ -789,6 +1026,78 @@ export default function WorkItemDetail() {
               </div>
               <p className="whitespace-pre-wrap font-mono text-fg-primary">
                 {item.preview_error}
+              </p>
+            </div>
+          )}
+        </Panel>
+      )}
+
+      {(item.merge_commit_sha ||
+        item.merge_status ||
+        item.merge_error ||
+        item.completed_at) && (
+        <Panel title="MERGE / COMPLETE" subtitle="// slice 5 terminal state">
+          <div className="grid grid-cols-2 gap-3">
+            <FieldRow
+              label="MERGE STATUS"
+              value={item.merge_status?.toUpperCase() || "—"}
+              mono
+            />
+            <FieldRow
+              label="POST-MERGE HEALTH"
+              value={item.post_merge_health_status?.toUpperCase() || "—"}
+              mono
+            />
+            <FieldRow
+              label="MERGE SHA"
+              value={item.merge_commit_sha ? item.merge_commit_sha.slice(0, 12) : "—"}
+              mono
+            />
+            <FieldRow
+              label="MERGED AT"
+              value={formatTime(item.merged_at) || "—"}
+              mono
+            />
+            <FieldRow
+              label="MERGED BY"
+              value={item.merged_by || "—"}
+              mono
+            />
+            <FieldRow
+              label="VERIFIED AT"
+              value={formatTime(item.post_merge_verified_at) || "—"}
+              mono
+            />
+            <FieldRow
+              label="COMPLETED AT"
+              value={formatTime(item.completed_at) || "—"}
+              mono
+            />
+            <FieldRow
+              label="COMPLETED BY"
+              value={item.completed_by || "—"}
+              mono
+            />
+          </div>
+          {item.merge_note && (
+            <div className="mt-3 text-xs text-fg-muted border border-edge bg-canvas/50 p-3">
+              <div className="label-tel mb-1">MERGE NOTE</div>
+              <p className="whitespace-pre-wrap font-mono">{item.merge_note}</p>
+            </div>
+          )}
+          {item.completion_note && (
+            <div className="mt-3 text-xs text-fg-muted border border-edge bg-canvas/50 p-3">
+              <div className="label-tel mb-1">COMPLETION NOTE</div>
+              <p className="whitespace-pre-wrap font-mono">{item.completion_note}</p>
+            </div>
+          )}
+          {item.merge_error && (
+            <div className="mt-3 text-xs border border-st-blocked bg-canvas/80 p-3">
+              <div className="label-tel-strong mb-1 text-st-blocked">
+                MERGE ERROR
+              </div>
+              <p className="whitespace-pre-wrap font-mono text-fg-primary">
+                {item.merge_error}
               </p>
             </div>
           )}
