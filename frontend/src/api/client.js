@@ -110,3 +110,20 @@ export function getActiveRepoLocks() {
 export function releaseRepoLock(lockId) {
   return deleteRequest(`/repo-locks/${lockId}`);
 }
+
+// Preview deployment / revert (slice 4). Both endpoints return the updated
+// Work Item, including the new ``preview_*`` metadata fields.
+export function deployPreview(id, deployedBy) {
+  const body = deployedBy != null && deployedBy !== ""
+    ? { deployed_by: deployedBy }
+    : {};
+  return postJson(`/work-items/${id}/deploy-preview`, body);
+}
+
+export function revertPreview(id, reason, revertedBy) {
+  const body = { reason };
+  if (revertedBy != null && revertedBy !== "") {
+    body.reverted_by = revertedBy;
+  }
+  return postJson(`/work-items/${id}/revert-preview`, body);
+}

@@ -108,6 +108,21 @@ class WorkItemResponse(WorkItemBase):
     changes_requested_by: Optional[str] = None
     change_request: Optional[str] = None
 
+    # Preview deployment metadata (slice 4). Populated by the
+    # ``deploy-preview`` action and cleared/stamped by ``revert-preview``.
+    preview_status: Optional[str] = None
+    preview_url: Optional[str] = None
+    preview_branch: Optional[str] = None
+    preview_pr_number: Optional[int] = None
+    preview_commit_sha: Optional[str] = None
+    preview_deployed_at: Optional[datetime] = None
+    preview_deployed_by: Optional[str] = None
+    preview_health_status: Optional[str] = None
+    preview_error: Optional[str] = None
+    preview_reverted_at: Optional[datetime] = None
+    preview_reverted_by: Optional[str] = None
+    preview_revert_reason: Optional[str] = None
+
     # Archive lifecycle fields
     archived: bool = False
     archived_at: Optional[datetime] = None
@@ -852,6 +867,40 @@ class LockReleaseRequest(BaseModel):
     """Operator/system request to release a repo lock."""
 
     release_reason: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Preview deployment / revert schemas (slice 4)
+# ---------------------------------------------------------------------------
+
+
+class DeployPreviewRequest(BaseModel):
+    """Operator-initiated request to deploy a Work Item's PR as a preview.
+
+    The router resolves the branch, PR, and target repo from the Work Item
+    itself; the operator only supplies optional attribution. ``deployed_by``
+    is recorded in ``preview_deployed_by`` so the audit trail names a human.
+    """
+
+    deployed_by: Optional[str] = None
+
+
+class RevertPreviewRequest(BaseModel):
+    """Operator-initiated request to revert a deployed preview.
+
+    ``reason`` is required so reverts always carry an explanation in the
+    audit trail. ``reverted_by`` is optional attribution.
+    """
+
+    reason: str
+    reverted_by: Optional[str] = None
+
+    @field_validator("reason")
+    @classmethod
+    def _reason_nonempty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("reason must not be empty")
+        return v
 
 
 # Resolve the forward reference from WorkItemResponse -> DebateRunSummary now

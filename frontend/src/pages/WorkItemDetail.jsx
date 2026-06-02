@@ -10,6 +10,8 @@ import {
   rejectWorkItemWithChanges,
   getActiveRepoLocks,
   releaseRepoLock,
+  deployPreview,
+  revertPreview,
   ApiError,
 } from "../api/client.js";
 import { StatusBadge, TypeBadge } from "../components/badges.jsx";
@@ -28,6 +30,20 @@ const CERTIFICATION_SOURCE_STATES = new Set([
   "in_review",
   "preview_ready",
   "code_reviewed",
+]);
+
+// Effective states from which preview deploy is allowed. Mirrors backend
+// ``preview_deploy._DEPLOY_PREVIEW_SOURCE_STATES``. The button is hidden for
+// any state outside this set — including merged/certified/archived which the
+// backend also flatly refuses.
+const PREVIEW_DEPLOY_SOURCE_STATES = new Set([
+  "in_review",
+  "preview_pending",
+  "preview_ready",
+  "code_reviewed",
+  "changes_requested",
+  "review_failed",
+  "needs_rework",
 ]);
 
 const CERTIFICATION_ACTIONS = {
@@ -185,6 +201,9 @@ export default function WorkItemDetail() {
   const [repoLocks, setRepoLocks] = useState([]);
   const [gateError, setGateError] = useState(null);
   const [releasingLockId, setReleasingLockId] = useState(null);
+  const [previewBusy, setPreviewBusy] = useState(null); // 'deploy' | 'revert' | null
+  const [showRevertInput, setShowRevertInput] = useState(false);
+  const [revertReason, setRevertReason] = useState("");
 
   function refresh() {
     setError(null);
@@ -289,6 +308,49 @@ export default function WorkItemDetail() {
       .finally(() => setBuilderBusy(false));
   }
 
+  function runDeployPreview() {
+    setPreviewBusy("deploy");
+    setGateError(null);
+    setError(null);
+    deployPreview(id, null)
+      .then(() => refresh())
+      .catch((err) => {
+        if (err instanceof ApiError && err.status === 409 && err.body) {
+          const detail = err.body.detail ?? err.body;
+          if (detail && typeof detail === "object" && detail.blocker_code) {
+            setGateError(detail);
+            return;
+          }
+        }
+        setError(err.message);
+      })
+      .finally(() => setPreviewBusy(null));
+  }
+
+  function runRevertPreview() {
+    if (!revertReason.trim()) return;
+    setPreviewBusy("revert");
+    setGateError(null);
+    setError(null);
+    revertPreview(id, revertReason.trim(), null)
+      .then(() => {
+        setShowRevertInput(false);
+        setRevertReason("");
+        refresh();
+      })
+      .catch((err) => {
+        if (err instanceof ApiError && err.status === 409 && err.body) {
+          const detail = err.body.detail ?? err.body;
+          if (detail && typeof detail === "object" && detail.blocker_code) {
+            setGateError(detail);
+            return;
+          }
+        }
+        setError(err.message);
+      })
+      .finally(() => setPreviewBusy(null));
+  }
+
   function submitCertificationAction(text) {
     if (!certAction) return;
     setCertBusy(true);
@@ -313,6 +375,20 @@ export default function WorkItemDetail() {
   const canStartBuildType = !blockedTypes.has(item?.type?.toLowerCase());
   const canCertify =
     !!item && CERTIFICATION_SOURCE_STATES.has(item.effective_state);
+
+  // Preview deploy is shown only when the Work Item has the branch/PR
+  // metadata the backend requires AND its effective state allows a deploy.
+  // Once deployed, the Revert button replaces Deploy. Both controls stay
+  // hidden for merged/certified/ready_to_merge/archived items — the
+  // backend would 409 anyway, and the UI should not advertise them.
+  const hasPreviewMetadata =
+    !!item && !!item.branch_name && item.pr_number != null;
+  const previewStateAllowsDeploy =
+    !!item && PREVIEW_DEPLOY_SOURCE_STATES.has(item.effective_state);
+  const canDeployPreview =
+    hasPreviewMetadata && previewStateAllowsDeploy && !item.preview_deployed;
+  const canRevertPreview =
+    !!item && item.preview_deployed === true && previewStateAllowsDeploy;
 
   if (error && !item) {
     return (
@@ -446,8 +522,63 @@ export default function WorkItemDetail() {
               </Button>
             </>
           )}
+          {canDeployPreview && (
+            <Button
+              variant="success"
+              onClick={runDeployPreview}
+              disabled={previewBusy === "deploy"}
+              title="Build and bring up this PR branch on the compose stack"
+            >
+              {previewBusy === "deploy" ? "DEPLOYING…" : "DEPLOY PREVIEW"}
+            </Button>
+          )}
+          {canRevertPreview && !showRevertInput && (
+            <Button
+              variant="danger"
+              onClick={() => setShowRevertInput(true)}
+              disabled={previewBusy === "revert"}
+              title="Revert the preview back to the project's base branch"
+            >
+              REVERT PREVIEW
+            </Button>
+          )}
         </div>
       </div>
+
+      {canRevertPreview && showRevertInput && (
+        <div className="border border-edge bg-surface px-4 py-3 space-y-2">
+          <div className="label-tel-strong text-fg-primary">
+            [ REVERT PREVIEW — REASON REQUIRED ]
+          </div>
+          <textarea
+            value={revertReason}
+            onChange={(e) => setRevertReason(e.target.value)}
+            placeholder="Why are you reverting? (recorded on the work item)"
+            rows={3}
+            disabled={previewBusy === "revert"}
+            className="w-full px-3 py-2 text-sm bg-canvas border border-edge outline-none focus:border-edge-strong font-mono disabled:opacity-60"
+          />
+          <div className="flex items-center gap-2">
+            <Button
+              variant="danger"
+              onClick={runRevertPreview}
+              disabled={previewBusy === "revert" || !revertReason.trim()}
+            >
+              {previewBusy === "revert" ? "REVERTING…" : "CONFIRM REVERT"}
+            </Button>
+            <Button
+              variant="ghost"
+              onClick={() => {
+                setShowRevertInput(false);
+                setRevertReason("");
+              }}
+              disabled={previewBusy === "revert"}
+            >
+              CANCEL
+            </Button>
+          </div>
+        </div>
+      )}
 
       {error && item && <ErrorBanner message={error} />}
 
@@ -583,6 +714,84 @@ export default function WorkItemDetail() {
               Warning: Ready + assigned tasks may auto-start via Hermes orchestration.
             </p>
           </div>
+        </Panel>
+      )}
+
+      {(item.preview_status ||
+        item.preview_deployed ||
+        item.preview_reverted_at ||
+        item.preview_error) && (
+        <Panel title="PREVIEW DEPLOYMENT" subtitle="// branch-on-compose state">
+          <div className="grid grid-cols-2 gap-3">
+            <FieldRow
+              label="STATUS"
+              value={item.preview_status?.toUpperCase() || "—"}
+              mono
+            />
+            <FieldRow
+              label="HEALTH"
+              value={item.preview_health_status?.toUpperCase() || "—"}
+              mono
+            />
+            <FieldRow
+              label="BRANCH"
+              value={item.preview_branch || "—"}
+              mono
+            />
+            <FieldRow
+              label="PR #"
+              value={item.preview_pr_number ?? "—"}
+              mono
+            />
+            <FieldRow
+              label="COMMIT"
+              value={item.preview_commit_sha ? item.preview_commit_sha.slice(0, 8) : "—"}
+              mono
+            />
+            <FieldRow
+              label="DEPLOYED AT"
+              value={formatTime(item.preview_deployed_at) || "—"}
+              mono
+            />
+            <FieldRow
+              label="DEPLOYED BY"
+              value={item.preview_deployed_by || "—"}
+              mono
+            />
+            <FieldRow
+              label="URL"
+              value={item.preview_url || "—"}
+              mono
+            />
+            <FieldRow
+              label="REVERTED AT"
+              value={formatTime(item.preview_reverted_at) || "—"}
+              mono
+            />
+            <FieldRow
+              label="REVERTED BY"
+              value={item.preview_reverted_by || "—"}
+              mono
+            />
+          </div>
+          {item.preview_revert_reason && (
+            <div className="mt-3 text-xs text-fg-muted border border-edge bg-canvas/50 p-3">
+              <div className="label-tel mb-1">REVERT REASON</div>
+              <p className="whitespace-pre-wrap font-mono">
+                {item.preview_revert_reason}
+              </p>
+            </div>
+          )}
+          {item.preview_error && (
+            <div className="mt-3 text-xs border border-st-blocked bg-canvas/80 p-3">
+              <div className="label-tel-strong mb-1 text-st-blocked">
+                PREVIEW ERROR
+              </div>
+              <p className="whitespace-pre-wrap font-mono text-fg-primary">
+                {item.preview_error}
+              </p>
+            </div>
+          )}
         </Panel>
       )}
 
