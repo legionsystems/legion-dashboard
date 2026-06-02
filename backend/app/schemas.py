@@ -785,6 +785,75 @@ class ModelHostCapabilityTestResponse(BaseModel):
     selected_model: Optional[str] = None
 
 
+# ---------------------------------------------------------------------------
+# Repo safety / lock schemas (slice 3)
+# ---------------------------------------------------------------------------
+
+
+class RepoLockResponse(BaseModel):
+    """Serialized RepoLock row."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    repo_path: str
+    repo_name: str
+    work_item_id: Optional[int] = None
+    task_id: Optional[str] = None
+    branch_name: str
+    commit_sha: str
+    lock_owner: Optional[str] = None
+    lock_status: str
+    started_at: datetime
+    released_at: Optional[datetime] = None
+    release_reason: Optional[str] = None
+
+
+class RepoSafetyResult(BaseModel):
+    """Outcome of inspecting a repo before starting a builder run."""
+
+    repo_path: str
+    is_clean: bool
+    dirty_files: List[str] = []
+    staged_files: List[str] = []
+    untracked_files: List[str] = []
+    current_branch: Optional[str] = None
+    current_commit: Optional[str] = None
+    # When ``is_clean`` is False, ``blocker_code`` carries the machine-readable
+    # gate reason (e.g. "blocked_dirty_repo") and ``blocker_message`` carries
+    # a human-readable summary suitable for UI display.
+    blocker_code: Optional[str] = None
+    blocker_message: Optional[str] = None
+
+
+class LockAcquireRequest(BaseModel):
+    """Internal/manual request to acquire a repo lock."""
+
+    repo_path: str
+    repo_name: str
+    branch_name: str
+    commit_sha: str
+    work_item_id: Optional[int] = None
+    task_id: Optional[str] = None
+    lock_owner: Optional[str] = None
+
+
+class LockAcquireResponse(BaseModel):
+    """Result of a lock-acquire attempt."""
+
+    acquired: bool
+    lock: Optional[RepoLockResponse] = None
+    existing_lock: Optional[RepoLockResponse] = None
+    blocker_code: Optional[str] = None
+    blocker_message: Optional[str] = None
+
+
+class LockReleaseRequest(BaseModel):
+    """Operator/system request to release a repo lock."""
+
+    release_reason: Optional[str] = None
+
+
 # Resolve the forward reference from WorkItemResponse -> DebateRunSummary now
 # that both classes are defined.
 WorkItemResponse.model_rebuild()

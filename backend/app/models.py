@@ -539,6 +539,31 @@ class ModelSyncRun(Base):
     completed_at = Column(DateTime, nullable=True)
 
 
+class RepoLock(Base):
+    """Active or historical lock held by a builder run on a target repo.
+
+    The lock is keyed by ``repo_path`` which is unique — only one active lock
+    can exist per repo at a time. When ``lock_status`` is "active" the row
+    represents an in-flight build; ``release_repo_lock`` transitions it to
+    "released" (or "failed"/"aborted") and stamps ``released_at``.
+    """
+
+    __tablename__ = "repo_locks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    repo_path = Column(String(500), nullable=False, unique=True)
+    repo_name = Column(String(100), nullable=False)
+    work_item_id = Column(Integer, nullable=True)
+    task_id = Column(String(100), nullable=True)
+    branch_name = Column(String(100), nullable=False)
+    commit_sha = Column(String(40), nullable=False)
+    lock_owner = Column(String(100), nullable=True)
+    lock_status = Column(String(20), nullable=False, default="active")
+    started_at = Column(DateTime, server_default=func.now(), nullable=False)
+    released_at = Column(DateTime, nullable=True)
+    release_reason = Column(String(200), nullable=True)
+
+
 class AppActionLog(Base):
     __tablename__ = "app_action_logs"
 

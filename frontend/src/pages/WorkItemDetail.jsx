@@ -8,6 +8,9 @@ import {
   certifyWorkItem,
   rejectWorkItem,
   rejectWorkItemWithChanges,
+  getActiveRepoLocks,
+  releaseRepoLock,
+  ApiError,
 } from "../api/client.js";
 import { StatusBadge, TypeBadge } from "../components/badges.jsx";
 import { Panel, FieldRow } from "../components/panel.jsx";
@@ -179,6 +182,9 @@ export default function WorkItemDetail() {
   const [attachments, setAttachments] = useState([]);
   const [certAction, setCertAction] = useState(null); // 'certify' | 'reject' | 'reject_with_changes' | null
   const [certBusy, setCertBusy] = useState(false);
+  const [repoLocks, setRepoLocks] = useState([]);
+  const [gateError, setGateError] = useState(null);
+  const [releasingLockId, setReleasingLockId] = useState(null);
 
   function refresh() {
     setError(null);
@@ -193,6 +199,9 @@ export default function WorkItemDetail() {
       .catch(() => undefined);
     getJson(`/work-items/${id}/attachments`)
       .then(setAttachments)
+      .catch(() => undefined);
+    getActiveRepoLocks()
+      .then(setRepoLocks)
       .catch(() => undefined);
   }
 
@@ -241,13 +250,34 @@ export default function WorkItemDetail() {
 
   function startBuild() {
     setBuilderBusy(true);
+    setGateError(null);
     postJson(`/builder/work-items/${id}/start-build`, {})
       .then((data) => {
         setBuilderTask(data);
         refresh();
       })
-      .catch((err) => setError(err.message))
+      .catch((err) => {
+        if (err instanceof ApiError && err.status === 409) {
+          const detail = err.body && err.body.detail ? err.body.detail : err.body;
+          if (detail && typeof detail === "object" && detail.blocker_code) {
+            setGateError(detail);
+            return;
+          }
+        }
+        setError(err.message);
+      })
       .finally(() => setBuilderBusy(false));
+  }
+
+  function clearLock(lockId) {
+    setReleasingLockId(lockId);
+    releaseRepoLock(lockId)
+      .then(() => {
+        setGateError(null);
+        refresh();
+      })
+      .catch((err) => setError(err.message))
+      .finally(() => setReleasingLockId(null));
   }
 
   function syncBuilder() {
@@ -420,6 +450,94 @@ export default function WorkItemDetail() {
       </div>
 
       {error && item && <ErrorBanner message={error} />}
+
+      {gateError && (
+        <div className="border border-st-blocked bg-canvas/80 px-4 py-3 space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="label-tel-strong text-st-blocked">
+              [ BUILD GATE BLOCKED — {gateError.blocker_code?.toUpperCase()} ]
+            </div>
+            <button
+              type="button"
+              onClick={() => setGateError(null)}
+              className="font-mono text-fg-muted hover:text-fg-primary"
+              aria-label="Dismiss"
+            >
+              ✕
+            </button>
+          </div>
+          <p className="text-sm text-fg-primary whitespace-pre-wrap">
+            {gateError.blocker_message || "Build was refused by the safety gate."}
+          </p>
+          {gateError.repo_path && (
+            <div className="text-xs font-mono text-fg-secondary">
+              REPO: {gateError.repo_path}
+            </div>
+          )}
+          {Array.isArray(gateError.dirty_files) && gateError.dirty_files.length > 0 && (
+            <div className="text-xs font-mono text-fg-secondary">
+              DIRTY: {gateError.dirty_files.slice(0, 5).join(", ")}
+              {gateError.dirty_files.length > 5 ? ` (+${gateError.dirty_files.length - 5})` : ""}
+            </div>
+          )}
+          {Array.isArray(gateError.staged_files) && gateError.staged_files.length > 0 && (
+            <div className="text-xs font-mono text-fg-secondary">
+              STAGED: {gateError.staged_files.slice(0, 5).join(", ")}
+              {gateError.staged_files.length > 5 ? ` (+${gateError.staged_files.length - 5})` : ""}
+            </div>
+          )}
+          {Array.isArray(gateError.untracked_files) && gateError.untracked_files.length > 0 && (
+            <div className="text-xs font-mono text-fg-secondary">
+              UNTRACKED: {gateError.untracked_files.slice(0, 5).join(", ")}
+              {gateError.untracked_files.length > 5 ? ` (+${gateError.untracked_files.length - 5})` : ""}
+            </div>
+          )}
+          {gateError.existing_lock_id != null && (
+            <div className="text-xs font-mono text-fg-secondary">
+              EXISTING LOCK #{gateError.existing_lock_id}
+              {gateError.existing_lock_branch ? ` @ ${gateError.existing_lock_branch}` : ""}
+              {gateError.existing_lock_work_item_id != null
+                ? ` (WI-${gateError.existing_lock_work_item_id})`
+                : ""}
+            </div>
+          )}
+        </div>
+      )}
+
+      {repoLocks.length > 0 && (
+        <Panel title="REPO LOCKS" subtitle="// active build locks across repos">
+          <div className="space-y-2">
+            {repoLocks.map((lock) => (
+              <div
+                key={lock.id}
+                className="flex items-center justify-between gap-3 px-3 py-2 bg-canvas border border-edge"
+              >
+                <div className="min-w-0 space-y-1">
+                  <div className="text-sm font-mono text-fg-primary truncate">
+                    {lock.repo_path}
+                  </div>
+                  <div className="text-xs font-mono text-fg-secondary">
+                    BRANCH {lock.branch_name} · COMMIT {lock.commit_sha.slice(0, 8)}
+                    {lock.work_item_id != null ? ` · WI-${lock.work_item_id}` : ""}
+                    {lock.task_id ? ` · TASK ${lock.task_id}` : ""}
+                  </div>
+                  <div className="text-xs font-mono text-fg-muted">
+                    SINCE {formatTime(lock.started_at)}
+                    {lock.lock_owner ? ` · OWNER ${lock.lock_owner}` : ""}
+                  </div>
+                </div>
+                <Button
+                  variant="danger"
+                  onClick={() => clearLock(lock.id)}
+                  disabled={releasingLockId === lock.id}
+                >
+                  {releasingLockId === lock.id ? "CLEARING…" : "CLEAR LOCK"}
+                </Button>
+              </div>
+            ))}
+          </div>
+        </Panel>
+      )}
 
       {builderTask && (
         <Panel title="BUILDER" subtitle="// Hermes Kanban bridge">

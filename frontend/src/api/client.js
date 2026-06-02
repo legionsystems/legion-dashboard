@@ -1,5 +1,18 @@
 const BASE_URL = "/api";
 
+// Thrown on non-2xx responses. Retains the parsed JSON body (if any) so
+// callers can inspect structured 409 detail payloads such as the repo
+// safety gate's blocker_code/blocker_message.
+export class ApiError extends Error {
+  constructor({ status, statusText, body, message }) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.statusText = statusText;
+    this.body = body;
+  }
+}
+
 async function request(path, options = {}) {
   const response = await fetch(`${BASE_URL}${path}`, {
     headers: { "Content-Type": "application/json", ...(options.headers || {}) },
@@ -7,9 +20,14 @@ async function request(path, options = {}) {
   });
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(
-      `Request failed: ${response.status} ${response.statusText} ${text}`
-    );
+    let body = null;
+    try { body = JSON.parse(text); } catch { body = text; }
+    throw new ApiError({
+      status: response.status,
+      statusText: response.statusText,
+      body,
+      message: `Request failed: ${response.status} ${response.statusText} ${text}`,
+    });
   }
   if (response.status === 204) return null;
   return response.json();
@@ -76,4 +94,19 @@ export function rejectWorkItemWithChanges(id, changeRequest) {
   return postJson(`/work-items/${id}/reject-with-changes`, {
     change_request: changeRequest,
   });
+}
+
+// Repo safety / lock APIs (slice 3). The gate lives in the backend builder
+// flow; these helpers let the UI read state and clear stale locks.
+export function checkRepoSafety(repoPath) {
+  const qs = new URLSearchParams({ repo_path: repoPath }).toString();
+  return getJson(`/repo-safety/check?${qs}`);
+}
+
+export function getActiveRepoLocks() {
+  return getJson(`/repo-locks`);
+}
+
+export function releaseRepoLock(lockId) {
+  return deleteRequest(`/repo-locks/${lockId}`);
 }
