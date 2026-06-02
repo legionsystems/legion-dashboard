@@ -17,20 +17,23 @@ State precedence (highest first)
 2. ``merged``           — ``merge_commit_sha`` is set.
 3. ``ready_to_merge``   — explicit operator gate.
 4. ``certified``        — operator has signed off.
-5. ``changes_requested``/``review_failed``/``code_reviewed`` — derived from
+5. ``rejected``         — operator rejected the work outright (slice 2).
+6. ``needs_rework``     — operator sent the work back with a change request
+   (slice 2).
+7. ``changes_requested``/``review_failed``/``code_reviewed`` — derived from
    ``code_review_status``.
-6. ``preview_ready``    — preview has been deployed.
-7. ``preview_pending``  — preview is required but not yet deployed.
-8. ``in_review``        — a PR exists (number or URL) but no terminal review.
-9. ``blocked``          — Kanban ``status`` is ``blocked``.
-10. ``building``        — Kanban ``status`` indicates implementation in flight.
-11. ``implemented``     — Kanban ``status`` indicates completion.
-12. ``review_needed``   — Kanban ``status`` is review/review_needed.
-13. ``approved``        — operator has approved but no builder activity yet.
-14. ``debating``        — a debate run is currently active.
-15. ``debated``         — a debate has completed and no later state applies.
-16. ``drafting``        — fallback for fresh/draft items.
-17. Otherwise: the raw Kanban status (lowercased) is returned so we never
+8. ``preview_ready``    — preview has been deployed.
+9. ``preview_pending``  — preview is required but not yet deployed.
+10. ``in_review``       — a PR exists (number or URL) but no terminal review.
+11. ``blocked``         — Kanban ``status`` is ``blocked``.
+12. ``building``        — Kanban ``status`` indicates implementation in flight.
+13. ``implemented``     — Kanban ``status`` indicates completion.
+14. ``review_needed``   — Kanban ``status`` is review/review_needed.
+15. ``approved``        — operator has approved but no builder activity yet.
+16. ``debating``        — a debate run is currently active.
+17. ``debated``         — a debate has completed and no later state applies.
+18. ``drafting``        — fallback for fresh/draft items.
+19. Otherwise: the raw Kanban status (lowercased) is returned so we never
     silently swallow an unknown state.
 """
 from __future__ import annotations
@@ -96,7 +99,17 @@ def compute_effective_state(
     if getattr(work_item, "operator_certified", None) is True:
         return "certified"
 
-    # 5. Code review verdict, when present, supersedes the generic PR state.
+    # 5. Operator rejection (slice 2) — operator abandoned the work outright.
+    if getattr(work_item, "rejected_at", None) is not None:
+        return "rejected"
+
+    # 6. Operator change request (slice 2) — operator sent the work back for
+    # rework. Distinct from ``changes_requested`` derived from
+    # ``code_review_status`` (an automated/agent verdict).
+    if getattr(work_item, "changes_requested_at", None) is not None:
+        return "needs_rework"
+
+    # 7. Code review verdict, when present, supersedes the generic PR state.
     code_review = _norm(getattr(work_item, "code_review_status", None))
     if code_review == "approved":
         return "code_reviewed"
