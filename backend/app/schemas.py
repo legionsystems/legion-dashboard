@@ -985,17 +985,22 @@ ALLOWED_EXECUTOR_ACTIONS = {
     "revert_preview",
     "merge_pr",
     "healthcheck",
+    # Read-only worktree inspection that backs the Start Build safety gate
+    # — the dashboard container's /srv/repo mount isn't a git worktree, so
+    # the gate has to ask the host executor what state the worktree is in.
+    "repo_safety_check",
 }
 
 
 class PreviewExecutorRequest(BaseModel):
     """Wire payload sent from the dashboard to the host preview executor.
 
-    ``action`` selects deploy vs revert vs merge. ``repo_path`` is
-    validated against a host-side allowlist before any work runs — the
+    ``action`` selects deploy vs revert vs merge vs inspection. ``repo_path``
+    is validated against a host-side allowlist before any work runs — the
     dashboard never sends an arbitrary path, but the executor refuses
     unknown paths defensively. ``branch`` is the git ref to check out on
-    the host worktree (or the base branch for a merge action).
+    the host worktree (or the base branch for a merge action); pure
+    inspection actions (``healthcheck``, ``repo_safety_check``) omit it.
     ``service`` is the docker-compose service to rebuild/restart (defaults
     to the dashboard's app service). For ``merge_pr``, ``pr_number`` and
     ``base_branch`` are required so the executor can confirm the merge
@@ -1004,7 +1009,7 @@ class PreviewExecutorRequest(BaseModel):
 
     action: str
     repo_path: str
-    branch: str
+    branch: Optional[str] = None
     service: Optional[str] = None
     pr_number: Optional[int] = None
     base_branch: Optional[str] = None
@@ -1018,10 +1023,19 @@ class PreviewExecutorRequest(BaseModel):
             )
         return v
 
-    @field_validator("repo_path", "branch")
+    @field_validator("repo_path")
     @classmethod
-    def _nonempty(cls, v: str) -> str:
+    def _repo_path_nonempty(cls, v: str) -> str:
         if not v or not v.strip():
+            raise ValueError("must not be empty")
+        return v
+
+    @field_validator("branch")
+    @classmethod
+    def _branch_nonempty(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        if not v.strip():
             raise ValueError("must not be empty")
         return v
 

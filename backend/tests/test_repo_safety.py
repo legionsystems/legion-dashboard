@@ -411,6 +411,17 @@ def _patch_target_repo(monkeypatch, repo_path: str):
     def fake_resolve(_work_item):
         return (repo_path, "legion-dashboard")
     monkeypatch.setattr(builder_router, "_resolve_target_repo", fake_resolve)
+    # The builder gate now inspects the worktree through the host executor.
+    # The integration tests don't run an executor process, so swap the
+    # executor-backed inspector for the direct in-process one. The direct
+    # variant runs git against the tmp ``repo_path`` and yields the same
+    # ``RepoSafetyResult`` shape the executor would return, which is exactly
+    # what these tests want to exercise.
+    monkeypatch.setattr(
+        repo_safety,
+        "check_repo_clean_via_executor",
+        repo_safety.check_repo_clean,
+    )
 
 
 def _stub_hermes(monkeypatch, task_id: str = "hermes-task-1"):
@@ -800,3 +811,272 @@ def test_branch_mismatch_blocks_build(
         .count()
         == 0
     )
+
+
+# ---------------------------------------------------------------------------
+# Unit tests — check_repo_clean_via_executor (host-side delegation)
+# ---------------------------------------------------------------------------
+
+
+def _stub_executor_response(monkeypatch, response):
+    """Stub ``preview_deploy.call_host_executor`` so tests don't need network.
+
+    Records calls so assertions can verify the payload the dashboard sends.
+    """
+    from app import preview_deploy
+
+    calls = []
+
+    def _fake(**kwargs):
+        calls.append(kwargs)
+        return response
+
+    monkeypatch.setattr(preview_deploy, "call_host_executor", _fake)
+    return calls
+
+
+def test_check_via_executor_returns_clean_result(monkeypatch):
+    """A success=True executor response with is_clean=True yields a clean
+    ``RepoSafetyResult``."""
+    from app import preview_deploy
+
+    calls = _stub_executor_response(
+        monkeypatch,
+        preview_deploy.ExecutorResponse(
+            success=True,
+            raw={
+                "success": True,
+                "action": "repo_safety_check",
+                "repo_path": "/srv/repo/legion-dashboard",
+                "is_clean": True,
+                "dirty_files": [],
+                "staged_files": [],
+                "untracked_files": [],
+                "current_branch": "feature/x",
+                "current_commit": "a" * 40,
+                "blocker_code": None,
+                "blocker_message": None,
+            },
+        ),
+    )
+
+    result = repo_safety.check_repo_clean_via_executor(
+        "/srv/repo/legion-dashboard"
+    )
+
+    assert result.is_clean is True
+    assert result.blocker_code is None
+    assert result.current_branch == "feature/x"
+    assert result.current_commit == "a" * 40
+    assert result.dirty_files == []
+    assert result.staged_files == []
+    assert result.untracked_files == []
+
+    # Confirm the dashboard sent the correct action and did NOT include
+    # ``branch`` in the payload (the inspection doesn't need one).
+    assert len(calls) == 1
+    assert calls[0]["action"] == "repo_safety_check"
+    assert calls[0]["repo_path"] == "/srv/repo/legion-dashboard"
+    assert "branch" not in calls[0] or calls[0].get("branch") is None
+
+
+def test_check_via_executor_returns_blocked_dirty_repo(monkeypatch):
+    """A success=True executor response with is_clean=False and a
+    blocker_code projects through unchanged."""
+    from app import preview_deploy
+
+    _stub_executor_response(
+        monkeypatch,
+        preview_deploy.ExecutorResponse(
+            success=True,
+            raw={
+                "success": True,
+                "action": "repo_safety_check",
+                "repo_path": "/srv/repo/legion-dashboard",
+                "is_clean": False,
+                "dirty_files": ["README.md"],
+                "staged_files": [],
+                "untracked_files": ["scratch.py"],
+                "current_branch": "main",
+                "current_commit": "b" * 40,
+                "blocker_code": "blocked_dirty_repo",
+                "blocker_message": (
+                    "Repo /srv/repo/legion-dashboard has uncommitted changes: "
+                    "1 unstaged, 1 untracked"
+                ),
+            },
+        ),
+    )
+
+    result = repo_safety.check_repo_clean_via_executor(
+        "/srv/repo/legion-dashboard"
+    )
+
+    assert result.is_clean is False
+    assert result.blocker_code == "blocked_dirty_repo"
+    assert "README.md" in result.dirty_files
+    assert "scratch.py" in result.untracked_files
+    assert result.current_branch == "main"
+
+
+def test_check_via_executor_fails_closed_when_unreachable(monkeypatch):
+    """An executor that is unreachable (success=False) must yield is_clean=False
+    so a misconfigured executor cannot silently let a build past the gate."""
+    from app import preview_deploy
+
+    _stub_executor_response(
+        monkeypatch,
+        preview_deploy.ExecutorResponse(
+            success=False,
+            error="executor unreachable: Connection refused",
+            error_code="executor_unreachable",
+        ),
+    )
+
+    result = repo_safety.check_repo_clean_via_executor(
+        "/srv/repo/legion-dashboard"
+    )
+
+    assert result.is_clean is False
+    assert result.blocker_code == "executor_unreachable"
+    assert result.blocker_message is not None
+    assert "unreachable" in result.blocker_message.lower()
+
+
+def test_check_via_executor_fails_closed_on_inspection_failure(monkeypatch):
+    """Executor returned success=True but reported git_inspection_failed —
+    the gate must still block."""
+    from app import preview_deploy
+
+    _stub_executor_response(
+        monkeypatch,
+        preview_deploy.ExecutorResponse(
+            success=True,
+            raw={
+                "success": True,
+                "action": "repo_safety_check",
+                "is_clean": False,
+                "dirty_files": [],
+                "staged_files": [],
+                "untracked_files": [],
+                "current_branch": None,
+                "current_commit": None,
+                "blocker_code": "git_inspection_failed",
+                "blocker_message": (
+                    "Cannot inspect repo (git diff --quiet): "
+                    "fatal: not a git repository"
+                ),
+            },
+        ),
+    )
+
+    result = repo_safety.check_repo_clean_via_executor(
+        "/srv/repo/legion-dashboard"
+    )
+
+    assert result.is_clean is False
+    assert result.blocker_code == "git_inspection_failed"
+    assert "fatal" in (result.blocker_message or "")
+
+
+# ---------------------------------------------------------------------------
+# Host-side executor — _perform_repo_safety_check against a real temp repo
+# ---------------------------------------------------------------------------
+
+
+def _load_executor_module():
+    """Import the host-side executor script as a Python module.
+
+    The on-disk script has no ``.py`` suffix (lives in ``$PATH``), so
+    ``spec_from_file_location`` cannot infer a loader. Pass an explicit
+    ``SourceFileLoader`` so we can exercise the action runner in-process.
+    """
+    import importlib.util
+    from importlib.machinery import SourceFileLoader
+
+    repo_root = Path(__file__).resolve().parents[2]
+    executor_path = repo_root / "ops" / "host-executor" / "legion-preview-executor"
+    loader = SourceFileLoader("legion_preview_executor", str(executor_path))
+    spec = importlib.util.spec_from_loader("legion_preview_executor", loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+@pytest.fixture(scope="module")
+def executor_module():
+    return _load_executor_module()
+
+
+def test_executor_repo_safety_check_clean_repo(executor_module, clean_repo):
+    """The host-side runner returns is_clean=True for a clean worktree."""
+    result = executor_module._perform_repo_safety_check(str(clean_repo))
+
+    assert result["success"] is True
+    assert result["action"] == "repo_safety_check"
+    assert result["is_clean"] is True
+    assert result["blocker_code"] is None
+    assert result["dirty_files"] == []
+    assert result["staged_files"] == []
+    assert result["untracked_files"] == []
+    assert result["current_branch"] == "main"
+    assert result["current_commit"]
+    assert len(result["current_commit"]) == 40
+
+
+def test_executor_repo_safety_check_dirty_repo(executor_module, clean_repo):
+    """An unstaged edit is reported as a blocked_dirty_repo with the file
+    in ``dirty_files``."""
+    (clean_repo / "README.md").write_text("dirty\n")
+
+    result = executor_module._perform_repo_safety_check(str(clean_repo))
+
+    assert result["success"] is True
+    assert result["is_clean"] is False
+    assert result["blocker_code"] == "blocked_dirty_repo"
+    assert "README.md" in result["dirty_files"]
+    assert result["current_branch"] == "main"
+
+
+def test_executor_repo_safety_check_untracked_file_blocks(
+    executor_module, clean_repo
+):
+    """An untracked, non-ignored file blocks the gate."""
+    (clean_repo / "new_thing.py").write_text("print('hi')\n")
+
+    result = executor_module._perform_repo_safety_check(str(clean_repo))
+
+    assert result["is_clean"] is False
+    assert result["blocker_code"] == "blocked_dirty_repo"
+    assert "new_thing.py" in result["untracked_files"]
+
+
+def test_executor_repo_safety_check_ignores_hermes_config(
+    executor_module, clean_repo
+):
+    """The host-side check applies the same ``.hermes-config.yaml`` filter as
+    the dashboard's direct ``check_repo_clean``."""
+    (clean_repo / ".hermes-config.yaml").write_text("key: value\n")
+
+    result = executor_module._perform_repo_safety_check(str(clean_repo))
+
+    assert result["is_clean"] is True
+    assert result["untracked_files"] == []
+
+
+def test_executor_repo_safety_check_not_a_git_repo(executor_module, tmp_path):
+    """A directory that is not a git worktree yields git_inspection_failed."""
+    not_a_repo = tmp_path / "plain-dir"
+    not_a_repo.mkdir()
+    (not_a_repo / "README.md").write_text("hi\n")
+
+    result = executor_module._perform_repo_safety_check(str(not_a_repo))
+
+    assert result["success"] is True
+    assert result["is_clean"] is False
+    assert result["blocker_code"] == "git_inspection_failed"
+    assert "Cannot inspect repo" in result["blocker_message"]
+    assert result["dirty_files"] == []
+    assert result["staged_files"] == []
+    assert result["untracked_files"] == []

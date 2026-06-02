@@ -206,6 +206,59 @@ def check_repo_clean(repo_path: str) -> RepoSafetyResult:
     )
 
 
+def check_repo_clean_via_executor(repo_path: str) -> RepoSafetyResult:
+    """Same contract as :func:`check_repo_clean`, but delegates to the host
+    executor.
+
+    The dashboard container mounts ``/srv/repo`` read-only and is not a
+    valid git worktree, so running ``git status`` inside the container
+    fails with ``fatal: not a git repository`` and the original
+    in-container gate misreports every Start Build as
+    ``git_inspection_failed``. The host executor already owns the side-
+    effectful workflow path (deploy_preview / revert_preview / merge_pr);
+    this helper reuses the same channel for a read-only inspection so the
+    gate sees the worktree the way the host sees it.
+
+    Fails closed: a non-success executor response (unreachable, HTTP error,
+    malformed JSON) yields ``is_clean=False`` with the executor's
+    ``error_code`` (or ``executor_unreachable``) so a misconfigured
+    executor never lets a build slip past the safety gate.
+    """
+    # Local import keeps ``preview_deploy`` -> ``repo_safety`` imports from
+    # ever circling back. ``preview_deploy`` does not import ``repo_safety``
+    # today, but pinning this at function scope avoids a future regression.
+    from . import preview_deploy
+
+    response = preview_deploy.call_host_executor(
+        action="repo_safety_check",
+        repo_path=repo_path,
+    )
+
+    if not response.success:
+        return RepoSafetyResult(
+            repo_path=repo_path,
+            is_clean=False,
+            blocker_code=response.error_code or "executor_unreachable",
+            blocker_message=(
+                response.error
+                or f"Host executor cannot inspect repo {repo_path}"
+            ),
+        )
+
+    data = response.raw or {}
+    return RepoSafetyResult(
+        repo_path=repo_path,
+        is_clean=bool(data.get("is_clean")),
+        dirty_files=list(data.get("dirty_files") or []),
+        staged_files=list(data.get("staged_files") or []),
+        untracked_files=list(data.get("untracked_files") or []),
+        current_branch=data.get("current_branch") or None,
+        current_commit=data.get("current_commit") or None,
+        blocker_code=data.get("blocker_code") or None,
+        blocker_message=data.get("blocker_message") or None,
+    )
+
+
 def check_repo_busy(session: Session, repo_path: str) -> Optional[RepoLock]:
     """Return the active lock on ``repo_path``, or None if free."""
     return (

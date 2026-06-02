@@ -162,7 +162,7 @@ def _executor_api_key() -> str:
 def call_host_executor(
     action: str,
     repo_path: str,
-    branch: str,
+    branch: Optional[str] = None,
     service: Optional[str] = None,
     api_key: Optional[str] = None,
     timeout: int = DEFAULT_EXECUTOR_TIMEOUT_SECONDS,
@@ -180,12 +180,16 @@ def call_host_executor(
     The API key falls back to ``API_SERVER_KEY`` from the environment so
     production code does not need to pass it explicitly; tests override it
     via the ``api_key`` argument or by monkeypatching this whole function.
+
+    ``branch`` is optional so pure inspection actions
+    (``healthcheck``, ``repo_safety_check``) can omit it from the wire.
     """
     request_payload = {
         "action": action,
         "repo_path": repo_path,
-        "branch": branch,
     }
+    if branch is not None:
+        request_payload["branch"] = branch
     if service is not None:
         request_payload["service"] = service
     if pr_number is not None:
