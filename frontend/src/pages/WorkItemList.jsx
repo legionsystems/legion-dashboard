@@ -457,7 +457,7 @@ export default function WorkItemList() {
                         </div>
                       </td>
                       <td className="px-3 py-2.5">
-                        <StatusBadge status={item.status} />
+                        <StatusBadge status={item.effective_state || item.status} />
                       </td>
                       <td className="px-3 py-2.5">
                         <DebateCell item={item} />
