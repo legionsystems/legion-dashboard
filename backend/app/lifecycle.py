@@ -14,9 +14,16 @@ computed fresh per response.
 State precedence (highest first)
 --------------------------------
 1. ``archived``         — archive flag wins over everything else.
-2. ``merged``           — ``merge_commit_sha`` is set.
-3. ``ready_to_merge``   — explicit operator gate.
-4. ``certified``        — operator has signed off.
+2. ``complete``         — operator has acknowledged a verified post-merge
+   deploy (slice 5). Terminal positive outcome.
+3. ``merged_deployment_failed`` — PR is merged but the post-merge
+   healthcheck failed (slice 5). The operator must fix the deploy before
+   completing.
+4. ``merged``           — ``merge_commit_sha`` is set.
+5. ``blocked_merge``    — operator attempted a merge and the executor
+   refused / failed before any SHA was recorded (slice 5).
+6. ``ready_to_merge``   — explicit operator gate.
+7. ``certified``        — operator has signed off.
 5. ``rejected``         — operator rejected the work outright (slice 2).
 6. ``changes_requested``/``review_failed``/``code_reviewed`` — derived from
    ``code_review_status``. Listed above ``needs_rework`` so that a fresh
@@ -95,15 +102,33 @@ def compute_effective_state(
     if getattr(work_item, "archived", False):
         return "archived"
 
-    # 2. Merged: a merge SHA is the terminal positive outcome.
-    if _norm(getattr(work_item, "merge_commit_sha", None)):
+    # 2. Complete: operator has acknowledged a verified post-merge deploy
+    # (slice 5). Terminal positive outcome — outranks ``merged`` because
+    # ``complete`` items still carry the merge SHA.
+    if getattr(work_item, "completed_at", None) is not None:
+        return "complete"
+
+    # 3/4. Merge SHA terminal states (slice 5).
+    merge_sha = _norm(getattr(work_item, "merge_commit_sha", None))
+    if merge_sha:
+        # Post-merge healthcheck explicitly failed — operator must fix
+        # before the item can be marked ``complete``.
+        health = _norm(getattr(work_item, "post_merge_health_status", None))
+        if health in ("unhealthy", "failed", "error"):
+            return "merged_deployment_failed"
         return "merged"
 
-    # 3. Ready-to-merge gate (set by slice 5 once everything else passes).
+    # 5. Merge attempt failed before any SHA was recorded — surface a
+    # distinct state so the UI can prompt the operator to retry.
+    merge_status = _norm(getattr(work_item, "merge_status", None))
+    if merge_status in ("failed", "blocked"):
+        return "blocked_merge"
+
+    # 6. Ready-to-merge gate (set by slice 5 once everything else passes).
     if getattr(work_item, "ready_to_merge", None) is True:
         return "ready_to_merge"
 
-    # 4. Operator certification (slice 2).
+    # 7. Operator certification (slice 2).
     if getattr(work_item, "operator_certified", None) is True:
         return "certified"
 

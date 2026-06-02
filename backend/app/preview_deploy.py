@@ -89,6 +89,18 @@ def is_preview_state_blocked(effective_state: Optional[str]) -> bool:
     return effective_state in _BLOCKED_PREVIEW_STATES
 
 
+# Effective states from which ``merge`` is allowed (slice 5). Only items
+# the operator has actively cleared for merge can be merged.
+_MERGE_SOURCE_STATES = frozenset({"ready_to_merge", "certified", "blocked_merge"})
+
+
+def is_merge_state_allowed(effective_state: Optional[str]) -> bool:
+    """Return True when ``merge`` is allowed from this state."""
+    if not effective_state:
+        return False
+    return effective_state in _MERGE_SOURCE_STATES
+
+
 # ---------------------------------------------------------------------------
 # Repo / compose resolution
 # ---------------------------------------------------------------------------
@@ -120,6 +132,7 @@ class ExecutorResponse:
     must not stamp ``preview_deployed = True``. ``error_code`` is a stable
     short identifier; ``error`` is the human-readable message. ``raw``
     preserves the original payload for tests / debug logging.
+    ``merge_commit_sha`` is populated only by the ``merge_pr`` action.
     """
 
     success: bool
@@ -128,6 +141,7 @@ class ExecutorResponse:
     error: Optional[str] = None
     error_code: Optional[str] = None
     raw: Optional[dict] = None
+    merge_commit_sha: Optional[str] = None
 
 
 def _executor_url() -> str:
@@ -153,6 +167,8 @@ def call_host_executor(
     api_key: Optional[str] = None,
     timeout: int = DEFAULT_EXECUTOR_TIMEOUT_SECONDS,
     url: Optional[str] = None,
+    pr_number: Optional[int] = None,
+    base_branch: Optional[str] = None,
 ) -> ExecutorResponse:
     """POST a preview action to the host executor and parse the response.
 
@@ -172,6 +188,10 @@ def call_host_executor(
     }
     if service is not None:
         request_payload["service"] = service
+    if pr_number is not None:
+        request_payload["pr_number"] = pr_number
+    if base_branch is not None:
+        request_payload["base_branch"] = base_branch
 
     body = json.dumps(request_payload).encode("utf-8")
     headers = {
@@ -236,4 +256,5 @@ def call_host_executor(
         error=data.get("error") or None,
         error_code=data.get("error_code") or None,
         raw=data,
+        merge_commit_sha=data.get("merge_commit_sha") or None,
     )

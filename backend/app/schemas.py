@@ -123,6 +123,20 @@ class WorkItemResponse(WorkItemBase):
     preview_reverted_by: Optional[str] = None
     preview_revert_reason: Optional[str] = None
 
+    # Merge / complete metadata (slice 5). Populated by ``merge`` and
+    # ``complete`` endpoints.
+    merge_status: Optional[str] = None
+    merged_at: Optional[datetime] = None
+    merged_by: Optional[str] = None
+    merge_note: Optional[str] = None
+    merge_error: Optional[str] = None
+    post_merge_verified_at: Optional[datetime] = None
+    post_merge_verified_by: Optional[str] = None
+    post_merge_health_status: Optional[str] = None
+    completed_at: Optional[datetime] = None
+    completed_by: Optional[str] = None
+    completion_note: Optional[str] = None
+
     # Archive lifecycle fields
     archived: bool = False
     archived_at: Optional[datetime] = None
@@ -885,6 +899,42 @@ class DeployPreviewRequest(BaseModel):
     deployed_by: Optional[str] = None
 
 
+class MergeRequest(BaseModel):
+    """Operator-initiated request to merge a certified Work Item's PR.
+
+    The router validates that the Work Item carries the PR metadata it
+    expects (``expected_pr_number``, ``expected_branch``, ``expected_base_branch``)
+    so a stale UI cannot ask the executor to merge a different PR. The
+    ``merge_note`` is recorded on the Work Item alongside the merge SHA.
+    ``merged_by`` is optional operator attribution.
+    """
+
+    merge_note: Optional[str] = None
+    expected_pr_number: int
+    expected_branch: str
+    expected_base_branch: str
+    merged_by: Optional[str] = None
+
+    @field_validator("expected_branch", "expected_base_branch")
+    @classmethod
+    def _nonempty_branch(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("must not be empty")
+        return v
+
+
+class CompleteRequest(BaseModel):
+    """Operator-initiated request to mark a merged Work Item as complete.
+
+    Requires that the Work Item has already been merged and its post-merge
+    healthcheck succeeded. ``completion_note`` and ``completed_by`` are
+    recorded for audit.
+    """
+
+    completion_note: Optional[str] = None
+    completed_by: Optional[str] = None
+
+
 class RevertPreviewRequest(BaseModel):
     """Operator-initiated request to revert a deployed preview.
 
@@ -918,24 +968,29 @@ class RevertPreviewRequest(BaseModel):
 
 
 # Actions the dashboard may request from the host executor.
-ALLOWED_EXECUTOR_ACTIONS = {"deploy_preview", "revert_preview"}
+ALLOWED_EXECUTOR_ACTIONS = {"deploy_preview", "revert_preview", "merge_pr"}
 
 
 class PreviewExecutorRequest(BaseModel):
     """Wire payload sent from the dashboard to the host preview executor.
 
-    ``action`` selects deploy vs revert. ``repo_path`` is validated against
-    a host-side allowlist before any work runs — the dashboard never sends
-    an arbitrary path, but the executor refuses unknown paths defensively.
-    ``branch`` is the git ref to check out on the host worktree.
+    ``action`` selects deploy vs revert vs merge. ``repo_path`` is
+    validated against a host-side allowlist before any work runs — the
+    dashboard never sends an arbitrary path, but the executor refuses
+    unknown paths defensively. ``branch`` is the git ref to check out on
+    the host worktree (or the base branch for a merge action).
     ``service`` is the docker-compose service to rebuild/restart (defaults
-    to the dashboard's app service).
+    to the dashboard's app service). For ``merge_pr``, ``pr_number`` and
+    ``base_branch`` are required so the executor can confirm the merge
+    target matches what the dashboard expects.
     """
 
     action: str
     repo_path: str
     branch: str
     service: Optional[str] = None
+    pr_number: Optional[int] = None
+    base_branch: Optional[str] = None
 
     @field_validator("action")
     @classmethod
@@ -971,6 +1026,9 @@ class PreviewExecutorResponse(BaseModel):
     health_status: Optional[str] = None
     error: Optional[str] = None
     error_code: Optional[str] = None
+    # ``merge_pr`` adds the resulting merge SHA so the dashboard can stamp
+    # ``WorkItem.merge_commit_sha`` only on confirmed success.
+    merge_commit_sha: Optional[str] = None
 
 
 # Resolve the forward reference from WorkItemResponse -> DebateRunSummary now

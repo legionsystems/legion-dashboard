@@ -127,3 +127,33 @@ export function revertPreview(id, reason, revertedBy) {
   }
   return postJson(`/work-items/${id}/revert-preview`, body);
 }
+
+// Merge / complete (slice 5). Merge requires the operator to confirm the
+// expected PR metadata so a stale UI cannot ask the executor to merge a
+// different PR. Complete records terminal operator acknowledgement after
+// the post-merge healthcheck has passed.
+export function mergeWorkItem(id, { prNumber, branch, baseBranch, mergeNote, mergedBy } = {}) {
+  const body = {
+    expected_pr_number: prNumber,
+    expected_branch: branch,
+    expected_base_branch: baseBranch,
+  };
+  if (mergeNote != null && mergeNote !== "") {
+    body.merge_note = mergeNote;
+  }
+  if (mergedBy != null && mergedBy !== "") {
+    body.merged_by = mergedBy;
+  }
+  return postJson(`/work-items/${id}/merge`, body);
+}
+
+export function completeWorkItem(id, { completionNote, completedBy } = {}) {
+  const body = {};
+  if (completionNote != null && completionNote !== "") {
+    body.completion_note = completionNote;
+  }
+  if (completedBy != null && completedBy !== "") {
+    body.completed_by = completedBy;
+  }
+  return postJson(`/work-items/${id}/complete`, body);
+}
