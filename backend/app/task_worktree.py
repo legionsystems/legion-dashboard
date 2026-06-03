@@ -70,24 +70,45 @@ def _shared_repo_slug_for_worktree(worktree_path: str) -> str:
     return head
 
 
-def _feature_branch_for_work_item(work_item) -> str:
+def _short_id(value: Optional[int], width: int = 6) -> str:
+    """Render a stable short identifier (zero-padded) for ``value``."""
+    if value is None or value < 0:
+        return "x" * width
+    return str(value).rjust(width, "0")
+
+
+def _feature_branch_for_work_item(
+    work_item,
+    builder_task_id: Optional[int] = None,
+) -> str:
     """Return the feature branch name the per-task worktree uses.
 
-    Format: ``feature/wi-<id>-<safe-slug>``. Stable per Work Item
-    and short enough to stay within git's 63-char refname limit when
-    combined with ``refs/heads/`` and the worktree folder.
+    Format: ``feature/wi-<id>-<safe-slug>-t_<builder_task_id>`` (or
+    ``feature/<safe-slug>`` when no work item id is available).
+    The ``-t_<builder_task_id>`` suffix is what makes a retry or
+    resend produce a fresh branch name — ``git worktree add``
+    cannot check out the same branch in two worktrees, so the
+    suffix has to be unique per attempt. We use the same
+    zero-padded short-id format as the worktree path so the
+    branch suffix and path suffix read identically.
+
+    Stable per (work_item, builder_task_id) tuple and short enough
+    to stay within git's 63-char refname limit when combined with
+    ``refs/heads/`` and the worktree folder.
     """
     wi_id = getattr(work_item, "id", None)
     title = getattr(work_item, "title", None) or "task"
     slug = re.sub(r"[^a-z0-9_\-]+", "-", title.strip().lower())
     slug = re.sub(r"[-_]+", "-", slug).strip("-_")
-    if len(slug) > 32:
-        slug = slug[:32].rstrip("-_")
+    if len(slug) > 24:
+        slug = slug[:24].rstrip("-_")
     if not slug:
         slug = "task"
     if wi_id is None:
         return f"feature/{slug}"
-    return f"feature/wi-{wi_id}-{slug}"
+    if builder_task_id is None:
+        return f"feature/wi-{wi_id}-{slug}"
+    return f"feature/wi-{wi_id}-{slug}-t_{_short_id(builder_task_id)}"
 
 
 def _worktree_create_result(
@@ -180,7 +201,9 @@ def ensure_task_worktree(
             f"worktree"
         )
 
-    feature_branch = _feature_branch_for_work_item(work_item)
+    feature_branch = _feature_branch_for_work_item(
+        work_item, builder_task_id=builder_task_id
+    )
     chosen_base_ref = base_ref or _select_base_ref(worktree_path)
     ok, parsed, stderr = _worktree_create_result(
         worktree_path=worktree_path,

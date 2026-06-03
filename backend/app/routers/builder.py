@@ -71,6 +71,7 @@ def _generate_hermes_prompt(
     implementation_readiness: Optional[str] = None,
     mandatory_edits: Optional[list] = None,
     builder_task_id: Optional[int] = None,
+    feature_branch: Optional[str] = None,
 ) -> str:
     """Generate the Hermes Kanban implementation card body.
 
@@ -95,6 +96,13 @@ def _generate_hermes_prompt(
     # contract: it expects a path it can ``cd`` into.
     target_repo = target_worktree
 
+    # If the caller passed an explicit feature branch, surface it in
+    # the prompt. Otherwise leave it unset; the builder card's
+    # WORKTREE METADATA block reports the omission so the
+    # operator can see the orchestrator's branch name does not
+    # round-trip.
+    feature_branch_kwarg = feature_branch
+
     # Resolve mandatory edits in priority order:
     #   1. explicit ``mandatory_edits`` list passed in
     #   2. the structured arbiter JSON from the latest DebateArgument
@@ -117,6 +125,7 @@ def _generate_hermes_prompt(
         mandatory_edits=edits,
         target_repo=target_repo,
         target_worktree=target_worktree,
+        feature_branch=feature_branch,
     )
 
 
@@ -372,7 +381,7 @@ def _create_builder_task(db: Session, work_item_id: int, request: SendToBuilderR
     )
     attempt_id = prior_attempts + 1
     try:
-        target_worktree, _feature_branch, _wt_result = ensure_task_worktree(
+        target_worktree, feature_branch, _wt_result = ensure_task_worktree(
             db, work_item, builder_task_id=attempt_id
         )
     except RuntimeError as exc:
@@ -392,13 +401,21 @@ def _create_builder_task(db: Session, work_item_id: int, request: SendToBuilderR
             },
         )
 
-    # Generate prompt
+    # Generate prompt. Pass the same attempt_id and the same
+    # feature branch we used to create the worktree so the prompt
+    # body renders the exact path and branch the orchestrator just
+    # provisioned. Without this, the prompt would point the
+    # builder at a different (uncreated) worktree and on retry
+    # would re-use a branch that ``git worktree add`` cannot check
+    # out a second time.
     prompt_body = _generate_hermes_prompt(
         work_item=work_item,
         db=db,
         debate_run_id=latest_debate.id if latest_debate else None,
         recommendation=latest_debate.final_recommendation if latest_debate else None,
         implementation_readiness=latest_debate.implementation_readiness if latest_debate else None,
+        builder_task_id=attempt_id,
+        feature_branch=feature_branch,
     )
     
     # Create Hermes task. If this fails we must release the lock we just

@@ -19,6 +19,7 @@ import pytest
 
 from app import worktree_paths
 from app.builder_card import build_implementation_card_prompt
+from app.models import WorkItem
 from app.worktree_paths import (
     SHARED_REPO_PATH,
     WORKTREES_ROOT,
@@ -562,3 +563,189 @@ def test_router_releases_repo_lock_when_worktree_create_fails(
     assert active_locks == 0, (
         f"repo lock leaked after worktree-create failure: {active_locks}"
     )
+
+
+# ---------------------------------------------------------------------------
+# P1 fix: created worktree path and rendered prompt path must match
+# P2 fix: retry branches must be unique per attempt
+# ---------------------------------------------------------------------------
+
+
+def _make_real_wi(id: int = 17, title: str = "Auto-Assign Stance") -> WorkItem:
+    """Build a SQLAlchemy-mapped WorkItem for end-to-end tests."""
+    return WorkItem(
+        id=id,
+        type="task",
+        title=title,
+        status="approved",
+        priority="medium",
+        source="operator",
+        approved_by_operator=True,
+        target_app="legion-dashboard",
+    )
+
+
+def test_router_orchestrator_and_prompt_agree_on_worktree_path(client, db_session, monkeypatch):
+    """P1 regression: the path the orchestrator creates must
+    exactly match the TARGET REPO / TARGET WORKTREE path rendered
+    in the generated prompt. Otherwise the builder is told to
+    `cd` into an uncreated path."""
+    from app.routers import builder as builder_router
+    from app.task_worktree import ensure_task_worktree
+
+    wi = _make_real_wi(id=17)
+    db_session.add(wi)
+    db_session.commit()
+    db_session.refresh(wi)
+
+    # Run the orchestrator. The shared venv supplies a real
+    # legion-worktree-create tool; if it is missing, the test
+    # environment-gates and skips.
+    try:
+        target_worktree, feature_branch, _result = ensure_task_worktree(
+            db_session, wi, builder_task_id=1
+        )
+    except RuntimeError as exc:
+        if "missing tool" in str(exc) or "not executable" in str(exc):
+            pytest.skip(f"worktree tool unavailable: {exc}")
+        raise
+
+    # Now render the prompt body the router would render.
+    body = builder_router._generate_hermes_prompt(
+        work_item=wi,
+        builder_task_id=1,
+        feature_branch=feature_branch,
+    )
+
+    # The prompt's TARGET REPO and TARGET WORKTREE lines point at
+    # the orchestrator's path verbatim. PHASE 1 INSPECT's `cd`
+    # line does the same. The secret scan and Codex review steps
+    # use the same path.
+    assert f"TARGET REPO: {target_worktree}" in body, (
+        f"TARGET REPO line does not match the created worktree path. "
+        f"expected {target_worktree!r} to be in the prompt body."
+    )
+    assert f"Target Worktree: {target_worktree}" in body
+    assert f"cd {target_worktree} || exit 1" in body
+    assert f"--repo {target_worktree}" in body
+    # And the WORKTREE METADATA block also carries the branch name.
+    assert f"Feature Branch: {feature_branch}" in body
+
+    # Cleanup.
+    import subprocess
+    subprocess.run(
+        ["git", "-C", "/srv/repo/legion-dashboard", "worktree", "remove", "--force", target_worktree],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", "/srv/repo/legion-dashboard", "branch", "-D", feature_branch],
+        check=False,
+    )
+
+
+def test_router_resend_produces_fresh_worktree_path_and_branch(client, db_session, monkeypatch):
+    """P2 regression: a second send for the same work item must
+    produce a fresh worktree path AND a fresh feature branch name.
+    Without the ``-t_<builder_task_id>`` suffix, ``git worktree add``
+    cannot check out the same branch in two worktrees, so retries
+    would fail."""
+    from app.routers import builder as builder_router
+    from app.task_worktree import ensure_task_worktree
+
+    wi = _make_real_wi(id=42, title="Reorganize Sidebar")
+    db_session.add(wi)
+    db_session.commit()
+    db_session.refresh(wi)
+
+    try:
+        first_path, first_branch, _ = ensure_task_worktree(
+            db_session, wi, builder_task_id=1
+        )
+        second_path, second_branch, _ = ensure_task_worktree(
+            db_session, wi, builder_task_id=2
+        )
+    except RuntimeError as exc:
+        if "missing tool" in str(exc) or "not executable" in str(exc):
+            pytest.skip(f"worktree tool unavailable: {exc}")
+        raise
+
+    assert first_path != second_path, (
+        f"resend reused the same worktree path: {first_path!r}"
+    )
+    assert first_branch != second_branch, (
+        f"resend reused the same feature branch: {first_branch!r}"
+    )
+    # Branches must both carry the per-attempt suffix.
+    assert "t_000001" in first_branch, first_branch
+    assert "t_000002" in second_branch, second_branch
+    # Paths must carry the per-attempt suffix.
+    assert first_path.endswith("/t_000001"), first_path
+    assert second_path.endswith("/t_000002"), second_path
+
+    # Each path is unique and lives under /srv/worktrees/.
+    assert first_path.startswith("/srv/worktrees/")
+    assert second_path.startswith("/srv/worktrees/")
+
+    # The prompt body the router would render on each send also
+    # matches the orchestrator's output.
+    first_body = builder_router._generate_hermes_prompt(
+        work_item=wi, builder_task_id=1, feature_branch=first_branch
+    )
+    second_body = builder_router._generate_hermes_prompt(
+        work_item=wi, builder_task_id=2, feature_branch=second_branch
+    )
+    assert f"TARGET REPO: {first_path}" in first_body
+    assert f"TARGET REPO: {second_path}" in second_body
+    assert f"Feature Branch: {first_branch}" in first_body
+    assert f"Feature Branch: {second_branch}" in second_body
+
+    # Cleanup.
+    import subprocess
+    for path, branch in (
+        (first_path, first_branch),
+        (second_path, second_branch),
+    ):
+        subprocess.run(
+            ["git", "-C", "/srv/repo/legion-dashboard", "worktree", "remove", "--force", path],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", "/srv/repo/legion-dashboard", "branch", "-D", branch],
+            check=False,
+        )
+
+
+def test_prompt_renders_feature_branch_in_metadata_block():
+    """The prompt body's WORKTREE METADATA block must surface the
+    feature branch the orchestrator provisioned. Without this,
+    the operator cannot see which branch the worktree is on."""
+    wi = _make_work_item(id=99, title="Add Health Endpoint")
+    body = build_implementation_card_prompt(
+        wi,
+        debate_run_id=None,
+        recommendation=None,
+        implementation_readiness=None,
+        mandatory_edits=[],
+        target_repo="/srv/worktrees/legion-dashboard/wi-99-add-health-endpoint/t_000003",
+        target_worktree="/srv/worktrees/legion-dashboard/wi-99-add-health-endpoint/t_000003",
+        feature_branch="feature/wi-99-add-health-endpoint-t_000003",
+    )
+    assert "Feature Branch: feature/wi-99-add-health-endpoint-t_000003" in body
+
+
+def test_feature_branch_includes_attempt_suffix_when_id_provided():
+    """_feature_branch_for_work_item must append ``-t_<id>`` when
+    given a builder_task_id so retries produce a different branch."""
+    from app.task_worktree import _feature_branch_for_work_item
+
+    wi = _make_work_item(id=5, title="Reorganize Sidebar")
+    without = _feature_branch_for_work_item(wi)
+    with_first = _feature_branch_for_work_item(wi, builder_task_id=1)
+    with_second = _feature_branch_for_work_item(wi, builder_task_id=2)
+
+    assert "-t_000001" in with_first, with_first
+    assert "-t_000002" in with_second, with_second
+    assert with_first != with_second
+    # When no builder_task_id is supplied, the branch is the
+    # per-work-item shape (no per-attempt suffix).
+    assert "-t_" not in without
