@@ -15,6 +15,7 @@ The cases below cover both legs of that contract:
 from __future__ import annotations
 
 import pytest
+from fastapi import HTTPException
 
 from app import preview_deploy, repo_safety
 from app.models import BuilderTask, RepoLock, WorkItem
@@ -345,11 +346,18 @@ def test_review_task_created_when_reviewer_profile_set(
         hermes_calls.append(kwargs)
         task_id = kwargs.get("idempotency_key", "unknown")
         # Return different IDs for builder vs review tasks.
+        # Builder task is now created in triage status for implementation path
         if "review" in task_id:
             return {"task_id": "hermes-review-1", "status": "ready", "assignee": "reviewer"}
-        return {"task_id": "hermes-builder-1", "status": "ready", "assignee": "builder"}
+        return {"task_id": "hermes-builder-1", "status": "triage", "assignee": "builder"}
 
     monkeypatch.setattr(builder_module, "_create_hermes_task", spy_create_hermes)
+
+    # Stub _promote_hermes_task_to_ready to simulate successful promotion
+    def stub_promote(task_id, reason):
+        return True
+
+    monkeypatch.setattr(builder_module, "_promote_hermes_task_to_ready", stub_promote)
 
     response = client.post(
         f"/api/builder/work-items/{item.id}/start-build", json={}
@@ -601,9 +609,15 @@ def test_review_task_body_contains_report_path_and_provenance_fields(
         if "review" in task_id:
             review_bodies.append(kwargs.get("body", ""))
             return {"task_id": "hermes-review-body", "status": "ready", "assignee": "reviewer"}
-        return {"task_id": "hermes-builder-body", "status": "ready", "assignee": "builder"}
+        return {"task_id": "hermes-builder-body", "status": "triage", "assignee": "builder"}
 
     monkeypatch.setattr(builder_module, "_create_hermes_task", spy_create_hermes)
+
+    # Stub _promote_hermes_task_to_ready to simulate successful promotion
+    def stub_promote(task_id, reason):
+        return True
+
+    monkeypatch.setattr(builder_module, "_promote_hermes_task_to_ready", stub_promote)
 
     response = client.post(
         f"/api/builder/work-items/{item.id}/start-build", json={}
@@ -716,3 +730,215 @@ def test_review_task_hermes_bridge_failure_fails_start_build(
 
     # Verify the Hermes call was attempted (builder task created first).
     assert len(hermes_calls) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Tests for ordering invariant fix — builder created in triage, promoted after review
+# ---------------------------------------------------------------------------
+
+
+def test_start_build_review_failure_leaves_builder_in_triage_not_ready(
+    client, db_session, monkeypatch
+):
+    """When review task creation fails, the builder task must remain in
+    triage (non-runnable) status — not left in Ready. This is the core
+    ordering invariant fix.
+    """
+    item = _make_approved_work_item(
+        db_session,
+        reviewer_profile="reviewer",
+        branch_name="main",
+    )
+    _patch_target_repo(monkeypatch, "/srv/repo/legion-dashboard")
+
+    # Stub Hermes calls — builder created in triage, review fails
+    import app.routers.builder as builder_module
+    hermes_calls = []
+
+    def spy_create_hermes(**kwargs):
+        hermes_calls.append(kwargs)
+        # First call is builder task — should have status_override="triage"
+        if len(hermes_calls) == 1:
+            assert kwargs.get("status_override") == "triage", "Builder must be created with triage status_override"
+            return {"task_id": "hermes-builder-triage", "status": "triage", "assignee": "builder"}
+        # Second call would be review task — simulate failure
+        raise HTTPException(status_code=502, detail="Hermes bridge error")
+
+    monkeypatch.setattr(builder_module, "_create_hermes_task", spy_create_hermes)
+
+    _stub_executor(
+        monkeypatch,
+        preview_deploy.ExecutorResponse(
+            success=True,
+            raw={
+                "success": True,
+                "action": "repo_safety_check",
+                "is_clean": True,
+                "dirty_files": [],
+                "staged_files": [],
+                "untracked_files": [],
+                "current_branch": "main",
+                "current_commit": "f" * 40,
+                "blocker_code": None,
+                "blocker_message": None,
+            },
+        ),
+    )
+
+    response = client.post(
+        f"/api/builder/work-items/{item.id}/start-build", json={}
+    )
+
+    # Start Build must fail
+    assert response.status_code == 502, response.text
+    assert response.json()["detail"]["blocker_code"] == "review_task_create_failed"
+
+    # Builder task was created but should be deleted on cleanup
+    # (test verifies no active builder task remains)
+    builder_tasks = (
+        db_session.query(BuilderTask)
+        .filter(BuilderTask.work_item_id == item.id)
+        .all()
+    )
+    assert len(builder_tasks) == 0
+
+    # Verify builder was created with triage status_override
+    # Review task was attempted (2nd call) but failed
+    assert len(hermes_calls) == 2
+    assert hermes_calls[0]["status_override"] == "triage"
+
+
+def test_start_build_happy_path_promotes_builder_to_ready(
+    client, db_session, monkeypatch
+):
+    """When review task creation succeeds, the builder task must be
+    promoted from triage to Ready status.
+    """
+    item = _make_approved_work_item(
+        db_session,
+        reviewer_profile="reviewer",
+        branch_name="main",
+    )
+    _patch_target_repo(monkeypatch, "/srv/repo/legion-dashboard")
+
+    import app.routers.builder as builder_module
+    hermes_calls = []
+    promote_calls = []
+
+    def spy_create_hermes(**kwargs):
+        hermes_calls.append(kwargs)
+        if len(hermes_calls) == 1:
+            # Builder task created with triage status_override
+            assert kwargs.get("status_override") == "triage"
+            return {"task_id": "hermes-builder-triage", "status": "triage", "assignee": "builder"}
+        elif len(hermes_calls) == 2:
+            # Review task created in ready
+            return {"task_id": "hermes-review-ready", "status": "ready", "assignee": "reviewer"}
+        raise AssertionError("Unexpected third Hermes call")
+
+    def spy_promote(task_id, reason):
+        promote_calls.append({"task_id": task_id, "reason": reason})
+        return True
+
+    monkeypatch.setattr(builder_module, "_create_hermes_task", spy_create_hermes)
+    monkeypatch.setattr(builder_module, "_promote_hermes_task_to_ready", spy_promote)
+
+    _stub_executor(
+        monkeypatch,
+        preview_deploy.ExecutorResponse(
+            success=True,
+            raw={
+                "success": True,
+                "action": "repo_safety_check",
+                "is_clean": True,
+                "dirty_files": [],
+                "staged_files": [],
+                "untracked_files": [],
+                "current_branch": "main",
+                "current_commit": "g" * 40,
+                "blocker_code": None,
+                "blocker_message": None,
+            },
+        ),
+    )
+
+    response = client.post(
+        f"/api/builder/work-items/{item.id}/start-build", json={}
+    )
+
+    # Start Build must succeed
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["review_task_id"] == "hermes-review-ready"
+
+    # Verify promotion was called
+    assert len(promote_calls) == 1
+    assert promote_calls[0]["task_id"] == "hermes-builder-triage"
+    assert "Review task" in promote_calls[0]["reason"]
+
+    # Verify builder task record shows ready status
+    builder_tasks = (
+        db_session.query(BuilderTask)
+        .filter(BuilderTask.work_item_id == item.id)
+        .all()
+    )
+    assert len(builder_tasks) == 1
+    assert builder_tasks[0].hermes_status == "ready"
+
+
+def test_start_build_failure_releases_lock_for_retry(
+    client, db_session, monkeypatch
+):
+    """When review task creation fails, the repo lock must be released
+    so retry is possible.
+    """
+    item = _make_approved_work_item(
+        db_session,
+        reviewer_profile="reviewer",
+        branch_name="main",
+    )
+    _patch_target_repo(monkeypatch, "/srv/repo/legion-dashboard")
+
+    import app.routers.builder as builder_module
+
+    def spy_create_hermes(**kwargs):
+        if kwargs.get("triage"):
+            return {"task_id": "hermes-builder-triage", "status": "triage", "assignee": "builder"}
+        raise HTTPException(status_code=502, detail="Review task creation failed")
+
+    monkeypatch.setattr(builder_module, "_create_hermes_task", spy_create_hermes)
+
+    _stub_executor(
+        monkeypatch,
+        preview_deploy.ExecutorResponse(
+            success=True,
+            raw={
+                "success": True,
+                "action": "repo_safety_check",
+                "is_clean": True,
+                "dirty_files": [],
+                "staged_files": [],
+                "untracked_files": [],
+                "current_branch": "main",
+                "current_commit": "h" * 40,
+                "blocker_code": None,
+                "blocker_message": None,
+            },
+        ),
+    )
+
+    response = client.post(
+        f"/api/builder/work-items/{item.id}/start-build", json={}
+    )
+
+    # Start Build must fail
+    assert response.status_code == 502
+
+    # Repo lock must be released (no active lock)
+    locks = (
+        db_session.query(RepoLock)
+        .filter(RepoLock.repo_path == "/srv/repo/legion-dashboard")
+        .filter(RepoLock.lock_status == "active")
+        .all()
+    )
+    assert len(locks) == 0, "Repo lock must be released on failure"
