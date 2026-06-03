@@ -314,6 +314,24 @@ def _in_scope_phrase_haystack(
     return out
 
 
+# Polarity markers. If both the out-of-scope item and the in-scope
+# haystack phrase share the same negation polarity, the haystack is
+# reinforcing the out-of-scope (NOT a contradiction). If the polarity
+# differs (e.g. out-of-scope says "Do not X" and the haystack
+# positively asserts "implement X"), that IS a contradiction. If only
+# one side has a polarity marker, the match is a regular contradiction
+# detection and proceeds as before.
+_NEGATION_PREFIXES = (
+    "do not", "don't", "must not", "mustn't", "no ", "not ", "never ",
+    "without", "avoid", "prohibit", "prohibited",
+)
+
+
+def _polarity_is_negated(phrase: str) -> bool:
+    norm = phrase.strip().lower()
+    return any(norm.startswith(prefix) or f" {prefix}" in norm for prefix in _NEGATION_PREFIXES)
+
+
 def _phrase_overlaps(needle_phrase: str, haystack_phrase: str) -> bool:
     """Return True if a substantive concept overlaps between phrases.
 
@@ -326,7 +344,21 @@ def _phrase_overlaps(needle_phrase: str, haystack_phrase: str) -> bool:
     * two or more distinct concept tokens in the intersection, OR
     * a multi-word substring match (e.g. "auto assign" in both
       phrases, after hyphen normalization).
+
+    Polarity matters: if both phrases share the same negation
+    (e.g. out-of-scope says "Do not use direct GitHub API
+    orchestration" and the work item acceptance note says "Must not
+    use direct GitHub API orchestration") the haystack is REINFORCING
+    the out-of-scope, not contradicting it. Polarity-matched matches
+    never count as contradictions.
     """
+    needle_negated = _polarity_is_negated(needle_phrase)
+    haystack_negated = _polarity_is_negated(haystack_phrase)
+    # Same-polarity match: the haystack is restating the out-of-scope,
+    # not inverting it. Never a contradiction.
+    if needle_negated == haystack_negated and (needle_negated or haystack_negated):
+        return False
+
     needle_tokens = set(_extract_phrase_tokens(needle_phrase))
     haystack_tokens = set(_extract_phrase_tokens(haystack_phrase))
     if not needle_tokens or not haystack_tokens:

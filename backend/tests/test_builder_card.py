@@ -415,11 +415,40 @@ def test_contradiction_check_keeps_non_conflicting_out_of_scope():
 
 
 def test_contradiction_check_flags_acceptance_notes_overlap():
+    """Positive (non-negated) acceptance note that names a default
+    out-of-scope concept IS a contradiction. The acceptance note is
+    in-scope-saying, not restating the guard."""
     item = _make_work_item()
-    item.acceptance_notes = "Must not use direct GitHub API orchestration."
+    item.acceptance_notes = (
+        "The implementation must integrate with GitHub API orchestration."
+    )
     result = check_out_of_scope_contradictions(item, [], DEFAULT_OUT_OF_SCOPE_ITEMS)
     removed = [r["removed_item"] for r in result.removed_items]
     assert "Do not use direct GitHub API orchestration." in removed
+
+
+def test_contradiction_check_does_not_remove_reinforced_out_of_scope():
+    """Regression (Codex P2 #2): if the work item RESTATES the
+    out-of-scope guard in the same negative form ('must not X'), the
+    haystack is reinforcing the guard, not contradicting it. The
+    out-of-scope line must stay in the rendered prompt."""
+    # Use a work item that does NOT itself conflict with the default
+    # out-of-scope list. The reinforced guard is the only overlap.
+    item = _make_work_item(
+        title="Add a new sidebar entry to the dashboard",
+        body="Wire the nav entry to the Work Items page.",
+        acceptance_notes="",
+    )
+    item.acceptance_notes = "Must not use direct GitHub API orchestration."
+    result = check_out_of_scope_contradictions(item, [], DEFAULT_OUT_OF_SCOPE_ITEMS)
+    assert result.removed_items == [], (
+        f"Reinforced out-of-scope guard must not be removed, got: "
+        f"{result.removed_items!r}"
+    )
+    assert any(
+        "Do not use direct GitHub API orchestration." in r
+        for r in result.filtered_out_of_scope
+    )
 
 
 def test_render_prompt_assembly_warnings_includes_removed_and_reason():
