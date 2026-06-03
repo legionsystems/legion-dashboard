@@ -32,12 +32,23 @@ from .worktree_paths import (
 WORKTREE_CREATE_TOOL = "/root/.hermes/LEGION_TOOLS/bin/legion-worktree-create"
 
 
-# Allowed integration base refs. The dashboard-side worktree creator
-# always starts a new feature branch from one of these so the
-# generated worktree is never off-base.
-INTEGRATION_BASE_REFS = (
-    "feature/dashboard-bootstrap-control-plane",
-)
+# Per-repo integration base refs. The dashboard-side worktree
+# creator starts a new feature branch from one of these so the
+# generated worktree is never off-base. Each repo can declare its
+# own list in priority order; the first ref that resolves on the
+# host is used (the host tool performs the existence check). This
+# prevents a hub-targeted work item from being asked to start from
+# a dashboard-only branch.
+_REPO_BASE_REFS = {
+    "legion-dashboard": (
+        "feature/dashboard-bootstrap-control-plane",
+        "main",
+    ),
+    "lgn-hub": (
+        "feature/dashboard-bootstrap-control-plane",
+        "main",
+    ),
+}
 
 
 def _shared_repo_slug_for_worktree(worktree_path: str) -> str:
@@ -127,6 +138,19 @@ def _worktree_create_result(
     return True, parsed, stderr
 
 
+def _select_base_ref(worktree_path: str) -> str:
+    """Return the first base ref the host tool should try for the
+    repo slug embedded in ``worktree_path``.
+
+    Repos that do not declare a base-ref list fall back to
+    ``"main"`` so we still get a sensible starting point.
+    """
+    repo_slug = _shared_repo_slug_for_worktree(worktree_path)
+    for ref in _REPO_BASE_REFS.get(repo_slug, ("main",)):
+        return ref
+    return "main"
+
+
 def ensure_task_worktree(
     db: Session,  # noqa: ARG001 - placeholder for future audit logging
     work_item,
@@ -157,7 +181,7 @@ def ensure_task_worktree(
         )
 
     feature_branch = _feature_branch_for_work_item(work_item)
-    chosen_base_ref = base_ref or INTEGRATION_BASE_REFS[0]
+    chosen_base_ref = base_ref or _select_base_ref(worktree_path)
     ok, parsed, stderr = _worktree_create_result(
         worktree_path=worktree_path,
         feature_branch=feature_branch,

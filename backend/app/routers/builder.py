@@ -356,10 +356,24 @@ def _create_builder_task(db: Session, work_item_id: int, request: SendToBuilderR
     # The repo safety lock (if acquired) is released on failure so a
     # misconfigured executor or a stale worktree does not pin the
     # shared repo for the next build.
+    #
+    # We compute a per-attempt ``attempt_id`` (1-indexed count of
+    # prior builder tasks for this work item) so each new send
+    # produces a fresh worktree folder and branch. The first send
+    # has attempt_id=1, the second send has attempt_id=2, and so
+    # on. This avoids the stale-worktree reuse trap when a previous
+    # attempt is ``done`` or ``archived`` and the active-task check
+    # permits a fresh build.
     # ------------------------------------------------------------------
+    prior_attempts = (
+        db.query(BuilderTask)
+        .filter(BuilderTask.work_item_id == work_item_id)
+        .count()
+    )
+    attempt_id = prior_attempts + 1
     try:
         target_worktree, _feature_branch, _wt_result = ensure_task_worktree(
-            db, work_item
+            db, work_item, builder_task_id=attempt_id
         )
     except RuntimeError as exc:
         if acquired_lock is not None:
