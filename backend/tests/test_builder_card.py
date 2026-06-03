@@ -220,6 +220,108 @@ def test_load_arbiter_mandatory_edits_handles_code_fenced_json(
     assert edits[0]["field"] == "f1"
 
 
+def test_load_arbiter_mandatory_edits_handles_prose_wrapped_json(
+    client, db_session
+):
+    """Regression: the debate executor accepts JSON surrounded by stray
+    prose. ``load_arbiter_mandatory_edits`` must do the same or it
+    silently drops ``mandatory_edits`` for an otherwise-valid run."""
+    item = _make_work_item()
+    db_session.add(item)
+    db_session.commit()
+    db_session.refresh(item)
+    run = DebateRun(
+        work_item_id=item.id,
+        work_item_type_snapshot="task",
+        status="completed",
+        final_recommendation="APPROVE_WITH_MANDATORY_EDITS",
+        implementation_readiness="READY_AFTER_EDITS",
+        summary="x",
+    )
+    db_session.add(run)
+    db_session.commit()
+    db_session.refresh(run)
+
+    payload = {
+        "recommendation": "APPROVE_WITH_MANDATORY_EDITS",
+        "implementation_readiness": "READY_AFTER_EDITS",
+        "mandatory_edits": [
+            {
+                "field": "f_prose",
+                "current_problem": "p_prose",
+                "required_change": "c_prose",
+            }
+        ],
+    }
+    # Prose prefix and suffix around the JSON, like a chatty model output.
+    prose_content = (
+        "Here is my final decision based on the debate:\n\n"
+        + json.dumps(payload)
+        + "\n\nI considered the operator's notes and the risks."
+    )
+    arg = DebateArgument(
+        debate_run_id=run.id,
+        round_number=3,
+        role="Final Arbiter",
+        side="arbiter",
+        content=prose_content,
+    )
+    db_session.add(arg)
+    db_session.commit()
+
+    edits = load_arbiter_mandatory_edits(db_session, run)
+    assert len(edits) == 1
+    assert edits[0]["field"] == "f_prose"
+    assert edits[0]["required_change"] == "c_prose"
+
+
+def test_load_arbiter_mandatory_edits_handles_nested_prose_json(
+    client, db_session
+):
+    """Nested braces inside the prose-wrapped JSON must not confuse the
+    depth tracker. Mandatory edits must still be extracted."""
+    item = _make_work_item()
+    db_session.add(item)
+    db_session.commit()
+    db_session.refresh(item)
+    run = DebateRun(
+        work_item_id=item.id,
+        work_item_type_snapshot="task",
+        status="completed",
+        final_recommendation="APPROVE_WITH_MANDATORY_EDITS",
+        implementation_readiness="READY_AFTER_EDITS",
+    )
+    db_session.add(run)
+    db_session.commit()
+    db_session.refresh(run)
+
+    payload = {
+        "recommendation": "APPROVE_WITH_MANDATORY_EDITS",
+        "implementation_readiness": "READY_AFTER_EDITS",
+        # ``mandatory_edits`` has a nested object inside a list entry.
+        "mandatory_edits": [
+            {
+                "field": "nested_field",
+                "current_problem": "see { nested } example",
+                "required_change": "do { thing: 1, other: 2 }",
+            }
+        ],
+    }
+    arg = DebateArgument(
+        debate_run_id=run.id,
+        round_number=3,
+        role="Final Arbiter",
+        side="arbiter",
+        content="preamble " + json.dumps(payload) + " tail",
+    )
+    db_session.add(arg)
+    db_session.commit()
+
+    edits = load_arbiter_mandatory_edits(db_session, run)
+    assert len(edits) == 1
+    assert edits[0]["field"] == "nested_field"
+
+
 def test_load_arbiter_mandatory_edits_returns_empty_when_no_arbiter_arg(
     client, db_session
 ):

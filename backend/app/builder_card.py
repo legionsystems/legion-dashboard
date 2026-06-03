@@ -65,10 +65,58 @@ def _normalize_mandatory_edit(raw: dict) -> dict:
     return out
 
 
-def _parse_arbiter_json(arbiter_content: str) -> Optional[dict]:
-    """Parse the Final Arbiter's stored JSON content, stripping code fences.
+def _extract_first_json_object(text: str) -> Optional[str]:
+    """Return the first balanced ``{...}`` substring of ``text``.
 
-    Returns ``None`` if the content is not a JSON object.
+    Mirrors the depth-tracking behaviour of
+    :func:`app.debate_executor.parse_arbiter_json` so we accept the same
+    arbiter outputs the executor accepts (including JSON surrounded by
+    stray prose). Returns ``None`` if no balanced object is found.
+    """
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        char = text[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
+
+
+def _parse_arbiter_json(arbiter_content: str) -> Optional[dict]:
+    """Parse the Final Arbiter's stored JSON content.
+
+    Handles three storage shapes:
+
+    1. Strict JSON: ``{"recommendation": ...}``
+    2. Markdown-fenced JSON: ``\\`\\`\\`json ... \\`\\`\\```
+    3. JSON wrapped in stray prose: ``"Here is the JSON: {...}"``
+
+    This matches what the debate executor accepts on the way in (its
+    :func:`parse_arbiter_json` strips fences and extracts a balanced
+    object). Without (3), ``load_arbiter_mandatory_edits`` would
+    silently drop ``mandatory_edits`` for any arbiter that added even
+    a one-word prefix/suffix to its JSON.
+
+    Returns ``None`` if no JSON object can be found or parsed.
     """
     if not arbiter_content:
         return None
@@ -77,10 +125,21 @@ def _parse_arbiter_json(arbiter_content: str) -> Optional[dict]:
         # Strip ```json / ``` fences if the parser left them in.
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
+        text = text.strip()
+    # Try strict parse first (cheap path).
     try:
         parsed = json.loads(text)
     except (ValueError, TypeError):
-        return None
+        # Fall back to extracting the first balanced JSON object.
+        # This is what the executor does when the model returns JSON
+        # wrapped in stray prose.
+        candidate = _extract_first_json_object(text)
+        if candidate is None:
+            return None
+        try:
+            parsed = json.loads(candidate)
+        except (ValueError, TypeError):
+            return None
     return parsed if isinstance(parsed, dict) else None
 
 
