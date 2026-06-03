@@ -116,13 +116,20 @@ def build_task_worktree_path(
 
     >>> build_task_worktree_path(WI(id=17, title="Auto-Assign Stance"),
     ...                          builder_task_id=42)
-    '/srv/worktrees/legion-dashboard-wi-17-auto-assign-stance-t_000017'
+    '/srv/worktrees/legion-dashboard/wi-17-auto-assign-stance/t_000042'
 
-    The path is stable for the same inputs. ``work_item.id`` is
-    always included. ``builder_task_id`` is included when known so
-    re-sending a work item to the builder (which currently creates a
-    new BuilderTask row) does not reuse a stale worktree folder
-    associated with a previous attempt.
+    Format: ``/srv/worktrees/<repo-slug>/<work-item-tag>-<title-slug>/<task-id>``.
+
+    The repo slug is its own path component so the host-side
+    ``legion-worktree-create`` tool can derive the source shared
+    operator/control repo (which lives at ``/srv/repo/<repo-slug>``)
+    without parsing. The work item tag and title slug are kept
+    readable in the path listing.
+
+    ``work_item.id`` is always included. ``builder_task_id`` is
+    included when known so re-sending a work item to the builder
+    (which currently creates a new BuilderTask row) does not reuse
+    a stale worktree folder associated with a previous attempt.
     """
     repo_slug = "legion-dashboard"
     if getattr(work_item, "target_app", None) and "hub" in work_item.target_app.lower():
@@ -131,14 +138,14 @@ def build_task_worktree_path(
     slug = _slugify(title_slug if title_slug is not None else getattr(work_item, "title", None))
     if not slug:
         slug = "task"
-    # Optional Work Item tag (e.g. "wi-17") for human readability.
     wi_tag = f"wi-{wi_id}" if wi_id is not None else "wi"
-    parts = [repo_slug, wi_tag, slug]
+    leaf = f"{wi_tag}-{slug}"
     if builder_task_id is not None:
-        parts.append(_worktree_id(builder_task_id))
+        leaf_id = _worktree_id(builder_task_id)
     else:
-        parts.append(_worktree_id(wi_id))
-    folder = "-".join(parts)
+        leaf_id = _worktree_id(wi_id)
+    folder_parts = [repo_slug, leaf, leaf_id]
+    folder = "/".join(folder_parts)
     if len(folder) > MAX_PATH_LEN - len(WORKTREES_ROOT) - 2:
         folder = folder[: MAX_PATH_LEN - len(WORKTREES_ROOT) - 2]
     path = f"{WORKTREES_ROOT}/{folder}"

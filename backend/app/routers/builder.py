@@ -352,12 +352,23 @@ def _create_builder_task(db: Session, work_item_id: int, request: SendToBuilderR
     # worktree, so we create (or reuse) the worktree BEFORE we
     # generate the prompt. A failure here blocks the send/start with
     # a 409 so the operator can see the misrouting.
+    #
+    # The repo safety lock (if acquired) is released on failure so a
+    # misconfigured executor or a stale worktree does not pin the
+    # shared repo for the next build.
     # ------------------------------------------------------------------
     try:
         target_worktree, _feature_branch, _wt_result = ensure_task_worktree(
             db, work_item
         )
     except RuntimeError as exc:
+        if acquired_lock is not None:
+            repo_safety.release_repo_lock(
+                db,
+                target_repo,
+                release_reason="worktree_create_failed",
+                final_status="failed",
+            )
         raise HTTPException(
             status_code=409,
             detail={

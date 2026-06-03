@@ -77,15 +77,18 @@ def test_build_task_worktree_path_is_under_worktrees():
 def test_build_task_worktree_path_includes_work_item_id():
     wi = _make_work_item(id=42)
     path = build_task_worktree_path(wi)
-    assert "wi-42" in path
+    # The ``wi-42-...`` leaf is one path component under the slug.
+    head = path[len(WORKTREES_ROOT) + 1 :].split("/")[1]
+    assert head.startswith("wi-42-"), head
     # Stable per-work-item identifier suffix.
-    assert path.endswith("-t_000042"), path
+    assert path.endswith("/t_000042"), path
 
 
 def test_build_task_worktree_path_includes_title_slug():
     wi = _make_work_item(title="Reorganize Dashboard Navigation")
     path = build_task_worktree_path(wi)
-    assert "reorganize-dashboard-navigation" in path, path
+    head = path[len(WORKTREES_ROOT) + 1 :].split("/")[1]
+    assert head.startswith("wi-17-reorganize-dashboard-navigation"), head
 
 
 def test_build_task_worktree_path_differs_per_builder_task_id():
@@ -94,7 +97,7 @@ def test_build_task_worktree_path_differs_per_builder_task_id():
     with_builder = build_task_worktree_path(wi, builder_task_id=99)
     assert base != with_builder
     # The with_builder variant uses the builder task id, not the wi id.
-    assert with_builder.endswith("-t_000099"), with_builder
+    assert with_builder.endswith("/t_000099"), with_builder
 
 
 def test_build_task_worktree_path_is_stable_for_same_inputs():
@@ -127,16 +130,36 @@ def test_build_task_worktree_path_rejects_traversal_attempt():
 
 
 def test_build_task_worktree_path_supports_hub_target_app():
-    wi = _make_work_item(target_app="lgn-hub", title="Some Hub Task")
+    wi = _make_work_item(id=7, target_app="lgn-hub", title="Some Hub Task")
     path = build_task_worktree_path(wi)
-    assert "/srv/worktrees/lgn-hub-" in path
+    # The repo slug must be its own path component so the host-side
+    # creator tool can derive /srv/repo/lgn-hub.
+    head = path[len(WORKTREES_ROOT) + 1 :].split("/")[0]
+    assert head == "lgn-hub", head
+    leaf = path[len(WORKTREES_ROOT) + 1 :].split("/")[1]
+    assert leaf.startswith("wi-7-some-hub-task"), leaf
 
 
 def test_build_task_worktree_path_handles_empty_title():
     wi = _make_work_item(id=8, title="")
     path = build_task_worktree_path(wi)
     # Falls back to a stable ``task`` slug.
-    assert "-task-" in path or path.endswith("-task"), path
+    assert "/wi-8-task/" in path, path
+
+
+def test_build_task_worktree_path_repo_slug_is_own_component():
+    """The first path component under /srv/worktrees/ must be the
+    repo slug so the host-side creator can derive the source
+    shared repo. Hub and dashboard targets both qualify."""
+    dash = build_task_worktree_path(_make_work_item(target_app="legion-dashboard"))
+    hub = build_task_worktree_path(_make_work_item(target_app="lgn-hub"))
+    # First non-root component is the slug itself.
+    for path, expected in (
+        (dash, "legion-dashboard"),
+        (hub, "lgn-hub"),
+    ):
+        head = path[len(WORKTREES_ROOT) + 1 :].split("/", 1)[0]
+        assert head == expected, (path, head, expected)
 
 
 def test_build_task_worktree_path_is_never_shared_repo():
@@ -166,7 +189,7 @@ def test_is_shared_repo_path_recognises_known_shared_paths():
 
 def test_is_shared_repo_path_rejects_worktree_paths():
     assert not is_shared_repo_path(
-        "/srv/worktrees/legion-dashboard-wi-17-auto-assign-stance-t_000017"
+        "/srv/worktrees/legion-dashboard/wi-17-auto-assign-stance/t_000017"
     )
 
 
@@ -210,22 +233,22 @@ def _build_prompt(**overrides):
 
 def test_prompt_targets_task_worktree_when_provided():
     body = _build_prompt(
-        target_worktree="/srv/worktrees/legion-dashboard-wi-17-auto-assign-stance-t_000017",
+        target_worktree="/srv/worktrees/legion-dashboard/wi-17-auto-assign-stance/t_000017",
     )
     assert "TARGET WORKTREE" in body or "Target Worktree" in body
     assert (
-        "/srv/worktrees/legion-dashboard-wi-17-auto-assign-stance-t_000017"
+        "/srv/worktrees/legion-dashboard/wi-17-auto-assign-stance/t_000017"
         in body
     )
     # The shared operator/control repo MUST NOT appear as the
     # implementation target.
     assert "TARGET REPO: /srv/repo/legion-dashboard" not in body
-    assert "TARGET REPO: /srv/worktrees/legion-dashboard-wi-17-auto-assign-stance-t_000017" in body
+    assert "TARGET REPO: /srv/worktrees/legion-dashboard/wi-17-auto-assign-stance/t_000017" in body
 
 
 def test_prompt_includes_shared_repo_rule_and_fail_fast():
     body = _build_prompt(
-        target_worktree="/srv/worktrees/legion-dashboard-wi-17-auto-assign-stance-t_000017",
+        target_worktree="/srv/worktrees/legion-dashboard/wi-17-auto-assign-stance/t_000017",
     )
     # The prompt must warn the builder about the shared operator/control repo.
     assert "WORKTREE RULE" in body
@@ -266,7 +289,7 @@ def test_prompt_does_not_direct_builder_to_shared_repo():
     appear in the body must be in a 'do not use' context, not a
     'use this' context."""
     body = _build_prompt(
-        target_worktree="/srv/worktrees/legion-dashboard-wi-17-auto-assign-stance-t_000017",
+        target_worktree="/srv/worktrees/legion-dashboard/wi-17-auto-assign-stance/t_000017",
     )
     # The only references to /srv/repo/legion-dashboard in the body
     # are inside the WORKTREE RULE / WORKTREE METADATA blocks that
@@ -288,29 +311,29 @@ def test_prompt_does_not_direct_builder_to_shared_repo():
 
 def test_prompt_phase_1_uses_task_worktree_path():
     body = _build_prompt(
-        target_worktree="/srv/worktrees/legion-dashboard-wi-17-auto-assign-stance-t_000017",
+        target_worktree="/srv/worktrees/legion-dashboard/wi-17-auto-assign-stance/t_000017",
     )
     # PHASE 1 INSPECT should `cd` into the worktree.
     assert (
-        "cd /srv/worktrees/legion-dashboard-wi-17-auto-assign-stance-t_000017"
+        "cd /srv/worktrees/legion-dashboard/wi-17-auto-assign-stance/t_000017"
         in body
     )
 
 
 def test_prompt_secret_scan_and_codex_review_use_task_worktree():
     body = _build_prompt(
-        target_worktree="/srv/worktrees/legion-dashboard-wi-17-auto-assign-stance-t_000017",
+        target_worktree="/srv/worktrees/legion-dashboard/wi-17-auto-assign-stance/t_000017",
     )
-    worktree = "/srv/worktrees/legion-dashboard-wi-17-auto-assign-stance-t_000017"
+    worktree = "/srv/worktrees/legion-dashboard/wi-17-auto-assign-stance/t_000017"
     assert f"--repo {worktree}" in body
 
 
 def test_prompt_worktree_metadata_block_lists_assigned_path():
     body = _build_prompt(
-        target_worktree="/srv/worktrees/legion-dashboard-wi-17-auto-assign-stance-t_000017",
+        target_worktree="/srv/worktrees/legion-dashboard/wi-17-auto-assign-stance/t_000017",
     )
     assert "WORKTREE METADATA" in body
-    assert "Target Worktree: /srv/worktrees/legion-dashboard-wi-17-auto-assign-stance-t_000017" in body
+    assert "Target Worktree: /srv/worktrees/legion-dashboard/wi-17-auto-assign-stance/t_000017" in body
     assert "Shared Operator/Control Repo: /srv/repo/legion-dashboard" in body
     assert "Using Dedicated Worktree: yes" in body
 
@@ -355,7 +378,7 @@ def test_router_adapter_generated_prompt_targets_task_worktree(monkeypatch):
         builder_task_id=7,
     )
     assert (
-        "/srv/worktrees/legion-dashboard-wi-17-auto-assign-stance-t_000007"
+        "/srv/worktrees/legion-dashboard/wi-17-auto-assign-stance/t_000007"
         in body
     )
     assert "TARGET REPO: /srv/repo/legion-dashboard" not in body
@@ -461,4 +484,81 @@ def test_ensure_task_worktree_creates_worktree_on_real_runner(tmp_path):
             feature_branch,
         ],
         check=False,  # OK if already gone
+    )
+
+
+def test_router_releases_repo_lock_when_worktree_create_fails(
+    client, db_session, monkeypatch
+):
+    """Regression (Codex P1 #2): if the worktree orchestrator fails
+    after the repo safety lock is acquired, the lock MUST be
+    released so a subsequent build is not pinned by a phantom lock.
+    """
+    from app.routers import builder as builder_router
+    from app.models import RepoLock, WorkItem
+    from app import preview_deploy
+    from tests.test_builder import (
+        _patch_target_repo,
+        _stub_hermes,
+        _stub_executor,
+    )
+
+    # Persist the work item so the router can fetch it from the DB.
+    item = WorkItem(
+        type="task",
+        title="Lock Release Smoke",
+        status="approved",
+        priority="medium",
+        source="operator",
+        approved_by_operator=True,
+        target_app="legion-dashboard",
+    )
+    db_session.add(item)
+    db_session.commit()
+    db_session.refresh(item)
+
+    # Pin the worktree orchestrator to fail.
+    def _explode(*_args, **_kwargs):
+        raise RuntimeError("simulated worktree-create failure")
+
+    monkeypatch.setattr(builder_router, "ensure_task_worktree", _explode)
+
+    # Stub the executor so the safety gate passes.
+    _stub_executor(
+        monkeypatch,
+        preview_deploy.ExecutorResponse(
+            success=True,
+            raw={
+                "success": True,
+                "action": "repo_safety_check",
+                "is_clean": True,
+                "dirty_files": [],
+                "staged_files": [],
+                "untracked_files": [],
+                "current_branch": "feature/dashboard-bootstrap-control-plane",
+                "current_commit": "d" * 40,
+                "blocker_code": None,
+                "blocker_message": None,
+            },
+        ),
+    )
+    _stub_hermes(monkeypatch, task_id="hermes-no-need")
+    _patch_target_repo(monkeypatch, "/srv/repo/legion-dashboard")
+
+    response = client.post(
+        f"/api/builder/work-items/{item.id}/start-build", json={}
+    )
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert detail["blocker_code"] == "blocked_worktree_create_failed"
+
+    # The repo lock MUST have been released; no active locks remain.
+    active_locks = (
+        db_session.query(RepoLock)
+        .filter(RepoLock.repo_path == "/srv/repo/legion-dashboard")
+        .filter(RepoLock.lock_status == "active")
+        .count()
+    )
+    assert active_locks == 0, (
+        f"repo lock leaked after worktree-create failure: {active_locks}"
     )
