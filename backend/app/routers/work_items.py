@@ -1484,12 +1484,13 @@ def rerun_arbiter(
     run = (
         db.query(DebateRun)
         .filter(DebateRun.id == run_id, DebateRun.work_item_id == work_item_id)
+        .with_for_update()
         .first()
     )
     if run is None:
         raise HTTPException(status_code=404, detail="Debate run not found")
 
-    # P2-2: Prevent concurrent arbiter reruns — check before other guards
+    # P2-2: Prevent concurrent arbiter reruns — checked under row lock
     _IN_PROGRESS_STATUSES = frozenset({"queued", "claimed", "warming", "running", "generating"})
     if run.status in _IN_PROGRESS_STATUSES:
         raise HTTPException(
@@ -1504,8 +1505,8 @@ def rerun_arbiter(
             detail=f"Cannot rerun arbiter: run status is '{run.status}', expected 'failed'",
         )
 
-    # Guard: must be arbiter-specific failure
-    if run.error_type and not run.error_type.startswith("arbiter_"):
+    # Guard: must be arbiter-specific failure (require error_type to be present)
+    if not run.error_type or not run.error_type.startswith("arbiter_"):
         raise HTTPException(
             status_code=400,
             detail=f"Cannot rerun arbiter: error_type is '{run.error_type}', expected arbiter failure",
