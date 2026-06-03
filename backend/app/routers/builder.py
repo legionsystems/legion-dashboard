@@ -14,6 +14,10 @@ from ..builder_card import (
     build_implementation_card_prompt,
     load_arbiter_mandatory_edits,
 )
+from ..worktree_paths import (
+    build_task_worktree_path,
+    is_shared_repo_path,
+)
 from ..models import BuilderTask, DebateRun, RepoLock, WorkItem
 from .. import repo_safety
 from ..schemas_builder import BuilderTaskResponse, SendToBuilderRequest
@@ -32,6 +36,32 @@ def _resolve_target_repo_path(work_item: WorkItem) -> str:
     return "/srv/repo/legion-dashboard"
 
 
+def _compute_task_worktree_path(
+    work_item: WorkItem,
+    builder_task_id: Optional[int] = None,
+) -> str:
+    """Return the task-specific worktree path the builder should use.
+
+    This is the SINGLE place that decides what worktree a given
+    builder task is assigned to. The shared operator/control worktree
+    is never returned for an implementation task.
+    """
+    path = build_task_worktree_path(
+        work_item, builder_task_id=builder_task_id
+    )
+    # Defensive: a future regression in the helper could conceivably
+    # produce a path that collides with the shared operator/control
+    # repo. Fail loudly so the operator sees the misrouting rather
+    # than the builder working in the wrong worktree.
+    if is_shared_repo_path(path):
+        raise RuntimeError(
+            f"Task worktree path {path!r} collides with a shared "
+            f"operator/control repo path. Refusing to generate a "
+            f"builder prompt for work item {work_item.id}."
+        )
+    return path
+
+
 def _generate_hermes_prompt(
     work_item: WorkItem,
     db: Optional[Session] = None,
@@ -39,6 +69,7 @@ def _generate_hermes_prompt(
     recommendation: Optional[str] = None,
     implementation_readiness: Optional[str] = None,
     mandatory_edits: Optional[list] = None,
+    builder_task_id: Optional[int] = None,
 ) -> str:
     """Generate the Hermes Kanban implementation card body.
 
@@ -48,8 +79,20 @@ def _generate_hermes_prompt(
     from the structured source (the Final Arbiter's JSON, parsed from
     the latest ``DebateArgument``) rather than the previous misuse of
     ``DebateRun.summary`` (which stores the rationale text).
+
+    The generated prompt ALWAYS targets a task-specific worktree
+    under ``/srv/worktrees/``. The shared operator/control worktree
+    is reserved for operator/control work only and is never used as
+    the implementation target.
     """
-    target_repo = _resolve_target_repo_path(work_item)
+    target_worktree = _compute_task_worktree_path(
+        work_item, builder_task_id=builder_task_id
+    )
+    # ``target_repo`` stays in sync with the worktree so the rest of
+    # the prompt (PHASE 1, secret scan, Codex review) sees the same
+    # path. Keeping the alias also preserves the safety gate
+    # contract: it expects a path it can ``cd`` into.
+    target_repo = target_worktree
 
     # Resolve mandatory edits in priority order:
     #   1. explicit ``mandatory_edits`` list passed in
@@ -72,8 +115,8 @@ def _generate_hermes_prompt(
         implementation_readiness=implementation_readiness,
         mandatory_edits=edits,
         target_repo=target_repo,
+        target_worktree=target_worktree,
     )
-    return prompt
 
 
 def _create_hermes_task(title: str, body: str, assignee: Optional[str] = None, idempotency_key: Optional[str] = None, priority: Optional[str] = None, status_override: Optional[str] = None) -> dict:
