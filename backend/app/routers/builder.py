@@ -10,171 +10,69 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..builder_status_projection import sync_work_item_status_from_builder
-from ..models import BuilderTask, RepoLock, WorkItem
+from ..builder_card import (
+    build_implementation_card_prompt,
+    load_arbiter_mandatory_edits,
+)
+from ..models import BuilderTask, DebateRun, RepoLock, WorkItem
 from .. import repo_safety
 from ..schemas_builder import BuilderTaskResponse, SendToBuilderRequest
 
 router = APIRouter(prefix="/api/builder", tags=["builder"])
 
 
-def _generate_hermes_prompt(work_item: WorkItem, debate_run_id: Optional[int] = None, recommendation: Optional[str] = None, implementation_readiness: Optional[str] = None, mandatory_edits_json: Optional[str] = None) -> str:
-    """Generate Hermes Kanban task body/prompt."""
-    # Parse mandatory edits if present
-    mandatory_edits_str = ""
-    if mandatory_edits_json:
-        try:
-            edits = json.loads(mandatory_edits_json)
-            if isinstance(edits, list) and len(edits) > 0:
-                mandatory_edits_str = "\n\nMANDATORY EDITS:\n" + "\n".join([f"- {e.get('field', 'Field')}: {e.get('required_change', 'Change required')}" for e in edits])
-        except Exception:
-            pass
-    
-    # Derive target repo from work item type/app
-    target_repo = "/srv/repo/legion-dashboard"
-    if work_item.target_app:
-        if "hub" in work_item.target_app.lower():
-            target_repo = "/srv/repo/lgn-hub"
-        elif "dashboard" in work_item.target_app.lower():
-            target_repo = "/srv/repo/legion-dashboard"
-    
-    prompt = f"""PROMPT ID: LEGION-IMPLEMENT-WI-{work_item.id}-CARD-001
-PROMPT TYPE: approved-implementation-merge-deploy
-TARGET HOST: lgn-remote-01
-TARGET REPO: {target_repo}
-TARGET PR: new PR only AFTER local pre-push review passes
-TASK: {work_item.title}
-EXPECTED OUTCOME: Implement approved work item according to debate outcome{mandatory_edits_str}
+def _resolve_target_repo_path(work_item: WorkItem) -> str:
+    """Derive the on-host target repo path from the work item's target_app.
 
-SAFETY GATE — READ FIRST
+    Kept as a small helper so both the prompt assembly and the safety
+    gate agree on the same path.
+    """
+    if work_item.target_app and "hub" in work_item.target_app.lower():
+        return "/srv/repo/lgn-hub"
+    return "/srv/repo/legion-dashboard"
 
-You are working on lgn-remote-01.
 
-Before doing any repo, git, Docker, or file mutation:
-1. Verify hostname is lgn-remote-01.
-2. Verify repo path is {target_repo}.
-3. Verify current branch and git status.
-4. Preserve dirty work.
-5. Do not modify Hermes source/config.
-6. Do not modify Ollama hosts, ai-4080, LEGION, or model runtime configuration.
-7. Do not expose API keys, provider secrets, prompts, private work item data, raw model prompts, or raw attachment contents in logs.
-8. Do not hard-delete any history.
-9. Do NOT push branch or create PR until local pre-push review passes.
-9. Do not auto-approve or auto-implement without certification.
+def _generate_hermes_prompt(
+    work_item: WorkItem,
+    db: Optional[Session] = None,
+    debate_run_id: Optional[int] = None,
+    recommendation: Optional[str] = None,
+    implementation_readiness: Optional[str] = None,
+    mandatory_edits: Optional[list] = None,
+) -> str:
+    """Generate the Hermes Kanban implementation card body.
 
-WORK ITEM DETAILS
+    The canonical assembly lives in :mod:`app.builder_card`. This
+    adapter exists so callers that previously passed
+    ``mandatory_edits_json`` still work, and so the prompt is built
+    from the structured source (the Final Arbiter's JSON, parsed from
+    the latest ``DebateArgument``) rather than the previous misuse of
+    ``DebateRun.summary`` (which stores the rationale text).
+    """
+    target_repo = _resolve_target_repo_path(work_item)
 
-- ID: {work_item.id}
-- Type: {work_item.type}
-- Priority: {work_item.priority}
-- Target App: {work_item.target_app or "N/A"}
-- Source: {work_item.source}
-- Acceptance Notes: {work_item.acceptance_notes or "None provided"}
+    # Resolve mandatory edits in priority order:
+    #   1. explicit ``mandatory_edits`` list passed in
+    #   2. the structured arbiter JSON from the latest DebateArgument
+    #   3. empty (APPROVE_AS_IS / no debate)
+    edits: list = []
+    if mandatory_edits is not None:
+        edits = list(mandatory_edits)
+    elif db is not None and debate_run_id is not None:
+        debate_run = (
+            db.query(DebateRun).filter(DebateRun.id == debate_run_id).first()
+        )
+        if debate_run is not None:
+            edits = load_arbiter_mandatory_edits(db, debate_run)
 
-DEBATE OUTCOME
-
-- Recommendation: {recommendation or "Not recorded"}
-- Implementation Readiness: {implementation_readiness or "Not recorded"}
-- Debate Run ID: {debate_run_id or "Not recorded"}
-
-OUT OF SCOPE
-
-- Do not implement Planning Chat, Discord notifications, attachments, debate display modes, clear/reset debates, Re-run Arbiter, operator-argument stance auto-assign, model/provider settings, or unrelated debate repair work.
-- Do not use direct GitHub API orchestration.
-- Do not create external/public demo or staging deployments unless already part of the existing Hermes implementation flow.
-
-LOCAL PRE-PUSH REVIEW GATE — MANDATORY
-
-Before pushing any branch or creating a PR, you MUST complete these steps locally:
-
-1. Create local implementation branch (do NOT push yet):
-   git checkout -b feature/<your-feature-name>
-
-2. Implement and commit locally:
-   git add <files>
-   git commit -m "descriptive message"
-
-3. Run deterministic checks:
-   git diff --check
-   cd backend && .venv/bin/pytest tests/ -q
-   cd frontend && npm run build
-
-4. Run local secret scan:
-   /root/.hermes/LEGION_TOOLS/bin/legion-secret-scan --repo {target_repo} --base <base-branch> --head <your-branch>
-
-5. Run local Codex review (NO PR REQUIRED):
-   /root/.hermes/LEGION_TOOLS/bin/legion-codex-local-review \\
-     --repo {target_repo} \\
-     --base <base-branch> \\
-     --head <your-branch> \\
-     --report /root/.hermes/LEGION_TOOLS/LOCAL_CODEX_REVIEW_<WI_ID>.md
-
-6. Verify local review verdict:
-   - Must be APPROVE or APPROVE_WITH_NON_BLOCKING_NOTES
-   - If REQUEST_CHANGES or BLOCKED: fix issues, re-run gates, DO NOT PUSH
-
-7. ONLY AFTER local review passes:
-   git push origin <your-branch>
-   gh pr create --base <base-branch> --head <your-branch> ...
-
-WARNING: Pushing before local review passes may expose secrets or incomplete work.
-
-PHASE 1 — INSPECT
-
-Run:
-hostname
-cd {target_repo} || exit 1
-git status --short
-git branch --show-current
-git log -60 --oneline --decorate
-
-Preserve dirty work before making changes.
-
-PHASE 2 — IMPLEMENT
-
-Implement the approved scope according to:
-- Work item title and description
-- Acceptance notes
-- Mandatory edits (if APPROVE_WITH_MANDATORY_EDITS)
-- Original scope (if APPROVE_AS_IS)
-
-Do not downgrade or skip mandatory edits.
-
-PHASE 3 — TESTS
-
-Run:
-- git diff --check
-- backend tests
-- frontend build/test if present
-- docker compose config
-
-PHASE 4 — INDEPENDENT REVIEW
-
-Reviewer must use independent route from Builder.
-Do not certify if implementation and review used same backend/model/profile.
-
-PHASE 5 — COMMIT / MERGE / DEPLOY
-
-If validation passes and review is CERTIFIED:
-1. Commit with descriptive message
-2. Verify local pre-push review passed:
-   - git diff --check: clean
-   - Secret scan: PASSED
-   - Local Codex review: APPROVE or APPROVE_WITH_NON_BLOCKING_NOTES
-3. Push feature branch (ONLY if above checks pass)
-3. Open/update PR to main
-4. Merge automatically if clean
-5. Sync main
-6. Deploy if applicable
-7. Runtime verify
-
-PHASE 6 — REPORT
-
-Write final report to /root/.hermes/LEGION_TOOLS/ with implementation provenance.
-
-FINAL RESPONSE
-
-Return only the clean LEGION TASK RESULT block.
-"""
+    return build_implementation_card_prompt(
+        work_item,
+        debate_run_id=debate_run_id,
+        recommendation=recommendation,
+        implementation_readiness=implementation_readiness,
+        mandatory_edits=edits,
+        target_repo=target_repo,
+    )
     return prompt
 
 
@@ -406,10 +304,10 @@ def _create_builder_task(db: Session, work_item_id: int, request: SendToBuilderR
     # Generate prompt
     prompt_body = _generate_hermes_prompt(
         work_item=work_item,
+        db=db,
         debate_run_id=latest_debate.id if latest_debate else None,
         recommendation=latest_debate.final_recommendation if latest_debate else None,
         implementation_readiness=latest_debate.implementation_readiness if latest_debate else None,
-        mandatory_edits_json=latest_debate.summary if latest_debate else None,
     )
     
     # Create Hermes task. If this fails we must release the lock we just
@@ -435,6 +333,16 @@ def _create_builder_task(db: Session, work_item_id: int, request: SendToBuilderR
         raise
 
     # Create builder task record
+    # mandatory_edits_json is now a real JSON list of mandatory edits
+    # extracted from the Final Arbiter's structured output. It used to
+    # be set to DebateRun.summary (which is the rationale text) — that
+    # was a prompt-generation bug. The actual edits live on the latest
+    # DebateArgument with side='arbiter'.
+    mandatory_edits_for_record: list = []
+    if latest_debate is not None:
+        mandatory_edits_for_record = load_arbiter_mandatory_edits(
+            db, latest_debate
+        )
     builder_task = BuilderTask(
         work_item_id=work_item_id,
         hermes_task_id=hermes_result["task_id"],
@@ -448,7 +356,11 @@ def _create_builder_task(db: Session, work_item_id: int, request: SendToBuilderR
         debate_run_id=latest_debate.id if latest_debate else None,
         recommendation=latest_debate.final_recommendation if latest_debate else None,
         implementation_readiness=latest_debate.implementation_readiness if latest_debate else None,
-        mandatory_edits_json=latest_debate.summary if latest_debate else None,
+        mandatory_edits_json=(
+            json.dumps(mandatory_edits_for_record)
+            if mandatory_edits_for_record
+            else None
+        ),
         generated_prompt_snapshot=prompt_body,
     )
 
