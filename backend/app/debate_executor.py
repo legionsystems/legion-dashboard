@@ -35,6 +35,7 @@ from sqlalchemy.orm import Session
 
 from .models import DebateArgument, DebateExecutionConfig, DebateRun, OperatorDebateInput, WorkItem
 from .debate_warmup import warm_model_ollama_native, warm_model_openai_compatible
+from .debate import classify_operator_stance
 
 
 # Debate roles in order
@@ -951,7 +952,7 @@ def execute_debate_run(
             if not inp.considered_in_run_id:
                 inp.considered_in_run_id = run.id
                 if inp.stance_requested == "auto_assign":
-                    inp.stance_assigned = "neutral"
+                    inp.stance_assigned = classify_operator_stance(inp.content)
                 db_session.add(inp)
 
         # Finalize run state - enforce final-state invariant

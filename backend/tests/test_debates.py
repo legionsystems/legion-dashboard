@@ -260,14 +260,14 @@ def test_operator_argument_attached_to_manual_rerun(client):
 
 
 def test_auto_assign_stance_recorded_when_run_consumes_input(client):
-    """An auto_assign input keeps stance_assigned=None until execution
-    actually places it on a side. With the bridge unconfigured we leave
-    stance_assigned NULL on purpose — see debate.attach_operator_inputs_to_run.
+    """An auto_assign input gets classified into PRO/CON/NEUTRAL when a
+    run consumes it. With the bridge unconfigured the classifier runs at
+    attachment time based on content keywords.
     """
     item = _create(client, title="Stance-record")
     client.post(
         f"/api/work-items/{item['id']}/debate-inputs",
-        json={"content": "Mild concern.", "stance_requested": "pro"},
+        json={"content": "I support this and recommend we approve it.", "stance_requested": "auto_assign"},
     )
     rerun = client.post(
         f"/api/work-items/{item['id']}/debates",
@@ -275,8 +275,151 @@ def test_auto_assign_stance_recorded_when_run_consumes_input(client):
     )
     assert rerun.status_code == 201
     inputs = client.get(f"/api/work-items/{item['id']}/debate-inputs").json()
+    # Auto-assigned content with supporting keywords should be classified as PRO
     assert inputs[0]["stance_assigned"] == "pro"
     assert inputs[0]["considered_in_run_id"] == rerun.json()["id"]
+
+
+def test_auto_assign_classifies_pro_content(client):
+    """An auto_assign argument with supporting content is classified as PRO."""
+    item = _create(client, title="Auto-pro")
+    client.post(
+        f"/api/work-items/{item['id']}/debate-inputs",
+        json={
+            "content": "I support this work item. It provides clear benefits and improves the workflow.",
+            "stance_requested": "auto_assign",
+        },
+    )
+    rerun = client.post(
+        f"/api/work-items/{item['id']}/debates",
+        json={"rounds": 2, "trigger": "manual_rerun"},
+    )
+    assert rerun.status_code == 201
+    run_id = rerun.json()["id"]
+
+    # Check stance_assigned on the operator input
+    inputs = client.get(f"/api/work-items/{item['id']}/debate-inputs").json()
+    assert inputs[0]["stance_assigned"] == "pro"
+    assert inputs[0]["considered_in_run_id"] == run_id
+
+    # Check the DebateArgument side reflects the classification
+    full = client.get(
+        f"/api/work-items/{item['id']}/debates/{run_id}"
+    ).json()
+    op_args = [a for a in full["arguments"] if a["role"] == "Operator"]
+    assert len(op_args) == 1
+    assert op_args[0]["side"] == "pro"
+
+
+def test_auto_assign_classifies_con_content(client):
+    """An auto_assign argument with opposing content is classified as CON."""
+    item = _create(client, title="Auto-con")
+    client.post(
+        f"/api/work-items/{item['id']}/debate-inputs",
+        json={
+            "content": "I have concerns about this approach. There are risks and potential problems.",
+            "stance_requested": "auto_assign",
+        },
+    )
+    rerun = client.post(
+        f"/api/work-items/{item['id']}/debates",
+        json={"rounds": 2, "trigger": "manual_rerun"},
+    )
+    assert rerun.status_code == 201
+    run_id = rerun.json()["id"]
+
+    inputs = client.get(f"/api/work-items/{item['id']}/debate-inputs").json()
+    assert inputs[0]["stance_assigned"] == "con"
+
+    full = client.get(
+        f"/api/work-items/{item['id']}/debates/{run_id}"
+    ).json()
+    op_args = [a for a in full["arguments"] if a["role"] == "Operator"]
+    assert len(op_args) == 1
+    assert op_args[0]["side"] == "con"
+
+
+def test_auto_assign_classifies_neutral_content(client):
+    """An auto_assign argument with only contextual content is NEUTRAL."""
+    item = _create(client, title="Auto-neutral")
+    client.post(
+        f"/api/work-items/{item['id']}/debate-inputs",
+        json={
+            "content": "This work item was created on Tuesday. The team has 5 engineers.",
+            "stance_requested": "auto_assign",
+        },
+    )
+    rerun = client.post(
+        f"/api/work-items/{item['id']}/debates",
+        json={"rounds": 2, "trigger": "manual_rerun"},
+    )
+    assert rerun.status_code == 201
+    run_id = rerun.json()["id"]
+
+    inputs = client.get(f"/api/work-items/{item['id']}/debate-inputs").json()
+    assert inputs[0]["stance_assigned"] == "neutral"
+
+    full = client.get(
+        f"/api/work-items/{item['id']}/debates/{run_id}"
+    ).json()
+    op_args = [a for a in full["arguments"] if a["role"] == "Operator"]
+    assert len(op_args) == 1
+    assert op_args[0]["side"] == "neutral"
+
+
+def test_manual_stance_not_overwritten_by_auto_assign(client):
+    """Manual PRO/CON/NEUTRAL selections are preserved and not re-classified."""
+    item = _create(client, title="Manual-preserve")
+    # Submit with explicit manual stance
+    resp = client.post(
+        f"/api/work-items/{item['id']}/debate-inputs",
+        json={"content": "I disagree with this approach.", "stance_requested": "con"},
+    )
+    assert resp.status_code == 201
+
+    rerun = client.post(
+        f"/api/work-items/{item['id']}/debates",
+        json={"rounds": 2, "trigger": "manual_rerun"},
+    )
+    assert rerun.status_code == 201
+
+    inputs = client.get(f"/api/work-items/{item['id']}/debate-inputs").json()
+    # Manual stance preserved, not re-classified
+    assert inputs[0]["stance_requested"] == "con"
+    assert inputs[0]["stance_assigned"] == "con"
+
+
+def test_auto_assign_persists_across_refresh(client):
+    """The assigned stance survives a page refresh (re-fetch from API)."""
+    item = _create(client, title="Persist-test")
+    client.post(
+        f"/api/work-items/{item['id']}/debate-inputs",
+        json={
+            "content": "This is a good idea and I recommend we approve it.",
+            "stance_requested": "auto_assign",
+        },
+    )
+    rerun = client.post(
+        f"/api/work-items/{item['id']}/debates",
+        json={"rounds": 2, "trigger": "manual_rerun"},
+    )
+    assert rerun.status_code == 201
+    run_id = rerun.json()["id"]
+
+    # First fetch
+    inputs1 = client.get(f"/api/work-items/{item['id']}/debate-inputs").json()
+    assert inputs1[0]["stance_assigned"] == "pro"
+
+    # Second fetch (simulates refresh)
+    inputs2 = client.get(f"/api/work-items/{item['id']}/debate-inputs").json()
+    assert inputs2[0]["stance_assigned"] == "pro"
+
+    # Debate run detail also shows the stance consistently
+    detail = client.get(
+        f"/api/work-items/{item['id']}/debates/{run_id}"
+    ).json()
+    op_args = [a for a in detail["arguments"] if a["role"] == "Operator"]
+    assert op_args[0]["side"] == "pro"
 
 
 # ---------------------------------------------------------------------------
