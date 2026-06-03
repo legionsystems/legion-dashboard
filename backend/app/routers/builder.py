@@ -41,7 +41,7 @@ def _generate_hermes_prompt(work_item: WorkItem, debate_run_id: Optional[int] = 
 PROMPT TYPE: approved-implementation-merge-deploy
 TARGET HOST: lgn-remote-01
 TARGET REPO: {target_repo}
-TARGET PR: new PR to main
+TARGET PR: new PR only AFTER local pre-push review passes
 TASK: {work_item.title}
 EXPECTED OUTCOME: Implement approved work item according to debate outcome{mandatory_edits_str}
 
@@ -58,6 +58,7 @@ Before doing any repo, git, Docker, or file mutation:
 6. Do not modify Ollama hosts, ai-4080, LEGION, or model runtime configuration.
 7. Do not expose API keys, provider secrets, prompts, private work item data, raw model prompts, or raw attachment contents in logs.
 8. Do not hard-delete any history.
+9. Do NOT push branch or create PR until local pre-push review passes.
 9. Do not auto-approve or auto-implement without certification.
 
 WORK ITEM DETAILS
@@ -80,6 +81,42 @@ OUT OF SCOPE
 - Do not implement Planning Chat, Discord notifications, attachments, debate display modes, clear/reset debates, Re-run Arbiter, operator-argument stance auto-assign, model/provider settings, or unrelated debate repair work.
 - Do not use direct GitHub API orchestration.
 - Do not create external/public demo or staging deployments unless already part of the existing Hermes implementation flow.
+
+LOCAL PRE-PUSH REVIEW GATE — MANDATORY
+
+Before pushing any branch or creating a PR, you MUST complete these steps locally:
+
+1. Create local implementation branch (do NOT push yet):
+   git checkout -b feature/<your-feature-name>
+
+2. Implement and commit locally:
+   git add <files>
+   git commit -m "descriptive message"
+
+3. Run deterministic checks:
+   git diff --check
+   cd backend && .venv/bin/pytest tests/ -q
+   cd frontend && npm run build
+
+4. Run local secret scan:
+   /root/.hermes/LEGION_TOOLS/bin/legion-secret-scan --repo {target_repo} --base <base-branch> --head <your-branch>
+
+5. Run local Codex review (NO PR REQUIRED):
+   /root/.hermes/LEGION_TOOLS/bin/legion-codex-local-review \\
+     --repo {target_repo} \\
+     --base <base-branch> \\
+     --head <your-branch> \\
+     --report /root/.hermes/LEGION_TOOLS/LOCAL_CODEX_REVIEW_<WI_ID>.md
+
+6. Verify local review verdict:
+   - Must be APPROVE or APPROVE_WITH_NON_BLOCKING_NOTES
+   - If REQUEST_CHANGES or BLOCKED: fix issues, re-run gates, DO NOT PUSH
+
+7. ONLY AFTER local review passes:
+   git push origin <your-branch>
+   gh pr create --base <base-branch> --head <your-branch> ...
+
+WARNING: Pushing before local review passes may expose secrets or incomplete work.
 
 PHASE 1 — INSPECT
 
@@ -119,7 +156,11 @@ PHASE 5 — COMMIT / MERGE / DEPLOY
 
 If validation passes and review is CERTIFIED:
 1. Commit with descriptive message
-2. Push feature branch
+2. Verify local pre-push review passed:
+   - git diff --check: clean
+   - Secret scan: PASSED
+   - Local Codex review: APPROVE or APPROVE_WITH_NON_BLOCKING_NOTES
+3. Push feature branch (ONLY if above checks pass)
 3. Open/update PR to main
 4. Merge automatically if clean
 5. Sync main
