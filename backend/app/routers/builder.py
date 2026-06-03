@@ -72,6 +72,7 @@ def _generate_hermes_prompt(
     mandatory_edits: Optional[list] = None,
     builder_task_id: Optional[int] = None,
     feature_branch: Optional[str] = None,
+    chosen_base_ref: Optional[str] = None,
 ) -> str:
     """Generate the Hermes Kanban implementation card body.
 
@@ -126,6 +127,7 @@ def _generate_hermes_prompt(
         target_repo=target_repo,
         target_worktree=target_worktree,
         feature_branch=feature_branch,
+        chosen_base_ref=chosen_base_ref,
     )
 
 
@@ -381,7 +383,12 @@ def _create_builder_task(db: Session, work_item_id: int, request: SendToBuilderR
     )
     attempt_id = prior_attempts + 1
     try:
-        target_worktree, feature_branch, _wt_result = ensure_task_worktree(
+        (
+            target_worktree,
+            feature_branch,
+            chosen_base_ref,
+            _wt_result,
+        ) = ensure_task_worktree(
             db, work_item, builder_task_id=attempt_id
         )
     except RuntimeError as exc:
@@ -416,6 +423,7 @@ def _create_builder_task(db: Session, work_item_id: int, request: SendToBuilderR
         implementation_readiness=latest_debate.implementation_readiness if latest_debate else None,
         builder_task_id=attempt_id,
         feature_branch=feature_branch,
+        chosen_base_ref=chosen_base_ref,
     )
     
     # Create Hermes task. If this fails we must release the lock we just

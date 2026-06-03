@@ -19,7 +19,7 @@ import json
 import os
 import re
 import subprocess
-from typing import Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 from sqlalchemy.orm import Session
 
@@ -159,17 +159,68 @@ def _worktree_create_result(
     return True, parsed, stderr
 
 
-def _select_base_ref(worktree_path: str) -> str:
-    """Return the first base ref the host tool should try for the
-    repo slug embedded in ``worktree_path``.
+def _candidate_base_refs(worktree_path: str) -> Tuple[str, ...]:
+    """Return the ordered list of base refs the orchestrator should
+    try for the repo slug embedded in ``worktree_path``.
 
-    Repos that do not declare a base-ref list fall back to
-    ``"main"`` so we still get a sensible starting point.
+    The list is repo-specific: a hub-targeted work item MUST NOT
+    fall back to the dashboard's base refs. Repos that do not
+    declare a list fall back to ``("main",)`` so a fresh repo
+    can still create a worktree.
     """
     repo_slug = _shared_repo_slug_for_worktree(worktree_path)
-    for ref in _REPO_BASE_REFS.get(repo_slug, ("main",)):
-        return ref
-    return "main"
+    refs = _REPO_BASE_REFS.get(repo_slug, ("main",))
+    if not refs:
+        return ("main",)
+    return tuple(refs)
+
+
+def _attempt_worktree_create_with_fallback(
+    worktree_path: str,
+    feature_branch: str,
+    candidate_refs: Sequence[str],
+    timeout: int = 60,
+) -> Tuple[str, dict]:
+    """Try the host tool against each candidate base ref in order.
+
+    Returns ``(chosen_base_ref, result_dict)`` on the first
+    successful invocation. Raises :class:`RuntimeError` if every
+    candidate ref fails, with a clear aggregated error message
+    listing each attempted ref and the tool's stderr so the
+    operator can see exactly what went wrong.
+
+    The host tool itself only accepts a single ``--base-ref``; it
+    does not loop. This wrapper provides the loop so the
+    operator-visible behaviour is "try each ref in order, stop
+    on the first that resolves".
+    """
+    if not candidate_refs:
+        raise RuntimeError(
+            f"worktree-create failed for {worktree_path!r}: "
+            f"no candidate base refs configured"
+        )
+    attempts: List[Tuple[str, str, str]] = []  # (ref, returncode, stderr)
+    for ref in candidate_refs:
+        ok, parsed, stderr = _worktree_create_result(
+            worktree_path=worktree_path,
+            feature_branch=feature_branch,
+            base_ref=ref,
+            timeout=timeout,
+        )
+        if ok:
+            return ref, parsed
+        attempts.append((ref, "non-zero", stderr or "tool reported failure"))
+    # All candidates failed. Surface every attempt so the operator
+    # can see what was tried.
+    attempt_lines = "\n".join(
+        f"  - base ref {ref!r}: {reason} ({stderr.strip()[:200] or 'no stderr'})"
+        for ref, reason, stderr in attempts
+    )
+    raise RuntimeError(
+        f"worktree-create failed for {worktree_path!r} "
+        f"(branch {feature_branch!r}); tried {len(attempts)} base "
+        f"ref(s), none resolved:\n{attempt_lines}"
+    )
 
 
 def ensure_task_worktree(
@@ -178,18 +229,22 @@ def ensure_task_worktree(
     builder_task_id: Optional[int] = None,
     *,
     base_ref: Optional[str] = None,
-) -> Tuple[str, str, dict]:
+) -> Tuple[str, str, str, dict]:
     """Create or reuse the per-task worktree for ``work_item``.
 
-    Returns a tuple of ``(worktree_path, feature_branch, result_dict)``.
+    Returns a tuple of
+    ``(worktree_path, feature_branch, chosen_base_ref, result_dict)``.
     The worktree path matches the deterministic helper in
-    :mod:`app.worktree_paths`. ``feature_branch`` is the branch the
-    builder should commit to. ``result_dict`` is the raw JSON the
-    host tool returned; callers can stash it for audit logging.
+    :mod:`app.worktree_paths`. ``feature_branch`` is the branch
+    the builder should commit to. ``chosen_base_ref`` is the
+    ref the host tool actually used (one of the candidate refs
+    tried in order; the first that resolved). ``result_dict``
+    is the raw JSON the host tool returned; callers can stash
+    it for audit logging.
 
-    Raises :class:`RuntimeError` if the worktree cannot be created
-    or reused. The router translates the error into a 409 with a
-    clear ``blocker_code``.
+    Raises :class:`RuntimeError` if the worktree cannot be
+    created or reused. The router translates the error into a
+    409 with a clear ``blocker_code``.
     """
     worktree_path = build_task_worktree_path(
         work_item, builder_task_id=builder_task_id
@@ -204,16 +259,25 @@ def ensure_task_worktree(
     feature_branch = _feature_branch_for_work_item(
         work_item, builder_task_id=builder_task_id
     )
-    chosen_base_ref = base_ref or _select_base_ref(worktree_path)
-    ok, parsed, stderr = _worktree_create_result(
+    if base_ref is not None:
+        # Caller-supplied ref: try it once, no fallback.
+        ok, parsed, stderr = _worktree_create_result(
+            worktree_path=worktree_path,
+            feature_branch=feature_branch,
+            base_ref=base_ref,
+        )
+        if not ok:
+            raise RuntimeError(
+                f"worktree-create failed for {worktree_path!r} "
+                f"(branch {feature_branch!r}, base {base_ref!r}): "
+                f"{stderr or parsed}"
+            )
+        return worktree_path, feature_branch, base_ref, parsed
+    # Repo-specific candidate list with fallbacks.
+    candidate_refs = _candidate_base_refs(worktree_path)
+    chosen_base_ref, parsed = _attempt_worktree_create_with_fallback(
         worktree_path=worktree_path,
         feature_branch=feature_branch,
-        base_ref=chosen_base_ref,
+        candidate_refs=candidate_refs,
     )
-    if not ok:
-        raise RuntimeError(
-            f"worktree-create failed for {worktree_path!r} "
-            f"(branch {feature_branch!r}, base {chosen_base_ref!r}): "
-            f"{stderr or parsed}"
-        )
-    return worktree_path, feature_branch, parsed
+    return worktree_path, feature_branch, chosen_base_ref, parsed

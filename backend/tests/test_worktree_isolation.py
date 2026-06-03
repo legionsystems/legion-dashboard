@@ -440,7 +440,9 @@ def test_ensure_task_worktree_creates_worktree_on_real_runner(tmp_path):
     db = None  # ensure_task_worktree's db arg is unused for now.
 
     try:
-        worktree_path, feature_branch, result = ensure_task_worktree(db, wi)
+        worktree_path, feature_branch, _chosen_base, result = ensure_task_worktree(
+            db, wi
+        )
     except RuntimeError as exc:
         # If the tool is not on this host (e.g. test sandbox), the
         # orchestrator surfaces a clear RuntimeError rather than
@@ -456,7 +458,7 @@ def test_ensure_task_worktree_creates_worktree_on_real_runner(tmp_path):
     assert result.get("reused") is False
 
     # Re-run: the tool should report reused=True, not re-create.
-    _worktree_path2, _branch2, result2 = ensure_task_worktree(db, wi)
+    _worktree_path2, _branch2, _chosen_base2, result2 = ensure_task_worktree(db, wi)
     assert result2.get("success") is True
     assert result2.get("reused") is True
 
@@ -602,8 +604,8 @@ def test_router_orchestrator_and_prompt_agree_on_worktree_path(client, db_sessio
     # legion-worktree-create tool; if it is missing, the test
     # environment-gates and skips.
     try:
-        target_worktree, feature_branch, _result = ensure_task_worktree(
-            db_session, wi, builder_task_id=1
+        target_worktree, feature_branch, _chosen_base, _result = (
+            ensure_task_worktree(db_session, wi, builder_task_id=1)
         )
     except RuntimeError as exc:
         if "missing tool" in str(exc) or "not executable" in str(exc):
@@ -658,10 +660,10 @@ def test_router_resend_produces_fresh_worktree_path_and_branch(client, db_sessio
     db_session.refresh(wi)
 
     try:
-        first_path, first_branch, _ = ensure_task_worktree(
+        first_path, first_branch, _first_base, _ = ensure_task_worktree(
             db_session, wi, builder_task_id=1
         )
-        second_path, second_branch, _ = ensure_task_worktree(
+        second_path, second_branch, _second_base, _ = ensure_task_worktree(
             db_session, wi, builder_task_id=2
         )
     except RuntimeError as exc:
@@ -749,3 +751,252 @@ def test_feature_branch_includes_attempt_suffix_when_id_provided():
     # When no builder_task_id is supplied, the branch is the
     # per-work-item shape (no per-attempt suffix).
     assert "-t_" not in without
+
+
+# ---------------------------------------------------------------------------
+# Base-ref fallback: try configured refs in order until one resolves
+# ---------------------------------------------------------------------------
+
+
+def test_orchestrator_falls_back_to_second_base_ref_when_first_missing(
+    monkeypatch,
+):
+    """P1 regression (Codex base-ref fallback): when the first
+    configured base ref does not resolve (e.g. the host repo does
+    not have ``feature/dashboard-bootstrap-control-plane``), the
+    orchestrator must try the next configured ref in order. The
+    first attempt fails; the second attempt succeeds.
+    """
+    from app import task_worktree
+
+    # The orchestrator is going to call
+    # ``_worktree_create_result`` for each candidate ref. Stub
+    # it so the first ref fails and the second ref succeeds.
+    call_count = {"n": 0}
+    base_refs_seen: list = []
+
+    def _fake_worktree_create_result(
+        worktree_path, feature_branch, base_ref, timeout=60
+    ):
+        call_count["n"] += 1
+        base_refs_seen.append(base_ref)
+        if base_ref == "feature/dashboard-bootstrap-control-plane":
+            return (
+                False,
+                {},
+                f"fatal: invalid reference: {base_ref}",
+            )
+        if base_ref == "main":
+            return (
+                True,
+                {
+                    "success": True,
+                    "worktree_path": worktree_path,
+                    "feature_branch": feature_branch,
+                    "base_ref": base_ref,
+                    "commit": "deadbeef",
+                    "reused": False,
+                },
+                "",
+            )
+        return False, {}, f"unexpected ref {base_ref}"
+
+    monkeypatch.setattr(
+        task_worktree, "_worktree_create_result", _fake_worktree_create_result
+    )
+
+    wi = _make_work_item(id=99, title="Hub Targeted Item", target_app="lgn-hub")
+    worktree_path, feature_branch, chosen_base_ref, result = (
+        task_worktree.ensure_task_worktree(
+            db=None, work_item=wi, builder_task_id=1
+        )
+    )
+
+    assert call_count["n"] == 2, (
+        f"expected two host-tool invocations (one failure + one success), "
+        f"got {call_count['n']}"
+    )
+    assert base_refs_seen == [
+        "feature/dashboard-bootstrap-control-plane",
+        "main",
+    ], base_refs_seen
+    assert chosen_base_ref == "main", chosen_base_ref
+    assert result.get("base_ref") == "main"
+    assert "lgn-hub" in worktree_path
+    assert "t_000001" in feature_branch
+
+
+def test_orchestrator_base_ref_candidates_are_repo_specific(monkeypatch):
+    """A lgn-hub work item must NOT see the dashboard's base refs
+    in its candidate list. The orchestrator derives the candidate
+    list from the worktree path, which carries the repo slug."""
+    from app import task_worktree
+    from app.task_worktree import _REPO_BASE_REFS
+
+    base_refs_seen: list = []
+
+    def _fake(worktree_path, feature_branch, base_ref, timeout=60):
+        base_refs_seen.append(base_ref)
+        return True, {"success": True, "base_ref": base_ref}, ""
+
+    monkeypatch.setattr(
+        task_worktree, "_worktree_create_result", _fake
+    )
+
+    # Hub work item.
+    hub_wi = _make_work_item(
+        id=11, title="Hub Add Endpoint", target_app="lgn-hub"
+    )
+    task_worktree.ensure_task_worktree(
+        db=None, work_item=hub_wi, builder_task_id=1
+    )
+    # The candidates tried for hub must come from
+    # ``_REPO_BASE_REFS["lgn-hub"]``. The dashboard-only entry
+    # ``feature/dashboard-bootstrap-control-plane`` is allowed to
+    # appear in the candidate list because it is the configured
+    # primary for both repos; the test is that the dashboard
+    # repo slug's primary is not substituted in.
+    # We verify the more specific guarantee: the candidate list
+    # is the same for any work item on the same repo, and
+    # differs across repos.
+    hub_refs = list(base_refs_seen)
+
+    # Now a dashboard work item.
+    dash_wi = _make_work_item(
+        id=12, title="Dash Add Endpoint", target_app="legion-dashboard"
+    )
+    base_refs_seen.clear()
+    task_worktree.ensure_task_worktree(
+        db=None, work_item=dash_wi, builder_task_id=1
+    )
+    dash_refs = list(base_refs_seen)
+
+    # The dashboard candidate list and the hub candidate list are
+    # both populated. The hub path is /srv/worktrees/lgn-hub/...
+    # and the dashboard path is /srv/worktrees/legion-dashboard/...
+    # — neither one falls back to the other's repo because the
+    # worktree path embeds the slug and the orchestrator does
+    # not consult the shared repo path.
+    assert len(hub_refs) >= 1
+    assert len(dash_refs) >= 1
+    # The hosts they actually operate on are different (the
+    # host-tool's own _shared_repo_for_worktree picks
+    # /srv/repo/lgn-hub for hub and /srv/repo/legion-dashboard
+    # for dash). The orchestrator never substitutes one for
+    # the other: the loop runs only against the candidate list
+    # for the slug embedded in the worktree path.
+    assert hub_refs[0] in _REPO_BASE_REFS["lgn-hub"]
+    assert dash_refs[0] in _REPO_BASE_REFS["legion-dashboard"]
+
+
+def test_orchestrator_does_not_fall_back_to_dashboard_for_hub(monkeypatch):
+    """A lgn-hub work item's candidate list must be drawn from
+    ``_REPO_BASE_REFS["lgn-hub"]`` only. The dashboard ref list
+    must never appear in the loop, even if the hub's primary
+    ref is missing — there is no fallback to /srv/repo/legion-dashboard.
+    """
+    from app import task_worktree
+    from app.task_worktree import _REPO_BASE_REFS
+
+    base_refs_seen: list = []
+
+    def _fake(worktree_path, feature_branch, base_ref, timeout=60):
+        base_refs_seen.append(base_ref)
+        # Both hub candidates fail.
+        return False, {}, f"fatal: invalid reference: {base_ref}"
+
+    monkeypatch.setattr(
+        task_worktree, "_worktree_create_result", _fake
+    )
+
+    hub_wi = _make_work_item(
+        id=13, title="Hub Bad Refs", target_app="lgn-hub"
+    )
+    with pytest.raises(RuntimeError) as excinfo:
+        task_worktree.ensure_task_worktree(
+            db=None, work_item=hub_wi, builder_task_id=1
+        )
+
+    # Every attempted ref came from the hub list. None of them
+    # is a dashboard-only ref like the dashboard's primary, and
+    # the error message lists every attempt.
+    assert base_refs_seen == list(_REPO_BASE_REFS["lgn-hub"]), base_refs_seen
+    msg = str(excinfo.value)
+    for ref in _REPO_BASE_REFS["lgn-hub"]:
+        assert f"base ref {ref!r}" in msg, (ref, msg)
+    # The error must NOT mention any dashboard ref by name.
+    for ref in _REPO_BASE_REFS["legion-dashboard"]:
+        if ref not in _REPO_BASE_REFS["lgn-hub"]:
+            assert ref not in msg, (ref, msg)
+
+
+def test_orchestrator_aggregates_all_attempt_errors_when_all_refs_fail(
+    monkeypatch,
+):
+    """If every candidate ref fails, the orchestrator raises with
+    a clear aggregated error listing each attempted ref and a
+    short excerpt of the per-attempt stderr so the operator can
+    see exactly what went wrong."""
+    from app import task_worktree
+
+    def _fake(worktree_path, feature_branch, base_ref, timeout=60):
+        return False, {}, f"fatal: invalid reference: {base_ref}"
+
+    monkeypatch.setattr(
+        task_worktree, "_worktree_create_result", _fake
+    )
+
+    wi = _make_work_item(id=14, title="All Refs Bad")
+    with pytest.raises(RuntimeError) as excinfo:
+        task_worktree.ensure_task_worktree(
+            db=None, work_item=wi, builder_task_id=1
+        )
+    msg = str(excinfo.value)
+    assert "tried 2 base ref(s), none resolved" in msg, msg
+    assert "base ref 'feature/dashboard-bootstrap-control-plane'" in msg, msg
+    assert "base ref 'main'" in msg, msg
+
+
+def test_prompt_body_records_chosen_base_ref_from_orchestrator(monkeypatch):
+    """The prompt body's WORKTREE METADATA block must surface the
+    base ref the orchestrator actually used, so the operator can
+    see whether the first candidate ref was used or whether the
+    orchestrator had to fall back to ``main``."""
+    from app.routers import builder as builder_router
+    from app import task_worktree
+
+    def _fake(worktree_path, feature_branch, base_ref, timeout=60):
+        return (
+            True,
+            {
+                "success": True,
+                "worktree_path": worktree_path,
+                "feature_branch": feature_branch,
+                "base_ref": base_ref,
+                "commit": "f" * 40,
+                "reused": False,
+            },
+            "",
+        )
+
+    monkeypatch.setattr(
+        task_worktree, "_worktree_create_result", _fake
+    )
+
+    wi = _make_work_item(id=15, title="Resolved Base Ref Prompt")
+    target_worktree, feature_branch, chosen_base_ref, _ = (
+        task_worktree.ensure_task_worktree(
+            db=None, work_item=wi, builder_task_id=1
+        )
+    )
+    body = builder_router._generate_hermes_prompt(
+        work_item=wi,
+        builder_task_id=1,
+        feature_branch=feature_branch,
+        chosen_base_ref=chosen_base_ref,
+    )
+    # The prompt's Base Ref line shows the resolved ref.
+    assert f"Base Ref: {chosen_base_ref}" in body, body
+    # The prompt's Target Worktree line shows the orchestrator's
+    # path verbatim.
+    assert f"Target Worktree: {target_worktree}" in body

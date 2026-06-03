@@ -476,6 +476,7 @@ def build_implementation_card_prompt(
     target_repo: str = "/srv/repo/legion-dashboard",
     target_worktree: Optional[str] = None,
     feature_branch: Optional[str] = None,
+    chosen_base_ref: Optional[str] = None,
 ) -> str:
     """Render the final implementation Kanban card body for a work item.
 
@@ -589,6 +590,7 @@ def build_implementation_card_prompt(
         f"WORKTREE METADATA\n\n"
         f"- Target Worktree: {target_worktree or '(not assigned — using shared repo as legacy fallback; this is a configuration error)'}\n"
         f"- Feature Branch: {feature_branch or '(not assigned — orchestrator did not record the branch name)'}\n"
+        f"- Base Ref: {chosen_base_ref or '(not recorded — orchestrator did not record the base ref)'}\n"
         f"- Shared Operator/Control Repo: {shared_repo_for_wi}\n"
         f"- Using Dedicated Worktree: {'yes' if using_worktree else 'NO'}\n\n"
         f"WORK ITEM DETAILS\n\n"
