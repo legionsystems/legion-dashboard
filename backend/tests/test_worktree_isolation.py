@@ -361,3 +361,104 @@ def test_router_adapter_generated_prompt_targets_task_worktree(monkeypatch):
     assert "TARGET REPO: /srv/repo/legion-dashboard" not in body
     assert "WORKTREE RULE" in body
     assert "FAIL FAST" in body
+
+
+# ---------------------------------------------------------------------------
+# Task-worktree orchestration
+# ---------------------------------------------------------------------------
+
+
+def test_task_worktree_feature_branch_includes_feature_prefix():
+    """The feature branch is always prefixed with ``feature/`` so
+    reviewers can tell at a glance which branch carries new work."""
+    from app.task_worktree import _feature_branch_for_work_item
+
+    wi = _make_work_item(id=17, title="Auto-Assign Stance")
+    branch = _feature_branch_for_work_item(wi)
+    assert branch.startswith("feature/"), branch
+    assert "wi-17" in branch
+
+
+def test_task_worktree_feature_branch_handles_unsafe_title():
+    from app.task_worktree import _feature_branch_for_work_item
+
+    wi = _make_work_item(id=9, title="!@#$%^&*()")
+    branch = _feature_branch_for_work_item(wi)
+    # Branch starts with feature/ and is slug-safe.
+    assert branch.startswith("feature/")
+    safe_part = branch[len("feature/") :]
+    assert re.fullmatch(r"[A-Za-z0-9_\-/.]+", safe_part), branch
+
+
+def test_task_worktree_feature_branch_handles_empty_title():
+    from app.task_worktree import _feature_branch_for_work_item
+
+    wi = _make_work_item(id=12, title="")
+    branch = _feature_branch_for_work_item(wi)
+    assert branch.startswith("feature/wi-12-"), branch
+
+
+def test_ensure_task_worktree_creates_worktree_on_real_runner(tmp_path):
+    """End-to-end against the real ``legion-worktree-create`` tool.
+
+    The tool runs ``git worktree add`` on the host under
+    ``/srv/worktrees/``; this test verifies the dashboard-side
+    orchestrator composes the right arguments and surfaces the
+    success path. The test cleans up the worktree afterwards so
+    repeated runs stay idempotent.
+    """
+    from app.task_worktree import (
+        ensure_task_worktree,
+        _feature_branch_for_work_item,
+    )
+
+    wi = _make_work_item(id=9001, title="Orchestrator Smoke")
+    db = None  # ensure_task_worktree's db arg is unused for now.
+
+    try:
+        worktree_path, feature_branch, result = ensure_task_worktree(db, wi)
+    except RuntimeError as exc:
+        # If the tool is not on this host (e.g. test sandbox), the
+        # orchestrator surfaces a clear RuntimeError rather than
+        # silently falling back. That is itself the correct
+        # behaviour; the test is environment-gated.
+        if "missing tool" in str(exc) or "not executable" in str(exc):
+            pytest.skip(f"worktree tool unavailable: {exc}")
+        raise
+
+    assert worktree_path.startswith(WORKTREES_ROOT + "/")
+    assert feature_branch == _feature_branch_for_work_item(wi)
+    assert result.get("success") is True
+    assert result.get("reused") is False
+
+    # Re-run: the tool should report reused=True, not re-create.
+    _worktree_path2, _branch2, result2 = ensure_task_worktree(db, wi)
+    assert result2.get("success") is True
+    assert result2.get("reused") is True
+
+    # Cleanup.
+    import subprocess
+
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            "/srv/repo/legion-dashboard",
+            "worktree",
+            "remove",
+            "--force",
+            worktree_path,
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            "/srv/repo/legion-dashboard",
+            "branch",
+            "-D",
+            feature_branch,
+        ],
+        check=False,  # OK if already gone
+    )

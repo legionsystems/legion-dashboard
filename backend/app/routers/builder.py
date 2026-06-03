@@ -18,6 +18,7 @@ from ..worktree_paths import (
     build_task_worktree_path,
     is_shared_repo_path,
 )
+from ..task_worktree import ensure_task_worktree
 from ..models import BuilderTask, DebateRun, RepoLock, WorkItem
 from .. import repo_safety
 from ..schemas_builder import BuilderTaskResponse, SendToBuilderRequest
@@ -343,7 +344,29 @@ def _create_builder_task(db: Session, work_item_id: int, request: SendToBuilderR
         DebateRun.work_item_id == work_item_id,
         DebateRun.status == "completed"
     ).order_by(DebateRun.completed_at.desc()).first()
-    
+
+    # ------------------------------------------------------------------
+    # Per-task worktree allocation. The implementation Kanban card
+    # body MUST point the builder at a dedicated worktree under
+    # ``/srv/worktrees/`` rather than the shared operator/control
+    # worktree, so we create (or reuse) the worktree BEFORE we
+    # generate the prompt. A failure here blocks the send/start with
+    # a 409 so the operator can see the misrouting.
+    # ------------------------------------------------------------------
+    try:
+        target_worktree, _feature_branch, _wt_result = ensure_task_worktree(
+            db, work_item
+        )
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "blocker_code": "blocked_worktree_create_failed",
+                "blocker_message": str(exc),
+                "work_item_id": work_item_id,
+            },
+        )
+
     # Generate prompt
     prompt_body = _generate_hermes_prompt(
         work_item=work_item,
