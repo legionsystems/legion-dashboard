@@ -144,76 +144,82 @@ def _serialize_many_with_debate(
     if not items:
         return []
     ids = [it.id for it in items]
-    # Get latest debate for each work item using same logic as _latest_debate_for
-    # Priority: active runs first, then latest by completed_at UTC
+
+    # Respect debate reset: items with debate_reset_at set should show no latest debate
+    reset_item_ids = set(
+        row[0]
+        for row in db.query(WorkItem.id)
+        .filter(WorkItem.id.in_(ids), WorkItem.debate_reset_at.isnot(None))
+        .all()
+    )
+    active_ids = [wid for wid in ids if wid not in reset_item_ids]
+
     from sqlalchemy import func as sa_func
-    
-    # First get active runs
-    active_statuses = ["queued", "claimed", "warming", "running", "generating"]
-    active_subq = (
-        db.query(
-            DebateRun.work_item_id,
-            sa_func.max(DebateRun.created_at).label("max_created"),
-        )
-        .filter(
-            DebateRun.work_item_id.in_(ids),
-            DebateRun.status.in_(active_statuses)
-        )
-        .group_by(DebateRun.work_item_id)
-        .subquery()
-    )
-    
-    # Get terminal runs with latest completed_at
-    terminal_subq = (
-        db.query(
-            DebateRun.work_item_id,
-            sa_func.max(DebateRun.completed_at).label("max_completed"),
-        )
-        .filter(
-            DebateRun.work_item_id.in_(ids),
-            DebateRun.status.in_(["completed", "failed", "cancelled"])
-        )
-        .group_by(DebateRun.work_item_id)
-        .subquery()
-    )
-    
-    # Build runs dict: prefer active, then terminal
+
     runs_by_work_item = {}
-    
-    # Load active runs
-    if active_subq is not None:
+
+    if active_ids:
+        # First get active (non-hidden) runs
+        active_statuses = ["queued", "claimed", "warming", "running", "generating"]
+        active_subq = (
+            db.query(
+                DebateRun.work_item_id,
+                sa_func.max(DebateRun.created_at).label("max_created"),
+            )
+            .filter(
+                DebateRun.work_item_id.in_(active_ids),
+                DebateRun.status.in_(active_statuses),
+                DebateRun.hidden_at.is_(None),
+            )
+            .group_by(DebateRun.work_item_id)
+            .subquery()
+        )
+
         active_runs = (
             db.query(DebateRun)
-            .join(active_subq, 
+            .join(active_subq,
                   (DebateRun.work_item_id == active_subq.c.work_item_id) &
                   (DebateRun.created_at == active_subq.c.max_created))
             .all()
         )
         for r in active_runs:
             runs_by_work_item[r.work_item_id] = r
-    
-    # Load terminal runs only for items without active runs
-    terminal_ids = [wid for wid in ids if wid not in runs_by_work_item]
-    if terminal_ids:
-        terminal_runs = (
-            db.query(DebateRun)
-            .join(terminal_subq,
-                  (DebateRun.work_item_id == terminal_subq.c.work_item_id) &
-                  ((DebateRun.completed_at == terminal_subq.c.max_completed) | (DebateRun.completed_at == None)))
-            .filter(DebateRun.work_item_id.in_(terminal_ids))
-            .all()
-        )
-        # Pick the one with latest completed_at (or highest ID if null)
-        for r in terminal_runs:
-            if r.work_item_id not in runs_by_work_item:
-                runs_by_work_item[r.work_item_id] = r
-            elif r.completed_at is not None and runs_by_work_item[r.work_item_id].completed_at is not None:
-                if r.completed_at > runs_by_work_item[r.work_item_id].completed_at:
+
+        # Load terminal runs only for items without active runs
+        terminal_ids = [wid for wid in active_ids if wid not in runs_by_work_item]
+        if terminal_ids:
+            terminal_subq = (
+                db.query(
+                    DebateRun.work_item_id,
+                    sa_func.max(DebateRun.completed_at).label("max_completed"),
+                )
+                .filter(
+                    DebateRun.work_item_id.in_(terminal_ids),
+                    DebateRun.status.in_(["completed", "failed", "cancelled"]),
+                    DebateRun.hidden_at.is_(None),
+                )
+                .group_by(DebateRun.work_item_id)
+                .subquery()
+            )
+
+            terminal_runs = (
+                db.query(DebateRun)
+                .join(terminal_subq,
+                      (DebateRun.work_item_id == terminal_subq.c.work_item_id) &
+                      ((DebateRun.completed_at == terminal_subq.c.max_completed) | (DebateRun.completed_at == None)))
+                .filter(DebateRun.work_item_id.in_(terminal_ids))
+                .all()
+            )
+            for r in terminal_runs:
+                if r.work_item_id not in runs_by_work_item:
                     runs_by_work_item[r.work_item_id] = r
-                elif r.completed_at == runs_by_work_item[r.work_item_id].completed_at:
-                    if r.id > runs_by_work_item[r.work_item_id].id:
+                elif r.completed_at is not None and runs_by_work_item[r.work_item_id].completed_at is not None:
+                    if r.completed_at > runs_by_work_item[r.work_item_id].completed_at:
                         runs_by_work_item[r.work_item_id] = r
-    
+                    elif r.completed_at == runs_by_work_item[r.work_item_id].completed_at:
+                        if r.id > runs_by_work_item[r.work_item_id].id:
+                            runs_by_work_item[r.work_item_id] = r
+
     out: List[WorkItemResponse] = []
     for it in items:
         resp = WorkItemResponse.model_validate(it)

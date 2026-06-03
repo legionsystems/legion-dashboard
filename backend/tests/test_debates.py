@@ -490,3 +490,40 @@ def test_reset_debate_for_nonexistent_work_item_returns_404(client):
         json={"mode": "archive"},
     )
     assert response.status_code == 404
+
+
+def test_list_serialization_excludes_hidden_debates(client):
+    """After hiding/resetting debates, list view should not show stale latest_debate."""
+    item = _create(client, title="List-hidden")
+    # Auto-queued run exists
+    listing = client.get("/api/work-items").json()
+    found = next(x for x in listing if x["id"] == item["id"])
+    assert found["latest_debate"] is not None
+
+    # Reset debates
+    client.post(
+        f"/api/work-items/{item['id']}/debates/reset",
+        json={"mode": "archive"},
+    )
+
+    # After reset, list should show no latest_debate
+    listing_after = client.get("/api/work-items").json()
+    found_after = next(x for x in listing_after if x["id"] == item["id"])
+    assert found_after["latest_debate"] is None
+
+
+def test_list_serialization_excludes_reset_item_debates(client):
+    """Items with debate_reset_at set should not show latest_debate in list."""
+    item_a = _create(client, title="A-reset")
+    item_b = _create(client, title="B-normal")
+    # Reset only A
+    client.post(
+        f"/api/work-items/{item_a['id']}/debates/reset",
+        json={"mode": "archive"},
+    )
+
+    listing = client.get("/api/work-items").json()
+    a = next(x for x in listing if x["id"] == item_a["id"])
+    b = next(x for x in listing if x["id"] == item_b["id"])
+    assert a["latest_debate"] is None
+    assert b["latest_debate"] is not None
