@@ -666,15 +666,24 @@ def _create_builder_task(db: Session, work_item_id: int, request: SendToBuilderR
     # builder task. It is NOT parent/child-linked to the builder task
     # so it can be claimed independently.
     #
-    # If the work item has a reviewer_profile set, the review task is
-    # REQUIRED. If review task creation fails, Start Build must fail
-    # closed: clean up the builder task and repo lock, then raise.
+    # CRITICAL: Review tasks are ONLY created for the implementation
+    # path (start-build / status_override="ready"). The triage path
+    # (send-to-builder / status_override="triage") queues a Hermes card
+    # for later review but does NOT start a build or create a review task.
+    # Creating a review task during triage would allow reviewers to claim
+    # a review before there is any implementation or PR to review.
+    #
+    # If the work item has a reviewer_profile set AND this is the
+    # implementation path, the review task is REQUIRED. If review task
+    # creation fails, Start Build must fail closed: clean up the builder
+    # task and repo lock, then raise.
     #
     # If the reviewer profile is not set, review task creation is
     # skipped (operator can create manually later).
     # ------------------------------------------------------------------
+    is_implementation_path = status_override != "triage"
     reviewer_profile = work_item.reviewer_profile
-    review_task_required = reviewer_profile is not None
+    review_task_required = reviewer_profile is not None and is_implementation_path
     review_task_id = None
 
     if review_task_required:

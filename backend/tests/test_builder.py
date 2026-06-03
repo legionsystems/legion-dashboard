@@ -446,6 +446,70 @@ def test_review_task_not_created_when_no_reviewer_profile(
     assert builder_tasks[0].review_task_id is None
 
 
+def test_send_to_builder_triage_does_not_create_review_task_even_with_profile(
+    client, db_session, monkeypatch
+):
+    """When using /send-to-builder (triage path), NO review task is created
+    even when work_item.reviewer_profile is set. The triage path only queues
+    a Hermes card for later review — it does not start a build or create a
+    review task. Review tasks are only created for the start-build path.
+    """
+    item = _make_approved_work_item(
+        db_session,
+        reviewer_profile="reviewer",  # Set reviewer profile
+        branch_name="main",  # Pass the safety gate
+    )
+    _patch_target_repo(monkeypatch, "/srv/repo/legion-dashboard")
+    _stub_hermes(monkeypatch, task_id="hermes-builder-triage")
+    _stub_executor(
+        monkeypatch,
+        preview_deploy.ExecutorResponse(
+            success=True,
+            raw={
+                "success": True,
+                "action": "repo_safety_check",
+                "is_clean": True,
+                "dirty_files": [],
+                "staged_files": [],
+                "untracked_files": [],
+                "current_branch": "main",
+                "current_commit": "t" * 40,
+                "blocker_code": None,
+                "blocker_message": None,
+            },
+        ),
+    )
+
+    import app.routers.builder as builder_module
+    hermes_calls = []
+
+    def spy_create_hermes(**kwargs):
+        hermes_calls.append(kwargs)
+        return {"task_id": "hermes-builder-triage", "status": "triage", "assignee": "builder"}
+
+    monkeypatch.setattr(builder_module, "_create_hermes_task", spy_create_hermes)
+
+    # Use send-to-builder endpoint (triage path), not start-build.
+    response = client.post(
+        f"/api/builder/work-items/{item.id}/send-to-builder", json={}
+    )
+    assert response.status_code == 200, response.text
+
+    # Only one Hermes task: the builder in triage status (no review task).
+    assert len(hermes_calls) == 1
+    assert hermes_calls[0]["assignee"] == "builder"
+    assert hermes_calls[0].get("status_override") == "triage"
+
+    # The builder task has no review_task_id.
+    builder_tasks = (
+        db_session.query(BuilderTask)
+        .filter(BuilderTask.work_item_id == item.id)
+        .all()
+    )
+    assert len(builder_tasks) == 1
+    assert builder_tasks[0].review_task_id is None
+
+
 def test_review_task_fails_with_non_tool_capable_profile(
     client, db_session, monkeypatch
 ):
