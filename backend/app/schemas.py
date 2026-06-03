@@ -421,6 +421,8 @@ class DebateRunSummary(BaseModel):
     is_test_run: bool = False
     superseded_by_run_id: Optional[int] = None
     cleanup_note: Optional[str] = None
+    # Arbiter rerun tracking
+    arbiter_rerun_count: int = 0
 
 
 class DebateRunDetail(DebateRunSummary):

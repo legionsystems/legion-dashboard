@@ -301,7 +301,7 @@ function SideBySideView({ grouped }) {
   );
 }
 
-function DebateRunCard({ run, expanded, onToggle, onExecute, onRerun, onCancel, onRetry, executingId, rerunningId, viewMode }) {
+function DebateRunCard({ run, expanded, onToggle, onExecute, onRerun, onCancel, onRetry, onRerunArbiter, executingId, rerunningId, rerunningArbiterId, viewMode }) {
   const [detail, setDetail] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -327,6 +327,19 @@ function DebateRunCard({ run, expanded, onToggle, onExecute, onRerun, onCancel, 
 
   const canExecute = run.status === "queued" && !executingId;
   const canRerun = (run.status === "failed" || run.provenance === "execution-bridge-unconfigured" || run.provenance === "execution-disabled") && !rerunningId;
+
+  // Re-run arbiter: only for failed runs with arbiter-specific error and persisted PRO/CON arguments
+  const canRerunArbiter = useMemo(() => {
+    if (run.status !== "failed") return false;
+    if (!run.error_type || !run.error_type.startsWith("arbiter_")) return false;
+    if (run.provenance === "execution-disabled" || run.provenance === "execution-bridge-unconfigured") return false;
+    if (rerunningArbiterId) return false;
+    // Check that we have PRO/CON arguments loaded
+    if (!detail?.arguments || detail.arguments.length === 0) return false;
+    const hasPro = detail.arguments.some(a => a.side === "pro");
+    const hasCon = detail.arguments.some(a => a.side === "con");
+    return hasPro && hasCon;
+  }, [run.status, run.error_type, run.provenance, rerunningArbiterId, detail?.arguments]);
 
   const grouped = useMemo(() => {
     if (!detail?.arguments || detail.arguments.length === 0) return null;
@@ -409,6 +422,16 @@ function DebateRunCard({ run, expanded, onToggle, onExecute, onRerun, onCancel, 
               title="Rerun this debate with current settings"
             >
               ↻ RERUN
+            </button>
+          )}
+          {canRerunArbiter && (
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onRerunArbiter(run.id); }}
+              className="px-2 py-0.5 text-[10px] font-mono uppercase tracking-telemetry font-semibold border border-[#06B6D4] text-[#06B6D4] bg-[#06B6D4]14 hover:bg-[#06B6D4]22 rounded"
+              title="Re-run only the Final Arbiter using existing PRO/CON arguments"
+            >
+              ↻ RE-RUN ARBITER
             </button>
           )}
           {(run.status === "running" || run.status === "warming" || run.status === "generating" || run.worker_status === "claimed") && (
@@ -624,6 +647,7 @@ export default function DebatePanel({ workItemId }) {
   const [expandedId, setExpandedId] = useState(null);
   const [executingId, setExecutingId] = useState(null);
   const [rerunningId, setRerunningId] = useState(null);
+  const [rerunningArbiterId, setRerunningArbiterId] = useState(null);
   const [showOlderFailed, setShowOlderFailed] = useState(false);
   const [viewMode, setViewMode] = useState("chronological");
   const [showResetConfirm, setShowResetConfirm] = useState(false);
@@ -763,6 +787,21 @@ export default function DebatePanel({ workItemId }) {
       .finally(() => setRerunningId(null));
   }
 
+  function rerunArbiterRun(runId) {
+    if (!confirm("Re-run only the Final Arbiter for this debate? Existing PRO/CON arguments will be reused.")) return;
+    setRerunningArbiterId(runId);
+    postJson(`/work-items/${workItemId}/debates/${runId}/rerun-arbiter`, {})
+      .then((updated) => {
+        // If the arbiter succeeded and the run is now completed, refresh the detail
+        if (updated.status === "completed") {
+          setExpandedId(runId);
+        }
+        refresh();
+      })
+      .catch((err) => setError(err.message))
+      .finally(() => setRerunningArbiterId(null));
+  }
+
   function submitOperatorInput() {
     if (!opContent.trim()) return;
     setBusy("op");
@@ -832,8 +871,10 @@ export default function DebatePanel({ workItemId }) {
               onRerun={rerunRun}
               onCancel={cancelRun}
               onRetry={retryRun}
+              onRerunArbiter={rerunArbiterRun}
               executingId={executingId === true || executingId === run.id}
               rerunningId={rerunningId === true || rerunningId === run.id}
+              rerunningArbiterId={rerunningArbiterId === true || rerunningArbiterId === run.id}
               viewMode={viewMode}
             />
           ))}
@@ -862,8 +903,10 @@ export default function DebatePanel({ workItemId }) {
                     onRerun={rerunRun}
                     onCancel={cancelRun}
                     onRetry={retryRun}
+                    onRerunArbiter={rerunArbiterRun}
                     executingId={executingId === true || executingId === run.id}
                     rerunningId={rerunningId === true || rerunningId === run.id}
+                    rerunningArbiterId={rerunningArbiterId === true || rerunningArbiterId === run.id}
                     viewMode={viewMode}
                   />
                 ))}

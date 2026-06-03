@@ -251,6 +251,7 @@ class DebateRun(Base):
     retry_from_turn_id = Column(Integer, nullable=True)  # Retry from specific turn
     attempt_number = Column(Integer, nullable=False, default=1)
     max_attempts = Column(Integer, nullable=False, default=1)
+    arbiter_rerun_count = Column(Integer, nullable=False, default=0)  # Number of arbiter-only reruns
 
     # Operator-controlled (1..5, default 2). The router enforces the clamp;
     # the column trusts the router and the model layer's pre-write validation.

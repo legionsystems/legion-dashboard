@@ -1464,6 +1464,149 @@ def cancel_debate_run(
 
 
 @router.post(
+    "/{work_item_id}/debates/{run_id}/rerun-arbiter",
+    response_model=DebateRunDetail,
+)
+def rerun_arbiter(
+    work_item_id: int,
+    run_id: int,
+    db: Session = Depends(get_db),
+):
+    """Re-run only the Final Arbiter for a failed debate run.
+
+    Reuses existing persisted PRO/CON arguments. Does not regenerate turns.
+    Requires:
+    - Run status is 'failed' with arbiter-specific error
+    - Run has persisted PRO/CON arguments (at least one pro and one con)
+    - Execution bridge is configured and enabled
+    """
+    _get_or_404(db, work_item_id)
+    run = (
+        db.query(DebateRun)
+        .filter(DebateRun.id == run_id, DebateRun.work_item_id == work_item_id)
+        .first()
+    )
+    if run is None:
+        raise HTTPException(status_code=404, detail="Debate run not found")
+
+    # Guard: only failed runs
+    if run.status != "failed":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot rerun arbiter: run status is '{run.status}', expected 'failed'",
+        )
+
+    # Guard: must be arbiter-specific failure
+    if run.error_type and not run.error_type.startswith("arbiter_"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot rerun arbiter: error_type is '{run.error_type}', expected arbiter failure",
+        )
+
+    # Guard: must not be execution-disabled (no model configured)
+    if run.provenance in ("execution-disabled", "execution-bridge-unconfigured"):
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot rerun arbiter: execution bridge was not configured for this run",
+        )
+
+    # Guard: must have persisted PRO/CON arguments
+    all_args = (
+        db.query(DebateArgument)
+        .filter(DebateArgument.debate_run_id == run_id)
+        .all()
+    )
+    has_pro = any(a.side == "pro" for a in all_args)
+    has_con = any(a.side == "con" for a in all_args)
+    if not has_pro or not has_con:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot rerun arbiter: run has no persisted PRO/CON arguments",
+        )
+
+    # Check execution bridge is configured
+    config = get_execution_config(db)
+    if not config.enabled:
+        raise HTTPException(
+            status_code=400,
+            detail="Debate execution is disabled in Settings. Enable it at Settings > Debate Execution.",
+        )
+
+    # Build arguments list from existing DebateArgument rows (exclude prior arbiter turns)
+    argument_dicts = []
+    for a in all_args:
+        if a.side in ("pro", "con", "neutral"):
+            argument_dicts.append({
+                "claim_id": a.claim_id or "",
+                "side": a.side,
+                "role": a.role,
+                "content": a.content,
+            })
+
+    # Re-execute only the arbiter turn
+    from datetime import datetime, timezone as tz
+    from app.debate_executor import _execute_arbiter_turn
+
+    item = db.query(WorkItem).filter(WorkItem.id == work_item_id).first()
+    if item is None:
+        raise HTTPException(status_code=404, detail="Work item not found")
+
+    # Track arbiter rerun
+    run.arbiter_rerun_count += 1
+    run.last_progress_at = datetime.utcnow()
+    run.progress_message = f"Rerunning arbiter (attempt {run.arbiter_rerun_count})"
+    db.commit()
+
+    try:
+        arbiter_result = _execute_arbiter_turn(
+            db_session=db,
+            run=run,
+            work_item=item,
+            config=config,
+            all_arguments=argument_dicts,
+        )
+    except Exception as e:
+        # Arbiter turn itself raised an exception
+        run.status = "failed"
+        run.error_type = "arbiter_failure"
+        run.error_stage = "arbiter"
+        run.error_message = f"Arbiter rerun failed: {type(e).__name__}"
+        run.completed_at = datetime.utcnow()
+        db.commit()
+        db.refresh(run)
+        return run
+
+    # Process arbiter result
+    if arbiter_result["success"] and arbiter_result["data"]:
+        arbiter_data = arbiter_result["data"]
+        run.final_recommendation = arbiter_data.get("recommendation")
+        run.implementation_readiness = arbiter_data.get("implementation_readiness")
+        run.summary = arbiter_data.get("rationale")
+
+        # Success: clear all error fields and mark completed
+        run.status = "completed"
+        run.execution_stage = "completed"
+        run.error_type = None
+        run.error_stage = None
+        run.error_message = None
+        run.completed_at = datetime.utcnow()
+    else:
+        # Failed: preserve existing turns, update error with NO_DECISION reason
+        failure_cat = arbiter_result.get("failure_category", "unknown")
+        safe_diag = arbiter_result.get("safe_diagnostic", "Arbiter validation failed")
+        run.status = "failed"
+        run.execution_stage = "failed"
+        run.error_type = f"arbiter_{failure_cat}"
+        run.error_stage = "arbiter"
+        run.error_message = f"Arbiter could not reach a decision: {safe_diag}"
+        run.completed_at = datetime.utcnow()
+
+    db.commit()
+    db.refresh(run)
+    return run
+
+
+@router.post(
     "/{work_item_id}/debates/{run_id}/retry",
     response_model=DebateRunDetail,
     status_code=status.HTTP_201_CREATED,
