@@ -42,9 +42,13 @@ const STANCE_OPTIONS = [
   { value: "neutral", label: "NEUTRAL" },
 ];
 
+const VIEW_MODES = [
+  { value: "chronological", label: "CHRONOLOGICAL" },
+  { value: "side_by_side", label: "SIDE BY SIDE" },
+];
+
 function formatTime(iso) {
   if (!iso) return null;
-  // Use configured display timezone (defaults to Australia/Sydney)
   const tz = window.LEGION_DISPLAY_TIMEZONE || 'Australia/Sydney';
   try {
     const date = new Date(iso);
@@ -59,7 +63,6 @@ function formatTime(iso) {
       hour12: false
     }).replace(',', '');
   } catch (e) {
-    // Fallback to local timezone if configured TZ is invalid
     return date.toLocaleString('en-AU');
   }
 }
@@ -105,8 +108,7 @@ function StatusChip({ kind, value }) {
   );
 }
 
-function ArgumentBlock({ argument, showChronological }) {
-  // Defensive parsing: handles JSON array strings, plain strings, or already-parsed arrays
+function ArgumentBlock({ argument }) {
   let respondsTo = [];
   if (argument.responds_to_claim_ids) {
     if (Array.isArray(argument.responds_to_claim_ids)) {
@@ -116,16 +118,12 @@ function ArgumentBlock({ argument, showChronological }) {
         const parsed = JSON.parse(argument.responds_to_claim_ids);
         respondsTo = Array.isArray(parsed) ? parsed : [parsed];
       } catch (e) {
-        // Plain string like "R1-PRO-UNK-001" - wrap in array
-        console.warn('[ArgumentBlock] Plain string responds_to_claim_ids:', argument.responds_to_claim_ids);
         respondsTo = [argument.responds_to_claim_ids];
       }
     }
   }
   
-  // Safety check: ensure respondsTo is always an array
   if (!Array.isArray(respondsTo)) {
-    console.error('[ArgumentBlock] respondsTo is not an array:', respondsTo);
     respondsTo = [];
   }
   
@@ -187,33 +185,141 @@ function ArgumentBlock({ argument, showChronological }) {
   );
 }
 
-function DebateRunCard({ run, expanded, onToggle, onExecute, onRerun, onCancel, onRetry, executingId, rerunningId }) {
+function SideBySideView({ grouped }) {
+  if (!grouped) return null;
+
+  // Group arguments by round within each side for cleaner display
+  const groupByRound = (args) => {
+    const byRound = {};
+    for (const arg of args) {
+      const r = arg.round_number;
+      if (!byRound[r]) byRound[r] = [];
+      byRound[r].push(arg);
+    }
+    return byRound;
+  };
+
+  const proByRound = groupByRound(grouped.pro);
+  const conByRound = groupByRound(grouped.con);
+  const allRounds = new Set([
+    ...Object.keys(proByRound).map(Number),
+    ...Object.keys(conByRound).map(Number),
+  ]);
+  const sortedRounds = [...allRounds].sort((a, b) => a - b);
+
+  return (
+    <div>
+      <div className="label-tel mb-2">SIDE BY SIDE</div>
+      {sortedRounds.length > 0 ? (
+        <div className="space-y-3">
+          {sortedRounds.map(round => (
+            <div key={round} className="border border-edge">
+              <div className="bg-surface px-3 py-1.5 border-b border-edge">
+                <span className="font-mono text-[10px] tracking-telemetry text-fg-muted">
+                  ROUND {round}
+                </span>
+              </div>
+              <div className="grid grid-cols-1 lg:grid-cols-2 divide-y lg:divide-y-0 lg:divide-x divide-edge">
+                <div className="p-2">
+                  <div className="label-tel mb-1.5 text-[#10B981]">PRO</div>
+                  {proByRound[round]?.length > 0 ? (
+                    <div className="space-y-2">
+                      {proByRound[round].map(a => (
+                        <ArgumentBlock key={a.id} argument={a} />
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-xs text-fg-muted italic px-3 py-1">[ none ]</p>
+                  )}
+                </div>
+                <div className="p-2">
+                  <div className="label-tel mb-1.5 text-[#EF4444]">CON</div>
+                  {conByRound[round]?.length > 0 ? (
+                    <div className="space-y-2">
+                      {conByRound[round].map(a => (
+                        <ArgumentBlock key={a.id} argument={a} />
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-xs text-fg-muted italic px-3 py-1">[ none ]</p>
+                  )}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+          <div>
+            <div className="label-tel mb-1.5">PRO</div>
+            {grouped.pro.length === 0 ? (
+              <p className="text-xs text-fg-muted italic">[ none ]</p>
+            ) : (
+              <div className="space-y-2">
+                {grouped.pro.map((a) => (
+                  <ArgumentBlock key={a.id} argument={a} />
+                ))}
+              </div>
+            )}
+          </div>
+          <div>
+            <div className="label-tel mb-1.5">CON</div>
+            {grouped.con.length === 0 ? (
+              <p className="text-xs text-fg-muted italic">[ none ]</p>
+            ) : (
+              <div className="space-y-2">
+                {grouped.con.map((a) => (
+                  <ArgumentBlock key={a.id} argument={a} />
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {grouped.neutral.length > 0 && (
+        <div className="mt-3 border-t border-edge pt-3">
+          <div className="label-tel mb-1.5">NEUTRAL / CONTEXT</div>
+          <div className="space-y-2">
+            {grouped.neutral.map((a) => (
+              <ArgumentBlock key={a.id} argument={a} />
+            ))}
+          </div>
+        </div>
+      )}
+      {grouped.arbiter.length > 0 && (
+        <div className="border-t border-edge pt-3 mt-3">
+          <div className="label-tel mb-1.5">ARBITER</div>
+          <div className="space-y-2">
+            {grouped.arbiter.map((a) => (
+              <ArgumentBlock key={a.id} argument={a} />
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DebateRunCard({ run, expanded, onToggle, onExecute, onRerun, onCancel, onRetry, executingId, rerunningId, viewMode }) {
   const [detail, setDetail] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
   useEffect(() => {
-    console.log('[DebateRunCard] useEffect - expanded:', expanded, 'run.id:', run.id, 'detail:', detail ? 'loaded' : 'null');
     if (!expanded) {
-      // Collapse: clear detail to free memory
-      console.log('[DebateRunCard] Collapsing, clearing detail');
       setDetail(null);
       return;
     }
-    // Expanded: fetch detail if not already loaded
     if (detail !== null) {
-      console.log('[DebateRunCard] Already has detail, skipping fetch');
       return;
     }
-    console.log('[DebateRunCard] Fetching detail for run', run.id);
     setLoading(true);
     getJson(`/work-items/${run.work_item_id}/debates/${run.id}`)
       .then((data) => {
-        console.log('[DebateRunCard] Detail fetched successfully, arguments:', data?.arguments?.length || 0);
         setDetail(data);
       })
       .catch((err) => {
-        console.error('[DebateRunCard] Detail fetch error:', err);
         setError(err.message);
       })
       .finally(() => setLoading(false));
@@ -226,7 +332,6 @@ function DebateRunCard({ run, expanded, onToggle, onExecute, onRerun, onCancel, 
     if (!detail?.arguments || detail.arguments.length === 0) return null;
     const by = { pro: [], con: [], neutral: [], arbiter: [] };
     for (const arg of detail.arguments) {
-      // Normalize side to lowercase for consistent grouping
       const side = (arg.side || "neutral").toLowerCase();
       (by[side] || by.neutral).push(arg);
     }
@@ -235,6 +340,9 @@ function DebateRunCard({ run, expanded, onToggle, onExecute, onRerun, onCancel, 
 
   const hasEdits =
     run.suggested_title || run.suggested_description || run.suggested_acceptance_notes;
+
+  // Determine if this run should show NO DECISION
+  const showNoDecision = run.status === "completed" && !run.final_recommendation;
 
   return (
     <div className="border border-edge bg-surface">
@@ -248,8 +356,20 @@ function DebateRunCard({ run, expanded, onToggle, onExecute, onRerun, onCancel, 
             RUN #{String(run.id).padStart(3, "0")}
           </span>
           <StatusChip kind="status" value={run.status} />
-          {run.final_recommendation && (
+          {run.final_recommendation ? (
             <StatusChip kind="recommendation" value={run.final_recommendation} />
+          ) : run.status === "completed" && (
+            <span
+              className="inline-flex items-center gap-1.5 border px-2 py-0.5 text-[10px] font-mono uppercase tracking-telemetry font-semibold"
+              style={{
+                color: "#F59E0B",
+                borderColor: "#F59E0B55",
+                backgroundColor: "#F59E0B14",
+              }}
+            >
+              <span className="inline-block h-1.5 w-1.5" style={{ backgroundColor: "#F59E0B" }} />
+              NO DECISION
+            </span>
           )}
           {run.implementation_readiness && (
             <StatusChip kind="readiness" value={run.implementation_readiness} />
@@ -257,7 +377,6 @@ function DebateRunCard({ run, expanded, onToggle, onExecute, onRerun, onCancel, 
           <span className="font-mono text-[10px] tracking-telemetry text-fg-secondary">
             {run.trigger?.toUpperCase()} · {run.rounds_requested}R
           </span>
-          {/* Timestamps and duration */}
           {run.created_at && (
             <span className="font-mono text-[10px] tracking-telemetry text-fg-muted tabular-nums">
               · {formatTime(run.created_at)}
@@ -265,7 +384,6 @@ function DebateRunCard({ run, expanded, onToggle, onExecute, onRerun, onCancel, 
               {run.generation_duration_ms && ` · ${formatDuration(run.generation_duration_ms)}`}
             </span>
           )}
-          {/* Provider/model if available */}
           {run.model_route && (
             <span className="font-mono text-[10px] tracking-telemetry text-fg-secondary truncate max-w-[200px]" title={run.model_route}>
               · {run.model_route.includes(':') ? run.model_route.substring(run.model_route.indexOf(':') + 1) : run.model_route}
@@ -293,7 +411,6 @@ function DebateRunCard({ run, expanded, onToggle, onExecute, onRerun, onCancel, 
               ↻ RERUN
             </button>
           )}
-          {/* Cancel button for active runs */}
           {(run.status === "running" || run.status === "warming" || run.status === "generating" || run.worker_status === "claimed") && (
             <button
               type="button"
@@ -304,7 +421,6 @@ function DebateRunCard({ run, expanded, onToggle, onExecute, onRerun, onCancel, 
               ⏹ CANCEL
             </button>
           )}
-          {/* Retry button for failed runs */}
           {run.status === "failed" && (
             <button
               type="button"
@@ -420,7 +536,7 @@ function DebateRunCard({ run, expanded, onToggle, onExecute, onRerun, onCancel, 
                   )}
                 </div>
               ) : run.error_message ? (
-                <div className="text-sm text-red-400">
+                <div className="text-sm text-[#F59E0B]">
                   <strong>NO DECISION</strong> — {run.error_message}
                 </div>
               ) : (
@@ -433,75 +549,65 @@ function DebateRunCard({ run, expanded, onToggle, onExecute, onRerun, onCancel, 
 
           {grouped && (
             <div className="space-y-4">
-              {/* Chronological debate flow - shows back-and-forth */}
-              <div>
-                <div className="label-tel mb-1.5">CHRONOLOGICAL FLOW</div>
-                <div className="space-y-2">
-                  {detail.arguments
-                    .sort((a, b) => {
-                      if (a.round_number !== b.round_number) return a.round_number - b.round_number;
-                      return a.id - b.id;
-                    })
-                    .map((a) => (
-                      <ArgumentBlock key={a.id} argument={a} showChronological={true} />
-                    ))}
-                </div>
-              </div>
-              
-              {/* Side-grouped view for quick pro/con scan */}
-              <div className="border-t border-edge pt-4">
-                <div className="label-tel mb-2">BY SIDE</div>
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-                  <div>
-                    <div className="label-tel mb-1.5">PRO</div>
-                    {grouped.pro.length === 0 ? (
-                      <p className="text-xs text-fg-muted italic">[ none ]</p>
-                    ) : (
-                      <div className="space-y-2">
-                        {grouped.pro.map((a) => (
-                          <ArgumentBlock key={a.id} argument={a} />
-                        ))}
-                      </div>
-                    )}
+              {viewMode === "chronological" ? (
+                <div>
+                  <div className="label-tel mb-1.5">CHRONOLOGICAL FLOW</div>
+                  <div className="space-y-2">
+                    {detail.arguments
+                      .sort((a, b) => {
+                        if (a.round_number !== b.round_number) return a.round_number - b.round_number;
+                        return a.id - b.id;
+                      })
+                      .map((a) => (
+                        <ArgumentBlock key={a.id} argument={a} />
+                      ))}
                   </div>
-                  <div>
-                    <div className="label-tel mb-1.5">CON</div>
-                    {grouped.con.length === 0 ? (
-                      <p className="text-xs text-fg-muted italic">[ none ]</p>
-                    ) : (
-                      <div className="space-y-2">
-                        {grouped.con.map((a) => (
-                          <ArgumentBlock key={a.id} argument={a} />
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                  {grouped.neutral.length > 0 && (
-                    <div className="lg:col-span-2">
-                      <div className="label-tel mb-1.5">NEUTRAL / CONTEXT</div>
-                      <div className="space-y-2">
-                        {grouped.neutral.map((a) => (
-                          <ArgumentBlock key={a.id} argument={a} />
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                  {grouped.arbiter.length > 0 && (
-                    <div className="lg:col-span-2">
-                      <div className="label-tel mb-1.5">ARBITER</div>
-                      <div className="space-y-2">
-                        {grouped.arbiter.map((a) => (
-                          <ArgumentBlock key={a.id} argument={a} />
-                        ))}
-                      </div>
-                    </div>
-                  )}
                 </div>
-              </div>
+              ) : (
+                <SideBySideView grouped={grouped} />
+              )}
             </div>
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+function ConfirmModal({ open, title, message, confirmLabel, cancelLabel, onConfirm, onCancel, danger }) {
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+      <div className="bg-surface border border-edge-strong shadow-2xl max-w-md w-full mx-4">
+        <div className="px-4 py-3 border-b border-edge">
+          <h3 className="font-mono text-sm tracking-telemetry font-semibold text-fg-primary">
+            {title}
+          </h3>
+        </div>
+        <div className="px-4 py-3">
+          <p className="text-sm text-fg-secondary whitespace-pre-wrap">{message}</p>
+        </div>
+        <div className="px-4 py-3 border-t border-edge flex items-center justify-end gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="px-3 py-1.5 text-[10px] font-mono uppercase tracking-telemetry font-semibold border border-edge text-fg-secondary hover:text-fg-primary hover:border-fg-secondary rounded"
+          >
+            {cancelLabel || "CANCEL"}
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            className={`px-3 py-1.5 text-[10px] font-mono uppercase tracking-telemetry font-semibold border rounded ${
+              danger
+                ? "border-red-500 text-red-400 bg-red-500/14 hover:bg-red-500/22"
+                : "border-[#F59E0B] text-[#F59E0B] bg-[#F59E0B]14 hover:bg-[#F59E0B]22"
+            }`}
+          >
+            {confirmLabel || "CONFIRM"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -518,13 +624,14 @@ export default function DebatePanel({ workItemId }) {
   const [expandedId, setExpandedId] = useState(null);
   const [executingId, setExecutingId] = useState(null);
   const [rerunningId, setRerunningId] = useState(null);
-  const [showHiddenRuns, setShowHiddenRuns] = useState(false);
   const [showOlderFailed, setShowOlderFailed] = useState(false);
+  const [viewMode, setViewMode] = useState("chronological");
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
+  const [resetting, setResetting] = useState(false);
   const pollingIntervalRef = useRef(null);
   const expandedIdRef = useRef(null);
-  const VISIBLE_FAILED_LIMIT = 2; // Show latest N failed runs, collapse older
+  const VISIBLE_FAILED_LIMIT = 2;
 
-  // Keep ref in sync with state
   useEffect(() => {
     expandedIdRef.current = expandedId;
   }, [expandedId]);
@@ -538,12 +645,9 @@ export default function DebatePanel({ workItemId }) {
       .then(([rs, is]) => {
         setRuns(rs);
         setInputs(is);
-        // Expand latest run only if no run is currently expanded AND user hasn't manually collapsed
-        // Use ref to get current value, not stale closure
         if (rs.length > 0 && expandedIdRef.current === null && !window.debatePanelUserCollapsed) {
           setExpandedId(rs[0].id);
         }
-        // Check if any run is actively executing - if so, keep polling
         const hasActiveExecution = rs.some(r => 
           r.status === "running" || 
           r.status === "warming" || 
@@ -552,7 +656,6 @@ export default function DebatePanel({ workItemId }) {
           r.execution_stage === "generating" ||
           r.execution_stage === "running"
         );
-        // Only start polling if there's active execution and no interval yet
         if (hasActiveExecution && !pollingIntervalRef.current) {
           const interval = setInterval(() => {
             refresh();
@@ -574,11 +677,9 @@ export default function DebatePanel({ workItemId }) {
 
   useEffect(() => {
     refresh();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workItemId]);
 
   useEffect(() => {
-    // Cleanup polling on unmount
     return () => {
       if (pollingIntervalRef.current) {
         clearInterval(pollingIntervalRef.current);
@@ -599,7 +700,6 @@ export default function DebatePanel({ workItemId }) {
     })
       .then((created) => {
         setExpandedId(created.id);
-        // Auto-execute the created debate
         return postJson(`/work-items/${workItemId}/debates/${created.id}/execute`, {});
       })
       .then(() => {
@@ -633,7 +733,6 @@ export default function DebatePanel({ workItemId }) {
     postJson(`/work-items/${workItemId}/debates/${runId}/retry`, {})
       .then((created) => {
         setExpandedId(created.id);
-        // Auto-execute the retry
         return postJson(`/work-items/${workItemId}/debates/${created.id}/execute`, {});
       })
       .then(() => {
@@ -645,7 +744,6 @@ export default function DebatePanel({ workItemId }) {
 
   function rerunRun(runId) {
     setRerunningId(runId);
-    // Get the original run's round count
     const originalRun = runs.find(r => r.id === runId);
     const roundsToUse = originalRun?.rounds_requested || 2;
     
@@ -655,7 +753,6 @@ export default function DebatePanel({ workItemId }) {
     })
       .then((created) => {
         setExpandedId(created.id);
-        // Auto-execute the new run
         return postJson(`/work-items/${workItemId}/debates/${created.id}/execute`, {});
       })
       .then(() => {
@@ -682,7 +779,22 @@ export default function DebatePanel({ workItemId }) {
       .finally(() => setBusy(null));
   }
 
-  // Render runs with failed run collapse logic
+  function resetDebates() {
+    setResetting(true);
+    postJson(`/work-items/${workItemId}/debates/reset`, {
+      reason: "Operator reset debate history",
+      mode: "archive",
+    })
+      .then(() => {
+        setShowResetConfirm(false);
+        setExpandedId(null);
+        window.debatePanelUserCollapsed = true;
+        refresh();
+      })
+      .catch((err) => setError(err.message))
+      .finally(() => setResetting(false));
+  }
+
   function renderRuns() {
     if (runs.length === 0) {
       return (
@@ -694,15 +806,12 @@ export default function DebatePanel({ workItemId }) {
       );
     }
 
-    // Separate runs by status
     const activeRuns = runs.filter(r => r.status !== 'failed');
     const failedRuns = runs.filter(r => r.status === 'failed');
     
-    // Show latest N failed runs, collapse older ones
     const visibleFailed = failedRuns.slice(0, VISIBLE_FAILED_LIMIT);
     const collapsedFailed = failedRuns.slice(VISIBLE_FAILED_LIMIT);
     
-    // Combine for display
     const displayRuns = [...activeRuns, ...visibleFailed];
     const hasCollapsed = collapsedFailed.length > 0;
     
@@ -717,7 +826,6 @@ export default function DebatePanel({ workItemId }) {
               onToggle={() => {
                 const newExpandedId = expandedId === run.id ? null : run.id;
                 setExpandedId(newExpandedId);
-                // Track manual collapse so we don't auto-expand again
                 window.debatePanelUserCollapsed = (newExpandedId === null);
               }}
               onExecute={executeRun}
@@ -726,6 +834,7 @@ export default function DebatePanel({ workItemId }) {
               onRetry={retryRun}
               executingId={executingId === true || executingId === run.id}
               rerunningId={rerunningId === true || rerunningId === run.id}
+              viewMode={viewMode}
             />
           ))}
         </div>
@@ -755,6 +864,7 @@ export default function DebatePanel({ workItemId }) {
                     onRetry={retryRun}
                     executingId={executingId === true || executingId === run.id}
                     rerunningId={rerunningId === true || rerunningId === run.id}
+                    viewMode={viewMode}
                   />
                 ))}
               </div>
@@ -767,6 +877,17 @@ export default function DebatePanel({ workItemId }) {
 
   return (
     <div className="space-y-4">
+      <ConfirmModal
+        open={showResetConfirm}
+        title="RESET DEBATE HISTORY"
+        message={"This will archive all active debate runs for this work item.\n\nArchived runs are hidden from the active view but can be accessed by operators.\n\nThis action cannot be undone for hard-deleted runs.\n\nProceed with archive (soft-hide) mode?"}
+        confirmLabel={resetting ? "ARCHIVING…" : "ARCHIVE RUNS"}
+        cancelLabel="CANCEL"
+        onConfirm={resetDebates}
+        onCancel={() => setShowResetConfirm(false)}
+        danger={false}
+      />
+
       <Panel
         title="DEBATE"
         subtitle="// advisory · operator must approve manually"
@@ -798,6 +919,51 @@ export default function DebatePanel({ workItemId }) {
           SPLIT FIRST, NEEDS MORE DETAIL, or DO NOT BUILD NOW. The operator
           retains final say.
         </p>
+      </Panel>
+
+      <Panel
+        title="DEBATE RUNS"
+        subtitle={`// ${runs.length} run${runs.length === 1 ? "" : "s"}`}
+        right={
+          <div className="flex items-center gap-2">
+            {/* View mode toggle */}
+            <div className="flex gap-0.5 border border-edge rounded overflow-hidden">
+              {VIEW_MODES.map((mode) => (
+                <button
+                  key={mode.value}
+                  type="button"
+                  onClick={() => setViewMode(mode.value)}
+                  className={`px-2 py-0.5 text-[10px] font-mono uppercase tracking-telemetry font-semibold ${
+                    viewMode === mode.value
+                      ? "bg-raised text-fg-primary border-fg-primary"
+                      : "text-fg-muted hover:text-fg-secondary"
+                  }`}
+                  title={`Switch to ${mode.label.toLowerCase()} view`}
+                >
+                  {mode.value === "chronological" ? "◫ CHRON" : "◧ SIDE×SIDE"}
+                </button>
+              ))}
+            </div>
+            {/* Clear/Reset Debates button */}
+            {runs.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setShowResetConfirm(true)}
+                disabled={busy === "run"}
+                className="px-2 py-0.5 text-[10px] font-mono uppercase tracking-telemetry font-semibold border border-[#F59E0B] text-[#F59E0B] bg-[#F59E0B]14 hover:bg-[#F59E0B]22 rounded"
+                title="Archive all debate runs (soft-hide, reversible)"
+              >
+                ⟲ RESET DEBATES
+              </button>
+            )}
+          </div>
+        }
+      >
+        {loading ? (
+          <SkeletonBlock rows={3} />
+        ) : (
+          renderRuns()
+        )}
       </Panel>
 
       <Panel
@@ -868,17 +1034,6 @@ export default function DebatePanel({ workItemId }) {
               </li>
             ))}
           </ul>
-        )}
-      </Panel>
-
-      <Panel
-        title="DEBATE RUNS"
-        subtitle={`// ${runs.length} run${runs.length === 1 ? "" : "s"}`}
-      >
-        {loading ? (
-          <SkeletonBlock rows={3} />
-        ) : (
-          renderRuns()
         )}
       </Panel>
     </div>

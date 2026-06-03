@@ -142,7 +142,11 @@ class WorkItemResponse(WorkItemBase):
     archived_at: Optional[datetime] = None
     archived_by: Optional[str] = None
     archive_reason: Optional[str] = None
-    
+
+    # Debate archive/reset tracking
+    debate_archived_at: Optional[datetime] = None
+    debate_reset_at: Optional[datetime] = None
+
     # Populated by the router with the most recent debate run for this item,
     # or None when no debate has been queued. Used by the list page to show
     # the debate indicator without an extra round trip.
@@ -669,7 +673,7 @@ class DebateRunBulkHideRequest(BaseModel):
 class DebateRunHideResponse(BaseModel):
     """Response for hide/restore operations."""
     model_config = ConfigDict(from_attributes=True)
-    
+
     id: int
     work_item_id: int
     status: str
@@ -677,6 +681,33 @@ class DebateRunHideResponse(BaseModel):
     hidden_by: Optional[str] = None
     hidden_reason: Optional[str] = None
     hidden_category: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Debate reset / archive schemas
+# ---------------------------------------------------------------------------
+
+
+class DebateResetRequest(BaseModel):
+    """Request to reset/archive all active debate runs for a work item."""
+    reason: Optional[str] = None
+    mode: str = "archive"  # archive (soft-hide) or hard_delete (destructive)
+
+    @field_validator("mode")
+    @classmethod
+    def _check_mode(cls, v: str) -> str:
+        if v not in ("archive", "hard_delete"):
+            raise ValueError("mode must be 'archive' or 'hard_delete'")
+        return v
+
+
+class DebateResetResponse(BaseModel):
+    """Response for debate reset operation."""
+    work_item_id: int
+    archived_count: int
+    hard_deleted: bool
+    archived_run_ids: list[int]
+    message: str
 
 
 # ---------------------------------------------------------------------------

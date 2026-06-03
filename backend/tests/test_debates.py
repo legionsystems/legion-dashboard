@@ -354,3 +354,176 @@ def test_debate_for_nonexistent_work_item_returns_404(client):
         json={"content": "x", "stance_requested": "neutral"},
     )
     assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Debate reset / archive tests
+# ---------------------------------------------------------------------------
+
+
+def test_reset_debate_runs_archives_active_runs(client):
+    """POST /debates/reset with mode=archive should soft-hide all active runs."""
+    item = _create(client, title="Reset-test")
+    # Create a couple of runs
+    client.post(
+        f"/api/work-items/{item['id']}/debates",
+        json={"rounds": 2, "trigger": "manual_rerun"},
+    )
+    runs = _debate_list(client, item["id"])
+    assert len(runs) == 2
+
+    # Reset
+    response = client.post(
+        f"/api/work-items/{item['id']}/debates/reset",
+        json={"mode": "archive", "reason": "Testing reset"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["archived_count"] == 2
+    assert body["hard_deleted"] is False
+    assert len(body["archived_run_ids"]) == 2
+    assert body["work_item_id"] == item["id"]
+
+    # Active list should now be empty
+    runs_after = _debate_list(client, item["id"])
+    assert len(runs_after) == 0
+
+    # Hidden list should show archived runs
+    hidden = client.get(
+        f"/api/work-items/{item['id']}/debates?view=hidden"
+    ).json()
+    assert len(hidden) == 2
+
+    # All view should show all
+    all_runs = client.get(
+        f"/api/work-items/{item['id']}/debates?view=all"
+    ).json()
+    assert len(all_runs) == 2
+
+
+def test_reset_debate_runs_with_no_runs(client):
+    """Reset on an item with no visible (non-hidden) runs should archive 0."""
+    item = _create(client, title="No-runs", status="active")  # not debate-eligible, no auto-run
+    response = client.post(
+        f"/api/work-items/{item['id']}/debates/reset",
+        json={"mode": "archive"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["archived_count"] == 0
+    assert body["hard_deleted"] is False
+    assert body["archived_run_ids"] == []
+
+
+def test_reset_debate_invalid_mode_rejected(client):
+    """Reset with an invalid mode should return 422."""
+    item = _create(client, title="Bad-mode")
+    response = client.post(
+        f"/api/work-items/{item['id']}/debates/reset",
+        json={"mode": "wibble"},
+    )
+    assert response.status_code == 422
+
+
+def test_reset_debate_hard_delete_permanently_removes_runs(client):
+    """POST /debates/reset with mode=hard_delete should permanently delete runs."""
+    item = _create(client, title="Hard-delete")
+    runs = _debate_list(client, item["id"])
+    assert len(runs) == 1
+
+    response = client.post(
+        f"/api/work-items/{item['id']}/debates/reset",
+        json={"mode": "hard_delete"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["hard_deleted"] is True
+    assert body["archived_count"] == 1
+
+    # All views should be empty — hard-deleted runs are gone
+    all_runs = client.get(
+        f"/api/work-items/{item['id']}/debates?view=all"
+    ).json()
+    assert len(all_runs) == 0
+
+
+def test_dashboard_shows_no_stale_failed_after_reset(client):
+    """After reset, the work item's latest_debate should be None (no stale FAILED)."""
+    item = _create(client, title="Stale-check")
+    # Runs exist
+    detail = client.get(f"/api/work-items/{item['id']}").json()
+    assert detail["latest_debate"] is not None
+
+    # Reset
+    client.post(
+        f"/api/work-items/{item['id']}/debates/reset",
+        json={"mode": "archive"},
+    )
+
+    # After reset, latest_debate should be None
+    detail_after = client.get(f"/api/work-items/{item['id']}").json()
+    assert detail_after["latest_debate"] is None
+    assert detail_after["debate_reset_at"] is not None
+
+
+def test_new_debate_after_reset_works(client):
+    """After reset, a new debate run should work normally."""
+    item = _create(client, title="After-reset")
+    client.post(
+        f"/api/work-items/{item['id']}/debates/reset",
+        json={"mode": "archive"},
+    )
+
+    # Create a new run
+    response = client.post(
+        f"/api/work-items/{item['id']}/debates",
+        json={"rounds": 2, "trigger": "manual_rerun"},
+    )
+    assert response.status_code == 201
+    runs = _debate_list(client, item["id"])
+    assert len(runs) == 1
+
+
+def test_reset_debate_for_nonexistent_work_item_returns_404(client):
+    response = client.post(
+        "/api/work-items/999999/debates/reset",
+        json={"mode": "archive"},
+    )
+    assert response.status_code == 404
+
+
+def test_list_serialization_excludes_hidden_debates(client):
+    """After hiding/resetting debates, list view should not show stale latest_debate."""
+    item = _create(client, title="List-hidden")
+    # Auto-queued run exists
+    listing = client.get("/api/work-items").json()
+    found = next(x for x in listing if x["id"] == item["id"])
+    assert found["latest_debate"] is not None
+
+    # Reset debates
+    client.post(
+        f"/api/work-items/{item['id']}/debates/reset",
+        json={"mode": "archive"},
+    )
+
+    # After reset, list should show no latest_debate
+    listing_after = client.get("/api/work-items").json()
+    found_after = next(x for x in listing_after if x["id"] == item["id"])
+    assert found_after["latest_debate"] is None
+
+
+def test_list_serialization_excludes_reset_item_debates(client):
+    """Items with debate_reset_at set should not show latest_debate in list."""
+    item_a = _create(client, title="A-reset")
+    item_b = _create(client, title="B-normal")
+    # Reset only A
+    client.post(
+        f"/api/work-items/{item_a['id']}/debates/reset",
+        json={"mode": "archive"},
+    )
+
+    listing = client.get("/api/work-items").json()
+    a = next(x for x in listing if x["id"] == item_a["id"])
+    b = next(x for x in listing if x["id"] == item_b["id"])
+    assert a["latest_debate"] is None
+    assert b["latest_debate"] is not None

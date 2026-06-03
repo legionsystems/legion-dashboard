@@ -125,6 +125,10 @@ class WorkItem(Base):
     archived_by = Column(String(100), nullable=True)
     archive_reason = Column(Text, nullable=True)
 
+    # Debate archive/reset tracking
+    debate_archived_at = Column(DateTime, nullable=True)
+    debate_reset_at = Column(DateTime, nullable=True)
+
     # System-generated/test-item metadata
     is_system_generated = Column(Boolean, nullable=False, default=False, index=True)
     is_test_item = Column(Boolean, nullable=False, default=False, index=True)

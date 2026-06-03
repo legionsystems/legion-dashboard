@@ -35,6 +35,8 @@ from ..schemas import (
     BulkArchiveTestItemsRequest,
     CertifyRequest,
     CompleteRequest,
+    DebateResetRequest,
+    DebateResetResponse,
     DebateRunBulkHideRequest,
     DebateRunCreate,
     DebateRunDetail,
@@ -70,21 +72,30 @@ def _get_or_404(db: Session, work_item_id: int) -> WorkItem:
 
 def _latest_debate_for(db: Session, work_item_id: int) -> Optional[DebateRun]:
     """Return the most relevant debate run for display.
-    
+
     Priority:
     1. Active runs (queued/claimed/warming/running/generating) — show in-progress state
     2. Latest completed run by completed_at UTC — most recent terminal outcome
     3. Latest run by ID as fallback if timestamps missing
-    
+
+    Excludes hidden/archived runs. If the debate has been reset (debate_reset_at
+    is set), returns None so the dashboard shows no stale FAILED status.
+
     Uses UTC completed_at for ordering, not display timezone.
     """
-    # First check for active runs
+    # Check if debate has been reset - if so, don't return stale runs
+    item = db.query(WorkItem).filter(WorkItem.id == work_item_id).first()
+    if item and item.debate_reset_at is not None:
+        return None
+
+    # First check for active runs (non-hidden)
     active_statuses = ["queued", "claimed", "warming", "running", "generating"]
     active = (
         db.query(DebateRun)
         .filter(
             DebateRun.work_item_id == work_item_id,
-            DebateRun.status.in_(active_statuses)
+            DebateRun.status.in_(active_statuses),
+            DebateRun.hidden_at.is_(None),
         )
         .order_by(DebateRun.created_at.desc())
         .first()
@@ -97,7 +108,8 @@ def _latest_debate_for(db: Session, work_item_id: int) -> Optional[DebateRun]:
         db.query(DebateRun)
         .filter(
             DebateRun.work_item_id == work_item_id,
-            DebateRun.status.in_(["completed", "failed", "cancelled"])
+            DebateRun.status.in_(["completed", "failed", "cancelled"]),
+            DebateRun.hidden_at.is_(None),
         )
         .order_by(DebateRun.completed_at.desc().nullslast(), DebateRun.id.desc())
         .first()
@@ -105,10 +117,13 @@ def _latest_debate_for(db: Session, work_item_id: int) -> Optional[DebateRun]:
     if terminal:
         return terminal
     
-    # Fallback: any run by ID
+    # Fallback: any non-hidden run by ID
     return (
         db.query(DebateRun)
-        .filter(DebateRun.work_item_id == work_item_id)
+        .filter(
+            DebateRun.work_item_id == work_item_id,
+            DebateRun.hidden_at.is_(None),
+        )
         .order_by(DebateRun.id.desc())
         .first()
     )
@@ -129,76 +144,82 @@ def _serialize_many_with_debate(
     if not items:
         return []
     ids = [it.id for it in items]
-    # Get latest debate for each work item using same logic as _latest_debate_for
-    # Priority: active runs first, then latest by completed_at UTC
+
+    # Respect debate reset: items with debate_reset_at set should show no latest debate
+    reset_item_ids = set(
+        row[0]
+        for row in db.query(WorkItem.id)
+        .filter(WorkItem.id.in_(ids), WorkItem.debate_reset_at.isnot(None))
+        .all()
+    )
+    active_ids = [wid for wid in ids if wid not in reset_item_ids]
+
     from sqlalchemy import func as sa_func
-    
-    # First get active runs
-    active_statuses = ["queued", "claimed", "warming", "running", "generating"]
-    active_subq = (
-        db.query(
-            DebateRun.work_item_id,
-            sa_func.max(DebateRun.created_at).label("max_created"),
-        )
-        .filter(
-            DebateRun.work_item_id.in_(ids),
-            DebateRun.status.in_(active_statuses)
-        )
-        .group_by(DebateRun.work_item_id)
-        .subquery()
-    )
-    
-    # Get terminal runs with latest completed_at
-    terminal_subq = (
-        db.query(
-            DebateRun.work_item_id,
-            sa_func.max(DebateRun.completed_at).label("max_completed"),
-        )
-        .filter(
-            DebateRun.work_item_id.in_(ids),
-            DebateRun.status.in_(["completed", "failed", "cancelled"])
-        )
-        .group_by(DebateRun.work_item_id)
-        .subquery()
-    )
-    
-    # Build runs dict: prefer active, then terminal
+
     runs_by_work_item = {}
-    
-    # Load active runs
-    if active_subq is not None:
+
+    if active_ids:
+        # First get active (non-hidden) runs
+        active_statuses = ["queued", "claimed", "warming", "running", "generating"]
+        active_subq = (
+            db.query(
+                DebateRun.work_item_id,
+                sa_func.max(DebateRun.created_at).label("max_created"),
+            )
+            .filter(
+                DebateRun.work_item_id.in_(active_ids),
+                DebateRun.status.in_(active_statuses),
+                DebateRun.hidden_at.is_(None),
+            )
+            .group_by(DebateRun.work_item_id)
+            .subquery()
+        )
+
         active_runs = (
             db.query(DebateRun)
-            .join(active_subq, 
+            .join(active_subq,
                   (DebateRun.work_item_id == active_subq.c.work_item_id) &
                   (DebateRun.created_at == active_subq.c.max_created))
             .all()
         )
         for r in active_runs:
             runs_by_work_item[r.work_item_id] = r
-    
-    # Load terminal runs only for items without active runs
-    terminal_ids = [wid for wid in ids if wid not in runs_by_work_item]
-    if terminal_ids:
-        terminal_runs = (
-            db.query(DebateRun)
-            .join(terminal_subq,
-                  (DebateRun.work_item_id == terminal_subq.c.work_item_id) &
-                  ((DebateRun.completed_at == terminal_subq.c.max_completed) | (DebateRun.completed_at == None)))
-            .filter(DebateRun.work_item_id.in_(terminal_ids))
-            .all()
-        )
-        # Pick the one with latest completed_at (or highest ID if null)
-        for r in terminal_runs:
-            if r.work_item_id not in runs_by_work_item:
-                runs_by_work_item[r.work_item_id] = r
-            elif r.completed_at is not None and runs_by_work_item[r.work_item_id].completed_at is not None:
-                if r.completed_at > runs_by_work_item[r.work_item_id].completed_at:
+
+        # Load terminal runs only for items without active runs
+        terminal_ids = [wid for wid in active_ids if wid not in runs_by_work_item]
+        if terminal_ids:
+            terminal_subq = (
+                db.query(
+                    DebateRun.work_item_id,
+                    sa_func.max(DebateRun.completed_at).label("max_completed"),
+                )
+                .filter(
+                    DebateRun.work_item_id.in_(terminal_ids),
+                    DebateRun.status.in_(["completed", "failed", "cancelled"]),
+                    DebateRun.hidden_at.is_(None),
+                )
+                .group_by(DebateRun.work_item_id)
+                .subquery()
+            )
+
+            terminal_runs = (
+                db.query(DebateRun)
+                .join(terminal_subq,
+                      (DebateRun.work_item_id == terminal_subq.c.work_item_id) &
+                      ((DebateRun.completed_at == terminal_subq.c.max_completed) | (DebateRun.completed_at == None)))
+                .filter(DebateRun.work_item_id.in_(terminal_ids))
+                .all()
+            )
+            for r in terminal_runs:
+                if r.work_item_id not in runs_by_work_item:
                     runs_by_work_item[r.work_item_id] = r
-                elif r.completed_at == runs_by_work_item[r.work_item_id].completed_at:
-                    if r.id > runs_by_work_item[r.work_item_id].id:
+                elif r.completed_at is not None and runs_by_work_item[r.work_item_id].completed_at is not None:
+                    if r.completed_at > runs_by_work_item[r.work_item_id].completed_at:
                         runs_by_work_item[r.work_item_id] = r
-    
+                    elif r.completed_at == runs_by_work_item[r.work_item_id].completed_at:
+                        if r.id > runs_by_work_item[r.work_item_id].id:
+                            runs_by_work_item[r.work_item_id] = r
+
     out: List[WorkItemResponse] = []
     for it in items:
         resp = WorkItemResponse.model_validate(it)
@@ -1721,6 +1742,71 @@ def list_debate_runs(
         query = query.filter(DebateRun.status == status)
     
     return query.order_by(DebateRun.id.desc()).all()
+
+
+@router.post(
+    "/{work_item_id}/debates/reset",
+    response_model=DebateResetResponse,
+)
+def reset_debate_runs(
+    work_item_id: int,
+    payload: DebateResetRequest,
+    db: Session = Depends(get_db),
+):
+    """Reset/archive all active debate runs for a work item.
+
+    By default (mode=archive), runs are soft-hidden (archived) and can be
+    restored later. With mode=hard_delete, runs are permanently deleted
+    (destructive admin action).
+
+    After reset, the work item's debate summary returns to a
+    not-run/no-active-debate state.
+    """
+    from datetime import datetime, timezone
+
+    item = _get_or_404(db, work_item_id)
+
+    # Find all non-hidden, non-archived debate runs for this work item
+    runs_to_reset = (
+        db.query(DebateRun)
+        .filter(
+            DebateRun.work_item_id == work_item_id,
+            DebateRun.hidden_at.is_(None),
+        )
+        .all()
+    )
+
+    archived_ids = []
+    hard_deleted = payload.mode == "hard_delete"
+
+    for run in runs_to_reset:
+        if hard_deleted:
+            # Destructive: permanently delete the run and its arguments
+            db.delete(run)
+        else:
+            # Archive: soft-hide the run
+            run.hidden_at = datetime.now(timezone.utc)
+            run.hidden_by = "operator"
+            run.hidden_reason = payload.reason or "Operator reset debate history"
+            run.hidden_category = "operator_cleanup"
+            archived_ids.append(run.id)
+
+    # Update the work item's reset timestamp
+    item.debate_reset_at = datetime.now(timezone.utc)
+    item.debate_archived_at = datetime.now(timezone.utc) if not hard_deleted else None
+
+    db.commit()
+
+    return DebateResetResponse(
+        work_item_id=work_item_id,
+        archived_count=len(archived_ids) if not hard_deleted else len(runs_to_reset),
+        hard_deleted=hard_deleted,
+        archived_run_ids=archived_ids,
+        message=(
+            f"{'Deleted' if hard_deleted else 'Archived'} "
+            f"{len(archived_ids) if not hard_deleted else len(runs_to_reset)} debate run(s)"
+        ),
+    )
 
 
 @router.post(
