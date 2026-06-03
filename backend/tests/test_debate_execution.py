@@ -838,3 +838,57 @@ class TestRerunArbiter:
         )
         assert response.status_code == 400
         assert "arbiter failure" in response.json()["detail"].lower()
+
+    def test_rerun_arbiter_execution_exception_sets_failed_stage(self, client):
+        """When _execute_arbiter_turn raises, execution_stage must be 'failed', not 'running'."""
+        from unittest.mock import patch as mock_patch
+        from app.debate_executor import ExecutionConfig
+        from app.database import SessionLocal
+        from app.models import DebateRun, DebateArgument
+
+        item = _create_work_item(client)
+        work_item_id = item["id"]
+        run = _create_debate_run(client, work_item_id, rounds=1)
+        run_id = run["id"]
+
+        db = SessionLocal()
+        db_run = db.query(DebateRun).filter(DebateRun.id == run_id).first()
+        db_run.status = "failed"
+        db_run.error_type = "arbiter_failure"
+        db_run.provenance = "test"
+        db.add(DebateArgument(
+            debate_run_id=run_id, round_number=1, role="Product Owner",
+            side="pro", content="PRO argument",
+        ))
+        db.add(DebateArgument(
+            debate_run_id=run_id, round_number=1, role="Skeptic",
+            side="con", content="CON argument",
+        ))
+        db.commit()
+        db.close()
+
+        mock_config = ExecutionConfig(
+            enabled=True, provider="ollama_native",
+            base_url="http://localhost:11434/v1",
+            model="test-model", timeout_seconds=30,
+        )
+
+        with mock_patch(
+            "app.routers.work_items.get_execution_config", return_value=mock_config
+        ), mock_patch(
+            "app.debate_executor._execute_arbiter_turn",
+            side_effect=Exception("model timeout"),
+        ):
+            response = client.post(
+                f"/api/work-items/{work_item_id}/debates/{run_id}/rerun-arbiter", json={}
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "failed"
+        assert data["execution_stage"] == "failed"
+        assert data["error_stage"] == "arbiter"
+        assert data["error_type"] == "arbiter_failure"
+        assert "Arbiter rerun failed" in data["error_message"]
+        # Verify progress_message reflects failure, not stale "running" message
+        assert "failed" in data.get("progress_message", "").lower()

@@ -301,7 +301,7 @@ function SideBySideView({ grouped }) {
   );
 }
 
-function DebateRunCard({ run, expanded, onToggle, onExecute, onRerun, onCancel, onRetry, onRerunArbiter, executingId, rerunningId, rerunningArbiterId, viewMode }) {
+function DebateRunCard({ run, expanded, onToggle, onExecute, onRerun, onCancel, onRetry, onRerunArbiter, executingId, rerunningId, rerunningArbiterId, viewMode, detailRefreshKey }) {
   const [detail, setDetail] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -323,7 +323,16 @@ function DebateRunCard({ run, expanded, onToggle, onExecute, onRerun, onCancel, 
         setError(err.message);
       })
       .finally(() => setLoading(false));
-  }, [expanded, run.id, run.work_item_id]);
+  }, [expanded, run.id, run.work_item_id, detailRefreshKey]);
+
+  // When detailRefreshKey changes while expanded, clear detail so the effect above refetches
+  const prevRefreshKeyRef = useRef(detailRefreshKey);
+  useEffect(() => {
+    if (expanded && detailRefreshKey !== prevRefreshKeyRef.current) {
+      prevRefreshKeyRef.current = detailRefreshKey;
+      setDetail(null);
+    }
+  }, [detailRefreshKey, expanded]);
 
   const canExecute = run.status === "queued" && !executingId;
   const canRerun = (run.status === "failed" || run.provenance === "execution-bridge-unconfigured" || run.provenance === "execution-disabled") && !rerunningId;
@@ -645,6 +654,7 @@ export default function DebatePanel({ workItemId }) {
   const [opStance, setOpStance] = useState("auto_assign");
   const [busy, setBusy] = useState(null);
   const [expandedId, setExpandedId] = useState(null);
+  const [debateRefreshKey, setDebateRefreshKey] = useState(0);
   const [executingId, setExecutingId] = useState(null);
   const [rerunningId, setRerunningId] = useState(null);
   const [rerunningArbiterId, setRerunningArbiterId] = useState(null);
@@ -792,10 +802,8 @@ export default function DebatePanel({ workItemId }) {
     setRerunningArbiterId(runId);
     postJson(`/work-items/${workItemId}/debates/${runId}/rerun-arbiter`, {})
       .then((updated) => {
-        // If the arbiter succeeded and the run is now completed, refresh the detail
-        if (updated.status === "completed") {
-          setExpandedId(runId);
-        }
+        // Force expanded card detail to refetch by bumping refresh key
+        setDebateRefreshKey((k) => k + 1);
         refresh();
       })
       .catch((err) => setError(err.message))
@@ -876,6 +884,7 @@ export default function DebatePanel({ workItemId }) {
               rerunningId={rerunningId === true || rerunningId === run.id}
               rerunningArbiterId={rerunningArbiterId === true || rerunningArbiterId === run.id}
               viewMode={viewMode}
+              detailRefreshKey={debateRefreshKey}
             />
           ))}
         </div>
@@ -908,6 +917,7 @@ export default function DebatePanel({ workItemId }) {
                     rerunningId={rerunningId === true || rerunningId === run.id}
                     rerunningArbiterId={rerunningArbiterId === true || rerunningArbiterId === run.id}
                     viewMode={viewMode}
+                    detailRefreshKey={debateRefreshKey}
                   />
                 ))}
               </div>

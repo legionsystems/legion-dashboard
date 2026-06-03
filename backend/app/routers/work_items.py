@@ -1581,10 +1581,13 @@ def rerun_arbiter(
     except Exception as e:
         # Arbiter turn itself raised an exception
         run.status = "failed"
+        run.execution_stage = "failed"
         run.error_type = "arbiter_failure"
         run.error_stage = "arbiter"
         run.error_message = f"Arbiter rerun failed: {type(e).__name__}"
         run.completed_at = datetime.utcnow()
+        run.progress_message = "Arbiter rerun failed"
+        run.last_progress_at = datetime.utcnow()
         db.commit()
         db.refresh(run)
         return run
