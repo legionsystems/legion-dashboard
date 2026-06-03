@@ -28,7 +28,7 @@ def _generate_hermes_prompt(work_item: WorkItem, debate_run_id: Optional[int] = 
                 mandatory_edits_str = "\n\nMANDATORY EDITS:\n" + "\n".join([f"- {e.get('field', 'Field')}: {e.get('required_change', 'Change required')}" for e in edits])
         except Exception:
             pass
-    
+
     # Derive target repo from work item type/app
     target_repo = "/srv/repo/legion-dashboard"
     if work_item.target_app:
@@ -36,7 +36,7 @@ def _generate_hermes_prompt(work_item: WorkItem, debate_run_id: Optional[int] = 
             target_repo = "/srv/repo/lgn-hub"
         elif "dashboard" in work_item.target_app.lower():
             target_repo = "/srv/repo/legion-dashboard"
-    
+
     prompt = f"""PROMPT ID: LEGION-IMPLEMENT-WI-{work_item.id}-CARD-001
 PROMPT TYPE: approved-implementation-merge-deploy
 TARGET HOST: lgn-remote-01
@@ -137,11 +137,71 @@ Return only the clean LEGION TASK RESULT block.
     return prompt
 
 
+def _promote_hermes_task_to_ready(task_id: str, reason: str = "Review task created successfully") -> bool:
+    """Promote a Hermes Kanban task from triage/todo to ready status.
+
+    Uses the Hermes CLI to promote the task. This is called after review task
+    creation succeeds, to make the builder task runnable.
+
+    Args:
+        task_id: The Hermes task ID to promote.
+        reason: Audit-trail reason for the promotion.
+
+    Returns:
+        True if promotion succeeded.
+
+    Raises:
+        HTTPException: If promotion fails.
+    """
+    import subprocess
+
+    cmd = [
+        "hermes", "kanban", "promote",
+        "--json",
+        task_id,
+        *reason.split(),
+    ]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Failed to promote builder task {task_id}: {result.stderr[:500]}"
+            )
+
+        # Parse JSON output to verify promotion succeeded
+        try:
+            output = json.loads(result.stdout)
+            if output.get("error"):
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=f"Failed to promote builder task {task_id}: {output.get('error')}"
+                )
+        except json.JSONDecodeError:
+            # Non-JSON output but returncode 0 is OK
+            pass
+
+        return True
+    except subprocess.TimeoutExpired:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Timeout promoting builder task {task_id}"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Error promoting builder task {task_id}: {str(e)}"
+        )
+
+
 def _create_hermes_task(title: str, body: str, assignee: Optional[str] = None, idempotency_key: Optional[str] = None, priority: Optional[str] = None, status_override: Optional[str] = None) -> dict:
     """Create Hermes Kanban task via Hermes Kanban Bridge HTTP API.
-    
+
     Returns dict with task_id, status, or raises HTTPException on failure.
-    
+
     Note: Uses the host-local Hermes Kanban Bridge (port 8765) which wraps
     the Hermes CLI. This avoids container/host binary incompatibility issues.
     """
@@ -152,7 +212,7 @@ def _create_hermes_task(title: str, body: str, assignee: Optional[str] = None, i
         "assignee": assignee or "builder",
         "idempotency_key": idempotency_key or f"legion-dashboard-wi-{title.replace(' ', '-').lower()[:50]}",
     }
-    
+
     # Priority must be integer for Hermes CLI
     if priority:
         try:
@@ -160,16 +220,17 @@ def _create_hermes_task(title: str, body: str, assignee: Optional[str] = None, i
         except (ValueError, TypeError):
             # Default to 0 if priority is not a valid integer
             payload["priority"] = 0
-    
-    # Status override: triage for send-to-builder, ready for start-build
+
+    # Status override: triage for send-to-builder and initial implementation path
+    # For implementation path (start-build), we create in triage and promote after review task exists
     if status_override == "triage":
         payload["triage"] = True
-    # For "ready" status, we don't set triage - task goes to ready by default
-    
+    # For "ready" status (triage path only), we don't set triage - task goes to ready by default
+
     # Call Hermes Kanban Bridge API
     import urllib.request
     import urllib.error
-    
+
     bridge_url = "http://host.docker.internal:8765/tasks"
     try:
         req = urllib.request.Request(
@@ -202,6 +263,246 @@ def _create_hermes_task(title: str, body: str, assignee: Optional[str] = None, i
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Hermes Kanban Bridge error: {str(e)}"
         )
+
+
+def _generate_review_prompt(
+    work_item: WorkItem,
+    builder_task_id: str,
+    target_repo: str,
+    pr_number: Optional[int] = None,
+    branch_name: Optional[str] = None,
+) -> str:
+    """Generate the Codex review wrapper prompt for a review task.
+
+    The review task body instructs the reviewer profile to orchestrate a
+    Codex CLI review. The reviewer must not perform an LLM-only review;
+    Codex must produce the verdict. If Codex tooling fails, the task is
+    blocked with a tooling error.
+
+    Args:
+        work_item: The WorkItem being reviewed.
+        builder_task_id: The Hermes task ID of the builder task.
+        target_repo: Absolute path to the git repo on the target host.
+        pr_number: PR number under review (optional).
+        branch_name: Head branch that was built (optional).
+
+    Returns:
+        The full review task body string.
+    """
+    pr_ref = f"PR #{pr_number}" if pr_number else "the implementation branch"
+    branch_ref = branch_name or "the feature branch"
+    report_path = (
+        f"/root/.hermes/LEGION_TOOLS/"
+        f"review-report-wi-{work_item.id}-builder-{builder_task_id}.md"
+    )
+
+    prompt = f"""PROMPT ID: LEGION-REVIEW-WI-{work_item.id}-CARD-001
+PROMPT TYPE: codex-required-review
+ASSIGNEE ROLE: orchestrator (do not perform LLM-only review)
+BUILDER TASK: {builder_task_id}
+WORK ITEM: WI-{work_item.id}
+TARGET REPO: {target_repo}
+TARGET PR: {pr_number or "N/A"}
+BASE BRANCH: main
+HEAD BRANCH: {branch_ref}
+EXPECTED REPORT: {report_path}
+REVIEW VERDICT: PENDING
+
+SAFETY GATE — READ FIRST
+
+1. You are a review orchestrator. You MUST use the Codex CLI review
+   wrapper to perform this review. Do NOT fall back to LLM-only review.
+2. If Codex CLI is not available or fails, block this task with a tooling
+   error. Do not proceed with a manual review.
+3. Do not modify any files. This is read-only review.
+4. Do not expose API keys, provider secrets, or private data in logs.
+5. Record Codex verdict, report path, model/tool provenance, and reviewed
+   commit on this task before completing.
+
+ACCEPTANCE CRITERIA
+
+- Builder-created review tasks explicitly require the Codex review wrapper.
+- Review task body includes repo path, PR number, base branch, head branch,
+  and expected report path.
+- Reviewer profile is only used to orchestrate the review, not to replace
+  Codex.
+- Review cannot certify an implementation unless Codex returns APPROVE or
+  APPROVE_WITH_NON_BLOCKING_NOTES.
+- Codex verdict, report path, model/tool provenance, and reviewed commit are
+  recorded on the review task.
+- If Codex returns mandatory edits, needs rework, or blocked, the review
+  task requests changes and does not certify.
+- If Codex tooling fails, the task is blocked with a tooling error rather
+  than falling back to LLM-only review.
+
+REVIEW WORKFLOW
+
+PHASE 1 — PREPARE
+- Verify Codex CLI is available on the target host.
+- Fetch the PR diff: git diff main...{branch_ref}
+- Identify changed files, scope, and potential risk areas.
+
+PHASE 2 — CODEX REVIEW
+- Invoke Codex CLI review wrapper against {target_repo}.
+- Pass the PR diff, changed files, and work item context to Codex.
+- Codex must produce a structured verdict: APPROVE,
+  APPROVE_WITH_NON_BLOCKING_NOTES, MANDATORY_EDITS, NEEDS_REWORK, or
+  BLOCKED.
+
+PHASE 3 — RECORD
+- Write review report to {report_path} with:
+  - Codex verdict
+  - Codex model/tool provenance
+  - Reviewed commit SHA
+  - Findings (blocking and non-blocking)
+  - Mandatory edits (if any)
+- Record the verdict, report path, provenance, and commit on this Kanban
+  task's result/comments.
+
+PHASE 4 — CERTIFY OR REQUEST CHANGES
+- If Codex returns APPROVE: mark this task complete with certification.
+- If Codex returns APPROVE_WITH_NON_BLOCKING_NOTES: mark complete with
+  notes for the operator.
+- If Codex returns MANDATORY_EDITS, NEEDS_REWORK, or BLOCKED: mark this
+  task as changes requested. Do NOT certify.
+- If Codex tooling fails: BLOCK this task with reason
+  "codex_tooling_failed: <error details>". Do NOT fall back to LLM-only.
+
+OUT OF SCOPE
+- Do not merge, push, or create PRs.
+- Do not implement any changes.
+- Do not modify Hermes source/config.
+- Do not certify based on LLM-only review.
+
+WORK ITEM CONTEXT
+- ID: {work_item.id}
+- Title: {work_item.title}
+- Type: {work_item.type}
+- Priority: {work_item.priority}
+- Acceptance Notes: {work_item.acceptance_notes or "None provided"}
+
+FINAL RESPONSE
+Return only the clean LEGION TASK RESULT block.
+"""
+    return prompt
+
+
+def _is_reviewer_tool_capable(reviewer_profile: Optional[str]) -> bool:
+    """Validate that the reviewer profile is tool-capable.
+
+    The reviewer profile must be able to orchestrate Codex CLI. This means
+    the profile must exist and have access to the Codex CLI tools. For now,
+    we validate that a reviewer profile is explicitly set (not None and not
+    'default') and that it is one of the known tool-capable profiles.
+
+    Args:
+        reviewer_profile: The Hermes profile name for the reviewer.
+
+    Returns:
+        True if the reviewer profile is tool-capable.
+
+    Raises:
+        HTTPException: If the reviewer profile is not set or not tool-capable.
+    """
+    if not reviewer_profile:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Review task creation requires a tool-capable reviewer profile. "
+                "No reviewer_profile is set on the work item."
+            ),
+        )
+    # Profiles that are known to support Codex CLI orchestration.
+    # The 'reviewer' profile is the dedicated review orchestrator.
+    # The 'builder' profile is technically capable but should not be used
+    # for review (same-model blocking is enforced elsewhere).
+    _TOOL_CAPABLE_REVIEWER_PROFILES = frozenset({"reviewer"})
+    if reviewer_profile not in _TOOL_CAPABLE_REVIEWER_PROFILES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Reviewer profile '{reviewer_profile}' is not tool-capable for "
+                "Codex review orchestration. Set reviewer_profile to 'reviewer'."
+            ),
+        )
+    return True
+
+
+def _create_review_task(
+    db: Session,
+    work_item: WorkItem,
+    builder_task: BuilderTask,
+    target_repo: str,
+) -> Optional[str]:
+    """Create a Hermes Kanban review task with Codex review wrapper prompt.
+
+    Called immediately after the builder task is created. The review task
+    is assigned to the reviewer profile (from work_item.reviewer_profile)
+    and is placed in Ready status (not Todo).
+
+    The review task body (generated by ``_generate_review_prompt``) includes:
+    - Repo path, PR number, base branch, head branch, expected report path
+    - Explicit requirement for the Codex review wrapper
+    - Instructions to block on tooling failure rather than fall back to LLM-only
+
+    Args:
+        db: Database session.
+        work_item: The WorkItem being built.
+        builder_task: The just-created BuilderTask ORM instance (already
+            persisted with an ID and hermes_task_id).
+        target_repo: Absolute path to the git repo on the target host.
+
+    Returns:
+        The Hermes task ID of the created review task, or None if no
+        reviewer profile is configured on the work item (review deferred).
+
+    Raises:
+        HTTPException: If the reviewer profile is set but not tool-capable,
+            or if the Hermes bridge call fails.
+    """
+    reviewer_profile = work_item.reviewer_profile
+
+    # If no reviewer profile is set, skip review task creation.
+    # The operator can create a review task manually later.
+    if not reviewer_profile:
+        return None
+
+    # Validate the reviewer profile is tool-capable.
+    _is_reviewer_tool_capable(reviewer_profile)
+
+    # Generate the Codex review wrapper prompt.
+    review_body = _generate_review_prompt(
+        work_item=work_item,
+        builder_task_id=builder_task.hermes_task_id,
+        target_repo=target_repo,
+        pr_number=work_item.pr_number,
+        branch_name=work_item.branch_name or builder_task.branch_name,
+    )
+
+    # Create the Hermes review task in Ready status (not Todo).
+    review_title = f"REVIEW-WI-{work_item.id} — {work_item.title[:80]}"
+    review_idem_key = (
+        f"legion-dashboard-wi-{work_item.id}-"
+        f"review-{builder_task.hermes_task_id}-v1"
+    )
+
+    review_result = _create_hermes_task(
+        title=review_title,
+        body=review_body,
+        assignee=reviewer_profile,
+        idempotency_key=review_idem_key,
+        priority=work_item.priority,
+        # No status_override — review tasks go to Ready by default.
+    )
+
+    review_task_id = review_result.get("task_id")
+    if not review_task_id:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Hermes review task created but no task_id returned",
+        )
+
+    return review_task_id
 
 
 def _resolve_target_repo(work_item: WorkItem) -> tuple[str, str]:
@@ -354,14 +655,14 @@ def _create_builder_task(db: Session, work_item_id: int, request: SendToBuilderR
                     },
                 )
             acquired_lock = lock_result.lock
-    
+
     # Get latest completed debate run for this work item
     from ..models import DebateRun
     latest_debate = db.query(DebateRun).filter(
         DebateRun.work_item_id == work_item_id,
         DebateRun.status == "completed"
     ).order_by(DebateRun.completed_at.desc()).first()
-    
+
     # Generate prompt
     prompt_body = _generate_hermes_prompt(
         work_item=work_item,
@@ -370,10 +671,22 @@ def _create_builder_task(db: Session, work_item_id: int, request: SendToBuilderR
         implementation_readiness=latest_debate.implementation_readiness if latest_debate else None,
         mandatory_edits_json=latest_debate.summary if latest_debate else None,
     )
-    
+
     # Create Hermes task. If this fails we must release the lock we just
     # acquired so the repo doesn't stay pinned to a build that never started.
+    #
+    # ORDERING FIX: For implementation path (start-build), create in triage
+    # (non-runnable) status initially. Only after review task is successfully
+    # created do we promote to Ready. This ensures we never leave a runnable
+    # builder task without its required review task.
     idempotency_key = f"legion-dashboard-work-item-{work_item_id}-builder-v1"
+
+    # Determine initial status for Hermes task creation
+    # Implementation path: create in triage, promote after review succeeds
+    # Triage path: create in triage, never promote (review task not created)
+    is_implementation_path = status_override != "triage"
+    initial_status_override = "triage" if is_implementation_path else status_override
+
     try:
         hermes_result = _create_hermes_task(
             title=f"LEGION-WI-{work_item_id} — {work_item.title[:100]}",
@@ -381,7 +694,7 @@ def _create_builder_task(db: Session, work_item_id: int, request: SendToBuilderR
             assignee=request.hermes_assignee or "builder",
             idempotency_key=idempotency_key,
             priority=request.priority or work_item.priority,
-            status_override=status_override,
+            status_override=initial_status_override,
         )
     except Exception:
         if acquired_lock is not None:
@@ -419,6 +732,136 @@ def _create_builder_task(db: Session, work_item_id: int, request: SendToBuilderR
     if acquired_lock is not None and hermes_result.get("task_id"):
         acquired_lock.task_id = str(hermes_result["task_id"])
         db.commit()
+
+    # ------------------------------------------------------------------
+    # Create the Codex review task (if reviewer profile is configured).
+    # The review task is created in Ready status and references this
+    # builder task. It is NOT parent/child-linked to the builder task
+    # so it can be claimed independently.
+    #
+    # CRITICAL: Review tasks are ONLY created for the implementation
+    # path (start-build). The triage path (send-to-builder) queues a
+    # Hermes card for later review but does NOT start a build or create
+    # a review task. Creating a review task during triage would allow
+    # reviewers to claim a review before there is any implementation or
+    # PR to review.
+    #
+    # ORDERING INVARIANT: Never leave a runnable external Hermes builder
+    # task without its required review task.
+    #
+    # For the implementation path, we create the builder task in triage
+    # (non-runnable) status first. Only after the review task is
+    # successfully created do we promote the builder task to Ready.
+    # If review task creation fails, the builder task remains in triage
+    # (non-runnable), so the invariant is preserved.
+    #
+    # If the work item has a reviewer_profile set AND this is the
+    # implementation path, the review task is REQUIRED. If review task
+    # creation fails, Start Build must fail closed: clean up the builder
+    # task and repo lock, then raise.
+    #
+    # If the reviewer profile is not set, review task creation is
+    # skipped (operator can create manually later).
+    # ------------------------------------------------------------------
+    # is_implementation_path already defined above for initial_status_override
+    reviewer_profile = work_item.reviewer_profile
+    review_task_required = reviewer_profile is not None and is_implementation_path
+    review_task_id = None
+
+    if review_task_required:
+        try:
+            review_task_id = _create_review_task(
+                db=db,
+                work_item=work_item,
+                builder_task=builder_task,
+                target_repo=target_repo,
+            )
+        except Exception:
+            # Review task creation failed when it was REQUIRED.
+            # The builder task is already in triage (non-runnable), so the
+            # invariant is preserved. Clean up local state and raise.
+            db.rollback()
+
+            # Delete the builder task we just created.
+            db.delete(builder_task)
+            db.commit()
+
+            # Release the repo lock if we acquired one.
+            if acquired_lock is not None:
+                repo_safety.release_repo_lock(
+                    db,
+                    target_repo,
+                    release_reason="review_task_create_failed",
+                    final_status="failed",
+                )
+
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "blocker_code": "review_task_create_failed",
+                    "blocker_message": (
+                        f"Codex review task creation failed for reviewer profile "
+                        f"'{reviewer_profile}'. Start Build cannot proceed without "
+                        f"the required review task. Check Hermes bridge connectivity "
+                        f"and reviewer profile configuration."
+                    ),
+                    "work_item_id": work_item_id,
+                    "reviewer_profile": reviewer_profile,
+                },
+            )
+
+        # Review task creation succeeded. Now promote the builder task to Ready.
+        # This is the critical step that makes the builder task runnable.
+        try:
+            _promote_hermes_task_to_ready(
+                task_id=str(builder_task.hermes_task_id),
+                reason=f"Review task {review_task_id} created for WI-{work_item_id}",
+            )
+            # Update local record to reflect promoted status
+            builder_task.hermes_status = "ready"
+            db.commit()
+        except Exception as e:
+            # Promotion failed after review task was created.
+            # This is a serious error - we have a runnable builder task
+            # but promotion failed. Archive the builder task to preserve
+            # the invariant, then raise.
+            db.rollback()
+
+            # Archive the external Hermes builder task
+            import subprocess
+            archive_cmd = ["hermes", "kanban", "archive", builder_task.hermes_task_id]
+            try:
+                subprocess.run(archive_cmd, capture_output=True, text=True, timeout=30)
+            except Exception:
+                pass  # Best effort - task may still be in triage
+
+            # Delete the local builder task
+            db.delete(builder_task)
+            db.commit()
+
+            # Release the repo lock
+            if acquired_lock is not None:
+                repo_safety.release_repo_lock(
+                    db,
+                    target_repo,
+                    release_reason="builder_promote_failed",
+                    final_status="failed",
+                )
+
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "blocker_code": "builder_promote_failed",
+                    "blocker_message": f"Failed to promote builder task to Ready: {str(e)}",
+                    "work_item_id": work_item_id,
+                },
+            )
+
+    # Review task creation succeeded (or was not required).
+    if review_task_id is not None:
+        builder_task.review_task_id = review_task_id
+        db.commit()
+        db.refresh(builder_task)
 
     # Project Hermes status to Work Item status (reusable lifecycle transition)
     sync_work_item_status_from_builder(
@@ -459,7 +902,7 @@ def get_builder_task(
     builder_task = db.query(BuilderTask).filter(
         BuilderTask.work_item_id == work_item_id
     ).order_by(BuilderTask.created_at.desc()).first()
-    
+
     return builder_task
 
 
@@ -471,13 +914,13 @@ def list_builder_tasks(
 ):
     """List builder tasks with optional filters."""
     query = db.query(BuilderTask)
-    
+
     if work_item_id:
         query = query.filter(BuilderTask.work_item_id == work_item_id)
-    
+
     if status:
         query = query.filter(BuilderTask.hermes_status == status)
-    
+
     return query.order_by(BuilderTask.created_at.desc()).all()
 
 
@@ -490,7 +933,7 @@ def get_builder_task_by_id(
     builder_task = db.query(BuilderTask).filter(BuilderTask.id == task_id).first()
     if not builder_task:
         raise HTTPException(status_code=404, detail="Builder task not found")
-    
+
     return builder_task
 
 
@@ -503,11 +946,11 @@ def sync_builder_task(
     builder_task = db.query(BuilderTask).filter(BuilderTask.id == task_id).first()
     if not builder_task:
         raise HTTPException(status_code=404, detail="Builder task not found")
-    
+
     # Query Hermes for current task status via bridge API (not docker run)
     import urllib.request
     import urllib.error
-    
+
     bridge_url = f"http://host.docker.internal:8765/tasks/{builder_task.hermes_task_id}"
     try:
         req = urllib.request.Request(bridge_url, method="GET")
@@ -530,7 +973,7 @@ def sync_builder_task(
                 return builder_task  # Keep existing data
         except Exception:
             return builder_task  # Keep existing data
-    
+
     # Update local record with all available Hermes task fields
     # Bridge returns: {"task": {"task": {...}, "latest_summary": ..., "events": ..., "runs": ...}}
     # The inner "task" object contains the actual task fields (id, status, assignee, etc.)
@@ -541,7 +984,7 @@ def sync_builder_task(
             task = outer_task["task"]  # Inner task object with status, assignee, etc.
         else:
             task = outer_task
-    
+
     if isinstance(task, dict):
         builder_task.hermes_status = task.get("status", builder_task.hermes_status)
         builder_task.last_known_hermes_status = task.get("status")
@@ -549,7 +992,7 @@ def sync_builder_task(
         builder_task.hermes_result = task.get("result")
         builder_task.branch_name = task.get("branch_name")
         builder_task.last_sync_at = datetime.utcnow()
-        
+
         # Extract PR URL / commit from comments or result
         comments = hermes_data.get("comments", [])
         if comments:
@@ -563,7 +1006,7 @@ def sync_builder_task(
                     if pr_match:
                         builder_task.pr_url = pr_match.group(0)
                         break
-        
+
         # Check for completed status
         if task.get("status") == "done":
             builder_task.completed_at = datetime.utcnow()
