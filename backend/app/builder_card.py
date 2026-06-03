@@ -249,10 +249,22 @@ def _extract_phrase_tokens(phrase: str, min_len: int = 4) -> List[str]:
 
     We drop short tokens, stopwords, and punctuation so the overlap is
     based on real concept words (e.g. "auto-assign", "stance", "AUTO_ASSIGN").
+
+    Underscores, hyphens, and case differences are normalized so that
+    ``operator_argument_stance``, ``operator-argument``, and
+    ``OPERATOR_ARGUMENT`` all map to the same concept tokens. Without
+    this, a work item that names a concept in one form (e.g. the
+    mandatory edit field ``operator_argument_stance``) and the
+    out-of-scope line that names it in another form (``operator-argument
+    stance auto-assign``) would fail to match — silently emitting a
+    contradictory prompt.
     """
     if not phrase:
         return []
-    raw = re.findall(r"[A-Za-z_][A-Za-z0-9_\-]+", phrase)
+    # Normalize separators so tokenization is case- and separator-
+    # insensitive. Treat underscores, hyphens, and slashes as whitespace.
+    normalized = re.sub(r"[_\-/]+", " ", phrase)
+    raw = re.findall(r"[A-Za-z][A-Za-z0-9]+", normalized)
     stop = {
         "the", "and", "for", "with", "from", "this", "that", "into", "your",
         "you", "any", "all", "anywhere", "into", "only", "must", "not",
@@ -368,10 +380,14 @@ def _phrase_overlaps(needle_phrase: str, haystack_phrase: str) -> bool:
     if len(common) >= 2:
         return True
     # Multi-word substring match: detect "auto assign" vs "auto-assign"
-    # style variants. This needs at least 2 tokens on each side so a
-    # single generic word does not trigger.
-    norm_needle = _normalize_phrase(needle_phrase).replace("-", " ")
-    norm_hay = _normalize_phrase(haystack_phrase).replace("-", " ")
+    # style variants, including underscore/case differences. This
+    # needs at least 2 tokens on each side so a single generic word
+    # does not trigger.
+    def _sep_normalize(s: str) -> str:
+        return _normalize_phrase(s).replace("-", " ").replace("_", " ")
+
+    norm_needle = _sep_normalize(needle_phrase)
+    norm_hay = _sep_normalize(haystack_phrase)
     if norm_needle and norm_needle in norm_hay and len(norm_needle.split()) >= 2:
         return True
     if norm_hay and norm_hay in norm_needle and len(norm_hay.split()) >= 2:

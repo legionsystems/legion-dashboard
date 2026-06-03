@@ -427,6 +427,34 @@ def test_contradiction_check_flags_acceptance_notes_overlap():
     assert "Do not use direct GitHub API orchestration." in removed
 
 
+def test_contradiction_check_normalizes_underscore_and_hyphen_variants():
+    """Regression (Codex P2 #3): work item body uses the underscore form
+    (``operator_argument_stance``) and the out-of-scope line uses the
+    hyphen form (``operator-argument``). Tokenizer must normalize
+    separators and case so the contradiction is still detected."""
+    item = _make_work_item(
+        title="Implement AUTO_ASSIGN stance classification",
+        body="",
+        acceptance_notes="",
+    )
+    edits = [
+        {
+            "field": "operator_argument_stance",
+            "current_problem": "x",
+            "required_change": (
+                "Implement deterministic AUTO_ASSIGN classification into "
+                "PRO/CON/NEUTRAL."
+            ),
+        }
+    ]
+    result = check_out_of_scope_contradictions(item, edits, DEFAULT_OUT_OF_SCOPE_ITEMS)
+    removed = [r["removed_item"] for r in result.removed_items]
+    assert any("operator-argument stance auto-assign" in r for r in removed), (
+        f"Underscore/case variants must still trigger the contradiction, "
+        f"got: {removed!r}"
+    )
+
+
 def test_contradiction_check_does_not_remove_reinforced_out_of_scope():
     """Regression (Codex P2 #2): if the work item RESTATES the
     out-of-scope guard in the same negative form ('must not X'), the
