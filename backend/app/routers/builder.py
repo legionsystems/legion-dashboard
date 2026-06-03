@@ -667,31 +667,62 @@ def _create_builder_task(db: Session, work_item_id: int, request: SendToBuilderR
     # so it can be claimed independently.
     #
     # If the work item has a reviewer_profile set, the review task is
-    # created immediately. If the reviewer profile is not set, review
-    # task creation is deferred (operator can trigger manually later).
+    # REQUIRED. If review task creation fails, Start Build must fail
+    # closed: clean up the builder task and repo lock, then raise.
     #
-    # If the reviewer profile is set but not tool-capable, or if the
-    # Hermes bridge call fails, the error propagates and the builder
-    # task is already committed — the operator can retry review task
-    # creation via the UI or retry the start-build.
+    # If the reviewer profile is not set, review task creation is
+    # skipped (operator can create manually later).
     # ------------------------------------------------------------------
-    try:
-        review_task_id = _create_review_task(
-            db=db,
-            work_item=work_item,
-            builder_task=builder_task,
-            target_repo=target_repo,
-        )
-        if review_task_id is not None:
-            builder_task.review_task_id = review_task_id
+    reviewer_profile = work_item.reviewer_profile
+    review_task_required = reviewer_profile is not None
+    review_task_id = None
+
+    if review_task_required:
+        try:
+            review_task_id = _create_review_task(
+                db=db,
+                work_item=work_item,
+                builder_task=builder_task,
+                target_repo=target_repo,
+            )
+        except Exception:
+            # Review task creation failed when it was REQUIRED.
+            # Clean up: delete the builder task, release the repo lock,
+            # then raise so Start Build fails clearly.
+            db.rollback()
+
+            # Delete the builder task we just created.
+            db.delete(builder_task)
             db.commit()
-            db.refresh(builder_task)
-    except Exception:
-        # Review task creation failed — the builder task is still valid.
-        # Rollback any partial state from the review task creation attempt
-        # but keep the builder task. The operator can retry.
-        db.rollback()
-        # Refresh the builder_task to ensure it's in a clean state
+
+            # Release the repo lock if we acquired one.
+            if acquired_lock is not None:
+                repo_safety.release_repo_lock(
+                    db,
+                    target_repo,
+                    release_reason="review_task_create_failed",
+                    final_status="failed",
+                )
+
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "blocker_code": "review_task_create_failed",
+                    "blocker_message": (
+                        f"Codex review task creation failed for reviewer profile "
+                        f"'{reviewer_profile}'. Start Build cannot proceed without "
+                        f"the required review task. Check Hermes bridge connectivity "
+                        f"and reviewer profile configuration."
+                    ),
+                    "work_item_id": work_item_id,
+                    "reviewer_profile": reviewer_profile,
+                },
+            )
+
+    # Review task creation succeeded (or was not required).
+    if review_task_id is not None:
+        builder_task.review_task_id = review_task_id
+        db.commit()
         db.refresh(builder_task)
 
     # Project Hermes status to Work Item status (reusable lifecycle transition)

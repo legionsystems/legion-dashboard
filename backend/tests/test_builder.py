@@ -451,11 +451,12 @@ def test_review_task_fails_with_non_tool_capable_profile(
 ):
     """When work_item.reviewer_profile is set to a non-tool-capable value
     (e.g., 'default' or 'builder'), the review task creation must fail
-    without preventing the builder task from being created.
+    and Start Build must fail closed (no builder task, no repo lock).
     """
     item = _make_approved_work_item(
         db_session,
         reviewer_profile="default",  # Not in _TOOL_CAPABLE_REVIEWER_PROFILES
+        branch_name="main",  # Pass the safety gate
     )
     _patch_target_repo(monkeypatch, "/srv/repo/legion-dashboard")
     _stub_hermes(monkeypatch, task_id="hermes-builder-fallback")
@@ -481,18 +482,19 @@ def test_review_task_fails_with_non_tool_capable_profile(
     response = client.post(
         f"/api/builder/work-items/{item.id}/start-build", json={}
     )
-    assert response.status_code == 200, response.text
+    # Start Build must fail when review task creation is required but fails.
+    assert response.status_code == 502, response.text
+    data = response.json()
+    assert data["detail"]["blocker_code"] == "review_task_create_failed"
+    assert "default" in data["detail"]["blocker_message"]
 
-    # The builder task was created despite review task failure.
+    # No builder task should have been created.
     builder_tasks = (
         db_session.query(BuilderTask)
         .filter(BuilderTask.work_item_id == item.id)
         .all()
     )
-    assert len(builder_tasks) == 1
-    assert builder_tasks[0].hermes_task_id == "hermes-builder-fallback"
-    # review_task_id is None because review task creation failed.
-    assert builder_tasks[0].review_task_id is None
+    assert len(builder_tasks) == 0
 
 
 def test_review_task_body_contains_report_path_and_provenance_fields(
@@ -578,3 +580,75 @@ def test_review_task_body_contains_report_path_and_provenance_fields(
     # PR and repo references.
     assert "TARGET REPO: /srv/repo/legion-dashboard" in body
     assert "TARGET PR: 99" in body
+
+
+def test_review_task_hermes_bridge_failure_fails_start_build(
+    client, db_session, monkeypatch
+):
+    """When reviewer_profile is set but the Hermes bridge call fails
+    during review task creation, Start Build must fail closed:
+    - Return 502 error with clear blocker message
+    - No builder task created
+    - No repo lock left behind
+    """
+    item = _make_approved_work_item(
+        db_session,
+        reviewer_profile="reviewer",
+        pr_number=55,
+        branch_name="main",  # Pass the safety gate
+    )
+    _patch_target_repo(monkeypatch, "/srv/repo/legion-dashboard")
+
+    # Stub Hermes to succeed for builder task but fail for review task.
+    import app.routers.builder as builder_module
+    hermes_calls = []
+
+    def stub_hermes(**kwargs):
+        hermes_calls.append(kwargs)
+        task_id = kwargs.get("idempotency_key", "unknown")
+        if "review" in task_id:
+            # Simulate Hermes bridge failure for review task.
+            raise Exception("Hermes bridge connection refused")
+        return {"task_id": "hermes-builder-bridge-fail", "status": "ready", "assignee": "builder"}
+
+    monkeypatch.setattr(builder_module, "_create_hermes_task", stub_hermes)
+
+    _stub_executor(
+        monkeypatch,
+        preview_deploy.ExecutorResponse(
+            success=True,
+            raw={
+                "success": True,
+                "action": "repo_safety_check",
+                "is_clean": True,
+                "dirty_files": [],
+                "staged_files": [],
+                "untracked_files": [],
+                "current_branch": "main",
+                "current_commit": "d" * 40,
+                "blocker_code": None,
+                "blocker_message": None,
+            },
+        ),
+    )
+
+    response = client.post(
+        f"/api/builder/work-items/{item.id}/start-build", json={}
+    )
+    # Start Build must fail when review task creation fails.
+    assert response.status_code == 502, response.text
+    data = response.json()
+    assert data["detail"]["blocker_code"] == "review_task_create_failed"
+    assert "reviewer" in data["detail"]["blocker_message"]
+    assert "Hermes bridge" in data["detail"]["blocker_message"]
+
+    # No builder task should have been created.
+    builder_tasks = (
+        db_session.query(BuilderTask)
+        .filter(BuilderTask.work_item_id == item.id)
+        .all()
+    )
+    assert len(builder_tasks) == 0
+
+    # Verify the Hermes call was attempted (builder task created first).
+    assert len(hermes_calls) >= 1
