@@ -1564,7 +1564,12 @@ def rerun_arbiter(
     run.arbiter_rerun_count += 1
     run.status = "running"
     run.execution_stage = "running"
-    run.worker_status = "claimed"
+    # Synchronous arbiter-only rerun: keep this out of the background
+    # debate worker queue/lease states. The worker claims "queued" and can
+    # reclaim stale "claimed"/"warming"/"running" leases, so using those here
+    # can race a full debate execution against this arbiter-only rerun.
+    run.worker_status = "arbiter_rerun"
+    run.lease_until = None
     run.last_progress_at = datetime.utcnow()
     run.progress_message = f"Rerunning arbiter (attempt {run.arbiter_rerun_count})"
     db.add(run)
@@ -1584,6 +1589,7 @@ def rerun_arbiter(
         run.status = "failed"
         run.execution_stage = "failed"
         run.worker_status = "failed"
+        run.lease_until = None
         run.error_type = "arbiter_failure"
         run.error_stage = "arbiter"
         run.error_message = f"Arbiter rerun failed: {type(e).__name__}"
@@ -1609,6 +1615,7 @@ def rerun_arbiter(
         run.error_message = None
         run.completed_at = datetime.utcnow()
         run.worker_status = "completed"
+        run.lease_until = None
         run.progress_message = "Arbiter rerun completed"
         run.last_progress_at = datetime.utcnow()
 
@@ -1627,6 +1634,7 @@ def rerun_arbiter(
         run.error_message = f"Arbiter could not reach a decision: {safe_diag}"
         run.completed_at = datetime.utcnow()
         run.worker_status = "failed"
+        run.lease_until = None
         run.progress_message = "Arbiter rerun failed"
         run.last_progress_at = datetime.utcnow()
 
