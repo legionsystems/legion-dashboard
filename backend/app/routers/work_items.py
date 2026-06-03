@@ -1564,6 +1564,7 @@ def rerun_arbiter(
     run.arbiter_rerun_count += 1
     run.status = "running"
     run.execution_stage = "running"
+    run.worker_status = "claimed"
     run.last_progress_at = datetime.utcnow()
     run.progress_message = f"Rerunning arbiter (attempt {run.arbiter_rerun_count})"
     db.add(run)
@@ -1582,6 +1583,7 @@ def rerun_arbiter(
         # Arbiter turn itself raised an exception
         run.status = "failed"
         run.execution_stage = "failed"
+        run.worker_status = "failed"
         run.error_type = "arbiter_failure"
         run.error_stage = "arbiter"
         run.error_message = f"Arbiter rerun failed: {type(e).__name__}"
@@ -1606,6 +1608,9 @@ def rerun_arbiter(
         run.error_stage = None
         run.error_message = None
         run.completed_at = datetime.utcnow()
+        run.worker_status = "completed"
+        run.progress_message = "Arbiter rerun completed"
+        run.last_progress_at = datetime.utcnow()
 
         # P2-1: Advance draft Work Item to debated (same as normal debate completion)
         if item.status.lower() == "draft" and not item.approved_by_operator:
@@ -1621,6 +1626,9 @@ def rerun_arbiter(
         run.error_stage = "arbiter"
         run.error_message = f"Arbiter could not reach a decision: {safe_diag}"
         run.completed_at = datetime.utcnow()
+        run.worker_status = "failed"
+        run.progress_message = "Arbiter rerun failed"
+        run.last_progress_at = datetime.utcnow()
 
     db.commit()
     db.refresh(run)
