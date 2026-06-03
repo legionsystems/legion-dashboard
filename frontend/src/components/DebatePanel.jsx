@@ -323,7 +323,7 @@ function DebateRunCard({ run, expanded, onToggle, onExecute, onRerun, onCancel, 
         setError(err.message);
       })
       .finally(() => setLoading(false));
-  }, [expanded, run.id, run.work_item_id, detailRefreshKey]);
+  }, [expanded, run.id, run.work_item_id, detailRefreshKey, detail]);
 
   // When detailRefreshKey changes while expanded, clear detail so the effect above refetches
   const prevRefreshKeyRef = useRef(detailRefreshKey);
