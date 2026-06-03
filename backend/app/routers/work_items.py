@@ -1489,6 +1489,14 @@ def rerun_arbiter(
     if run is None:
         raise HTTPException(status_code=404, detail="Debate run not found")
 
+    # P2-2: Prevent concurrent arbiter reruns — check before other guards
+    _IN_PROGRESS_STATUSES = frozenset({"queued", "claimed", "warming", "running", "generating"})
+    if run.status in _IN_PROGRESS_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot rerun arbiter: run is currently in progress (status='{run.status}'). Wait for it to complete.",
+        )
+
     # Guard: only failed runs
     if run.status != "failed":
         raise HTTPException(
@@ -1551,10 +1559,14 @@ def rerun_arbiter(
     if item is None:
         raise HTTPException(status_code=404, detail="Work item not found")
 
-    # Track arbiter rerun
+    # Track arbiter rerun and mark as in-progress BEFORE model execution
     run.arbiter_rerun_count += 1
+    run.status = "running"
+    run.execution_stage = "running"
     run.last_progress_at = datetime.utcnow()
     run.progress_message = f"Rerunning arbiter (attempt {run.arbiter_rerun_count})"
+    db.add(run)
+    db.add(item)
     db.commit()
 
     try:
@@ -1590,6 +1602,11 @@ def rerun_arbiter(
         run.error_stage = None
         run.error_message = None
         run.completed_at = datetime.utcnow()
+
+        # P2-1: Advance draft Work Item to debated (same as normal debate completion)
+        if item.status.lower() == "draft" and not item.approved_by_operator:
+            item.status = "debated"
+            db.add(item)
     else:
         # Failed: preserve existing turns, update error with NO_DECISION reason
         failure_cat = arbiter_result.get("failure_category", "unknown")

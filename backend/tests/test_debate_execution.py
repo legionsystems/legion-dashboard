@@ -325,7 +325,7 @@ class TestRerunArbiter:
         assert "completed" in response.json()["detail"].lower()
 
     def test_rerun_arbiter_queued_run_rejected(self, client):
-        """Cannot rerun arbiter on a queued run (not failed)."""
+        """Cannot rerun arbiter on a queued run (in progress, not failed)."""
         item = _create_work_item(client)
         work_item_id = item["id"]
         run = _create_debate_run(client, work_item_id, rounds=1)
@@ -334,8 +334,8 @@ class TestRerunArbiter:
         response = client.post(
             f"/api/work-items/{work_item_id}/debates/{run_id}/rerun-arbiter", json={}
         )
-        assert response.status_code == 400
-        assert "failed" in response.json()["detail"].lower()
+        assert response.status_code == 409
+        assert "in progress" in response.json()["detail"].lower()
 
     def test_rerun_arbiter_no_arguments_rejected(self, client):
         """Cannot rerun arbiter when run has no PRO/CON arguments."""
@@ -699,3 +699,108 @@ class TestRerunArbiter:
         data = response.json()
         assert data["summary"] == "Approved with mandatory edits needed"
         assert data["final_recommendation"] == "APPROVE_WITH_MANDATORY_EDITS"
+
+    def test_rerun_arbiter_success_advances_draft_work_item_to_debated(self, client):
+        """Successful arbiter rerun advances a draft Work Item to debated."""
+        from unittest.mock import patch as mock_patch
+        from app.debate_executor import ExecutionConfig
+        from app.database import SessionLocal
+        from app.models import DebateRun, DebateArgument, WorkItem
+
+        item = _create_work_item(client)
+        work_item_id = item["id"]
+        run = _create_debate_run(client, work_item_id, rounds=1)
+        run_id = run["id"]
+
+        db = SessionLocal()
+        db_run = db.query(DebateRun).filter(DebateRun.id == run_id).first()
+        db_run.status = "failed"
+        db_run.error_type = "arbiter_failure"
+        db_run.error_stage = "arbiter"
+        db_run.provenance = "test"
+        db.add(DebateArgument(
+            debate_run_id=run_id, round_number=1, role="Product Owner",
+            side="pro", content="PRO argument",
+        ))
+        db.add(DebateArgument(
+            debate_run_id=run_id, round_number=1, role="Skeptic",
+            side="con", content="CON argument",
+        ))
+        db.commit()
+
+        # Verify work item is still draft before rerun
+        db_item = db.query(WorkItem).filter(WorkItem.id == work_item_id).first()
+        assert db_item.status == "draft"
+        db.close()
+
+        mock_arbiter_result = {
+            "success": True,
+            "data": {
+                "recommendation": "APPROVE_AS_IS",
+                "implementation_readiness": "READY_NOW",
+                "rationale": "Mock arbiter approved on rerun",
+            },
+            "failure_category": None,
+            "safe_diagnostic": None,
+            "was_repaired": False,
+        }
+
+        mock_config = ExecutionConfig(
+            enabled=True, provider="ollama_native",
+            base_url="http://localhost:11434/v1",
+            model="test-model", timeout_seconds=30,
+        )
+
+        with mock_patch(
+            "app.routers.work_items.get_execution_config", return_value=mock_config
+        ), mock_patch(
+            "app.debate_executor._execute_arbiter_turn",
+            return_value=mock_arbiter_result,
+        ):
+            response = client.post(
+                f"/api/work-items/{work_item_id}/debates/{run_id}/rerun-arbiter", json={}
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "completed"
+
+        # Verify work item was advanced to debated
+        db2 = SessionLocal()
+        db_item2 = db2.query(WorkItem).filter(WorkItem.id == work_item_id).first()
+        assert db_item2.status == "debated"
+        db2.close()
+
+    def test_rerun_arbiter_concurrent_request_rejected(self, client):
+        """A second arbiter rerun request is rejected while the run is in progress."""
+        from app.database import SessionLocal
+        from app.models import DebateRun, DebateArgument
+
+        item = _create_work_item(client)
+        work_item_id = item["id"]
+        run = _create_debate_run(client, work_item_id, rounds=1)
+        run_id = run["id"]
+
+        # Set run to 'running' to simulate an in-progress arbiter rerun
+        db = SessionLocal()
+        db_run = db.query(DebateRun).filter(DebateRun.id == run_id).first()
+        db_run.status = "running"
+        db_run.execution_stage = "running"
+        db_run.provenance = "test"
+        db.add(DebateArgument(
+            debate_run_id=run_id, round_number=1, role="Product Owner",
+            side="pro", content="PRO argument",
+        ))
+        db.add(DebateArgument(
+            debate_run_id=run_id, round_number=1, role="Skeptic",
+            side="con", content="CON argument",
+        ))
+        db.commit()
+        db.close()
+
+        # Second request should be rejected with 409
+        response = client.post(
+            f"/api/work-items/{work_item_id}/debates/{run_id}/rerun-arbiter", json={}
+        )
+        assert response.status_code == 409
+        assert "in progress" in response.json()["detail"].lower()
