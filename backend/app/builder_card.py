@@ -315,19 +315,34 @@ def _in_scope_phrase_haystack(
 
 
 def _phrase_overlaps(needle_phrase: str, haystack_phrase: str) -> bool:
+    """Return True if a substantive concept overlaps between phrases.
+
+    A single common word (e.g. "implement", "feature", "support") is
+    NOT enough on its own — that produces false positives on broad
+    out-of-scope lines like "Do not implement Planning Chat..." which
+    share the verb with almost every implementation work item. We
+    require either:
+
+    * two or more distinct concept tokens in the intersection, OR
+    * a multi-word substring match (e.g. "auto assign" in both
+      phrases, after hyphen normalization).
+    """
     needle_tokens = set(_extract_phrase_tokens(needle_phrase))
     haystack_tokens = set(_extract_phrase_tokens(haystack_phrase))
     if not needle_tokens or not haystack_tokens:
         return False
-    # Direct token match counts as overlap.
-    if needle_tokens & haystack_tokens:
+    # Multi-token intersection — single common words are not contradictions.
+    common = needle_tokens & haystack_tokens
+    if len(common) >= 2:
         return True
-    # Substring match: detect "auto assign" vs "auto-assign" style variants.
+    # Multi-word substring match: detect "auto assign" vs "auto-assign"
+    # style variants. This needs at least 2 tokens on each side so a
+    # single generic word does not trigger.
     norm_needle = _normalize_phrase(needle_phrase).replace("-", " ")
     norm_hay = _normalize_phrase(haystack_phrase).replace("-", " ")
-    if norm_needle and norm_needle in norm_hay:
+    if norm_needle and norm_needle in norm_hay and len(norm_needle.split()) >= 2:
         return True
-    if norm_hay and norm_hay in norm_needle:
+    if norm_hay and norm_hay in norm_needle and len(norm_hay.split()) >= 2:
         return True
     return False
 

@@ -374,6 +374,29 @@ def test_contradiction_check_flags_wi17_out_of_scope_conflict():
     ]
 
 
+def test_contradiction_check_does_not_remove_broad_out_of_scope_for_plain_implementation():
+    """Regression (Codex P2): the broad 'Do not implement Planning Chat,
+    Discord notifications, ...' line must NOT be removed for an
+    ordinary implementation work item just because both contain the
+    verb 'implement'. Single common words are not contradictions."""
+    item = _make_work_item(
+        title="Implement a new dashboard sidebar entry",
+        body="Add a sidebar link to the Work Items page.",
+        acceptance_notes="",
+    )
+    result = check_out_of_scope_contradictions(item, [], DEFAULT_OUT_OF_SCOPE_ITEMS)
+    assert result.removed_items == [], (
+        f"Ordinary implementation tasks must not remove the broad "
+        f"out-of-scope line, got: {result.removed_items!r}"
+    )
+    # All default out-of-scope items survive.
+    assert len(result.filtered_out_of_scope) == len(DEFAULT_OUT_OF_SCOPE_ITEMS)
+    assert any(
+        "Do not implement Planning Chat" in r
+        for r in result.filtered_out_of_scope
+    )
+
+
 def test_contradiction_check_keeps_non_conflicting_out_of_scope():
     # Use a work item with no overlap to either mandatory edits or the
     # body of the item. Body must also be overridden because the helper
