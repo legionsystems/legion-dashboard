@@ -33,31 +33,49 @@ const RUN_STATUS_COLOR = {
   failed: "#EF4444",
 };
 
-// Debate recommendations. APPROVE_WITH_EDITS (aka
-// "APPROVE_WITH_MANDATORY_EDITS" in WI-32 phrasing) is given a distinct
-// amber/orange palette so a glance at the row makes it obvious that required
-// work remains, rather than reading like a clean approval.
+// Debate recommendations. APPROVE_WITH_MANDATORY_EDITS / APPROVE_WITH_EDITS
+// are given a distinct amber/orange palette so a glance at the row makes it
+// obvious that required work remains, rather than reading like a clean
+// approval. Backend canonical values live in
+// ``backend/app/debate_executor.py`` (APPROVE_AS_IS, APPROVE_WITH_MANDATORY_EDITS,
+// NEEDS_REWORK, SPLIT_SCOPE, DEFER, REJECT, LOW_SIGNAL); the legacy
+// SPLIT_FIRST/NEEDS_MORE_DETAIL/DO_NOT_BUILD_NOW values are kept for old runs.
 const RECOMMENDATION_META = {
   APPROVE_AS_IS: { label: "APPROVE", color: "#10B981" },
   APPROVE_WITH_EDITS: { label: "APPROVE+EDITS REQUIRED", color: "#F97316" },
+  APPROVE_WITH_MANDATORY_EDITS: {
+    label: "APPROVE+EDITS REQUIRED",
+    color: "#F97316",
+  },
+  NEEDS_REWORK: { label: "NEEDS REWORK", color: "#F97316" },
+  SPLIT_SCOPE: { label: "SPLIT SCOPE", color: "#A855F7" },
   SPLIT_FIRST: { label: "SPLIT FIRST", color: "#A855F7" },
   NEEDS_MORE_DETAIL: { label: "MORE DETAIL", color: "#F59E0B" },
+  DEFER: { label: "DEFER", color: "#8A8A8A" },
+  REJECT: { label: "REJECT", color: "#EF4444" },
   DO_NOT_BUILD_NOW: { label: "DO NOT BUILD", color: "#EF4444" },
+  LOW_SIGNAL: { label: "LOW SIGNAL", color: "#8A8A8A" },
 };
 
-// Lifecycle bucket → set of effective_state values it includes. Buckets are
-// exclusive (no overlap) so the count next to each pill accurately reflects
-// how many rows the filter will show. The keys here mirror
-// LIFECYCLE_FILTERS in badges.jsx.
-const LIFECYCLE_BUCKETS = {
-  active: new Set([
-    "drafting",
-    "debating",
-    "debated",
-    "approved",
-    "building",
-    "implemented",
-  ]),
+// Fallback for any debate recommendation not in the table above — surfaces
+// the raw value rather than hiding it.
+function recommendationMetaFor(rec) {
+  if (!rec) return null;
+  if (RECOMMENDATION_META[rec]) return RECOMMENDATION_META[rec];
+  return {
+    label: String(rec).replace(/_/g, " ").toUpperCase(),
+    color: "#8A8A8A",
+  };
+}
+
+// Lifecycle bucket → set of effective_state values it explicitly contains.
+// BLOCKED / REVIEW_REQUIRED / PARKED / COMPLETED are explicit sets; ACTIVE is
+// the residual bucket — any state not matched by the explicit sets falls
+// here. This guarantees every backend state (including raw Kanban fallbacks
+// like ``pr_open`` or ``review_needed`` and any future ``compute_effective_state``
+// values) is reachable from at least one filter, so a row never disappears
+// from every pill except ``ALL``.
+const EXPLICIT_LIFECYCLE_BUCKETS = {
   blocked: new Set([
     "blocked",
     "blocked_merge",
@@ -65,6 +83,7 @@ const LIFECYCLE_BUCKETS = {
   ]),
   review_required: new Set([
     "in_review",
+    "review_needed",
     "code_reviewed",
     "changes_requested",
     "review_failed",
@@ -73,10 +92,19 @@ const LIFECYCLE_BUCKETS = {
     "preview_ready",
     "certified",
     "ready_to_merge",
+    "pr_open",
+    "ready_for_merge",
   ]),
   parked: new Set(["archived", "rejected"]),
   completed: new Set(["complete", "merged"]),
 };
+
+function bucketFor(state) {
+  for (const [key, set] of Object.entries(EXPLICIT_LIFECYCLE_BUCKETS)) {
+    if (set.has(state)) return key;
+  }
+  return "active";
+}
 
 // Map effective_state → one-word/short next action the operator should take.
 // The Next Action column reads from this so an operator can scan the list
@@ -90,6 +118,9 @@ const NEXT_ACTION = {
   building: "WAIT BUILD",
   implemented: "REVIEW CONTRACT",
   in_review: "REVIEW PR",
+  review_needed: "REVIEW",
+  pr_open: "REVIEW PR",
+  ready_for_merge: "MERGE",
   code_reviewed: "CERTIFY",
   changes_requested: "REWORK",
   review_failed: "REWORK",
@@ -115,10 +146,14 @@ function nextActionFor(item) {
   if (state === "debated" && item.latest_debate) {
     const rec = item.latest_debate.final_recommendation;
     if (rec === "APPROVE_AS_IS") return "APPROVE";
-    if (rec === "APPROVE_WITH_EDITS") return "APPROVE + APPLY EDITS";
-    if (rec === "SPLIT_FIRST") return "SPLIT FIRST";
+    if (rec === "APPROVE_WITH_EDITS" || rec === "APPROVE_WITH_MANDATORY_EDITS")
+      return "APPROVE + APPLY EDITS";
+    if (rec === "SPLIT_FIRST" || rec === "SPLIT_SCOPE") return "SPLIT FIRST";
     if (rec === "NEEDS_MORE_DETAIL") return "ADD DETAIL";
-    if (rec === "DO_NOT_BUILD_NOW") return "PARK";
+    if (rec === "NEEDS_REWORK") return "REWORK";
+    if (rec === "DO_NOT_BUILD_NOW" || rec === "REJECT") return "PARK";
+    if (rec === "DEFER") return "DEFER";
+    if (rec === "LOW_SIGNAL") return "RE-DEBATE";
   }
   return NEXT_ACTION[state] || "—";
 }
@@ -146,9 +181,7 @@ function DebateCell({ item }) {
     );
   }
   const color = RUN_STATUS_COLOR[latest.status] || "#5A5A5A";
-  const rec = latest.final_recommendation
-    ? RECOMMENDATION_META[latest.final_recommendation]
-    : null;
+  const rec = recommendationMetaFor(latest.final_recommendation);
   return (
     <div className="flex flex-wrap items-center gap-1.5">
       <span
@@ -383,24 +416,24 @@ export default function WorkItemList() {
     };
   }, [type, serverView, generated, app]);
 
-  // Client-side projection of the loaded items into lifecycle buckets.
+  // Client-side projection of the loaded items into lifecycle buckets. ACTIVE
+  // is the residual — any state not in BLOCKED/REVIEW_REQUIRED/PARKED/COMPLETED
+  // lands here, including raw Kanban fallbacks the lifecycle module may emit.
   const lifecycleCounts = useMemo(() => {
     const c = { active: 0, blocked: 0, review_required: 0, parked: 0, completed: 0, all: 0 };
     for (const it of items) {
       c.all += 1;
       const state = it.effective_state || it.status || "";
-      for (const [k, set] of Object.entries(LIFECYCLE_BUCKETS)) {
-        if (set.has(state)) c[k] += 1;
-      }
+      c[bucketFor(state)] += 1;
     }
     return c;
   }, [items]);
 
   const bucketed = useMemo(() => {
     if (lifecycle === "all") return items;
-    const set = LIFECYCLE_BUCKETS[lifecycle];
-    if (!set) return items;
-    return items.filter((it) => set.has(it.effective_state || it.status || ""));
+    return items.filter(
+      (it) => bucketFor(it.effective_state || it.status || "") === lifecycle,
+    );
   }, [items, lifecycle]);
 
   const filtered = useMemo(() => {
