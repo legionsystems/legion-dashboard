@@ -497,7 +497,14 @@ def _create_builder_task_locked(
 
     # Create Hermes task. If this fails we must release the lock we just
     # acquired so the repo doesn't stay pinned to a build that never started.
-    idempotency_key = f"legion-dashboard-work-item-{work_item_id}-builder-task-{attempt_id}-v1"
+    # The idempotency key is stable per work item (NOT per
+    # attempt) so Hermes can coalesce duplicate
+    # start-build/send-to-builder requests that race across
+    # processes — the in-process lock prevents the race
+    # within a single process, and the per-work-item
+    # idempotency key prevents duplicate Hermes tasks across
+    # processes for the same logical request.
+    idempotency_key = f"legion-dashboard-work-item-{work_item_id}-builder-v1"
     try:
         hermes_result = _create_hermes_task(
             title=f"LEGION-WI-{work_item_id} — {work_item.title[:100]}",
