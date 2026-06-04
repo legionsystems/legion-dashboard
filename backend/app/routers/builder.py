@@ -332,14 +332,39 @@ def _create_builder_task_locked(
         ),
     )
     db.add(builder_task)
-    # Flush so the autoincrement id is populated. We do NOT commit
-    # yet — the row is still mutable, and we will not return it
-    # to the caller until after the worktree allocation, the
-    # safety check, the repo lock, the prompt generation, and
-    # the Hermes task creation all succeed.
+    # Flush so the autoincrement id is populated, then COMMIT the
+    # stub row immediately — before any slow work runs.
+    #
+    # The stub row is the cross-process visibility token: a
+    # second start-build/send-to-builder call for the same work
+    # item (whether from another process, an automated worker
+    # retry, or a duplicate operator click after the per-work-item
+    # Python lock has been released) must see this row through
+    # the active-task check (hermes_status NOT IN ['archived',
+    # 'done']) and 409 instead of allocating a duplicate
+    # worktree/branch and a duplicate Hermes task.
+    #
+    # The slow operations that follow (worktree allocation, safety
+    # check, repo lock, prompt generation, Hermes POST) run
+    # without holding the per-work-item Python lock and without
+    # holding the DB transaction. If any of them fail, we roll
+    # the stub row back with delete+commit so a fresh retry can
+    # allocate a new builder_task.id.
     db.flush()
     db.refresh(builder_task)
     attempt_id = builder_task.id
+    db.commit()
+
+    def _rollback_stub() -> None:
+        """Delete the stub BuilderTask row and commit.
+
+        Used on every downstream failure path so the row does not
+        appear in the active-task list (which would block a fresh
+        retry of the same work item).
+        """
+        db.delete(builder_task)
+        db.commit()
+
     try:
         (
             target_worktree,
@@ -353,8 +378,7 @@ def _create_builder_task_locked(
         # Worktree creation failed. Roll back the stub BuilderTask
         # row so it does not appear in the active-task list and
         # does not block a fresh retry.
-        db.delete(builder_task)
-        db.commit()
+        _rollback_stub()
         raise HTTPException(
             status_code=409,
             detail={
@@ -399,6 +423,13 @@ def _create_builder_task_locked(
     if not skip_gate:
         safety = repo_safety.check_repo_clean_via_executor(target_repo)
         if not safety.is_clean:
+            # Roll back the stub before raising; the stub was
+            # committed up front to give cross-process callers
+            # visibility, but this work item is not actually
+            # going to launch a build, so the row would otherwise
+            # block a fresh retry once the operator clears the
+            # dirty/unreachable state.
+            _rollback_stub()
             raise HTTPException(
                 status_code=409,
                 detail={
@@ -438,6 +469,7 @@ def _create_builder_task_locked(
         if not skip_lock:
             existing_lock = repo_safety.check_repo_busy(db, target_repo)
             if existing_lock is not None:
+                _rollback_stub()
                 raise HTTPException(
                     status_code=409,
                     detail={
@@ -464,6 +496,7 @@ def _create_builder_task_locked(
                 lock_owner=request.hermes_assignee or "builder",
             )
             if not lock_result.acquired:
+                _rollback_stub()
                 raise HTTPException(
                     status_code=409,
                     detail={
@@ -525,8 +558,7 @@ def _create_builder_task_locked(
         # Roll back the stub BuilderTask row so a fresh retry can
         # allocate a new builder_task.id (and therefore a new
         # worktree + branch).
-        db.delete(builder_task)
-        db.commit()
+        _rollback_stub()
         raise
 
     # Populate the BuilderTask stub row with the Hermes metadata

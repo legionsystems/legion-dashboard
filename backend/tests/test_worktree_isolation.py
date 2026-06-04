@@ -1395,3 +1395,205 @@ def test_per_work_item_lock_serialises_concurrent_starts():
     # work item id.
     lock2 = worktree_locks.acquire_work_item_lock(wid)
     assert lock is lock2, "lock table must return the same lock per work item"
+
+
+# ---------------------------------------------------------------------------
+# Stub-commit-before-slow-work invariant (cross-process active-task check)
+# ---------------------------------------------------------------------------
+
+
+def test_builder_task_stub_is_committed_before_hermes_call(
+    client, db_session, db_session_factory, monkeypatch
+):
+    """A second process that does the active-task check while the
+    first start-build is mid-flight (after the stub commit but
+    before the Hermes hand-off) must see the stub row through a
+    fresh session. Without the up-front commit, the row would be
+    flushed-but-uncommitted in the first session and invisible to
+    any other session, and the cross-process active-task check
+    would silently allow a duplicate Hermes task for the same
+    work item.
+    """
+    from app import preview_deploy
+    from app.models import BuilderTask, WorkItem
+    from app.routers import builder as builder_router
+    from tests.test_builder import (
+        _patch_target_repo,
+        _stub_executor,
+    )
+
+    item = WorkItem(
+        type="task",
+        title="Stub Visibility During Hermes",
+        status="approved",
+        priority="medium",
+        source="operator",
+        approved_by_operator=True,
+        target_app="legion-dashboard",
+    )
+    db_session.add(item)
+    db_session.commit()
+    db_session.refresh(item)
+
+    _patch_target_repo(monkeypatch, "/srv/repo/legion-dashboard")
+    _stub_executor(
+        monkeypatch,
+        preview_deploy.ExecutorResponse(
+            success=True,
+            raw={
+                "success": True,
+                "action": "repo_safety_check",
+                "is_clean": True,
+                "dirty_files": [],
+                "staged_files": [],
+                "untracked_files": [],
+                "current_branch": (
+                    "feature/wi-{0}-stub-visibility-during-hermes-t_000001".format(
+                        item.id
+                    )
+                ),
+                "current_commit": "d" * 40,
+                "blocker_code": None,
+                "blocker_message": None,
+            },
+        ),
+    )
+
+    # Open a fresh session inside the Hermes stub and assert the
+    # stub row is already committed and visible to a different
+    # session (simulating a cross-process active-task check).
+    visible: dict = {}
+
+    def _spy_hermes(**kwargs):
+        fresh = db_session_factory()
+        try:
+            row = (
+                fresh.query(BuilderTask)
+                .filter(BuilderTask.work_item_id == item.id)
+                .filter(
+                    BuilderTask.hermes_status.not_in(["archived", "done"])
+                )
+                .first()
+            )
+            visible["row_id"] = row.id if row is not None else None
+            visible["hermes_status"] = row.hermes_status if row is not None else None
+            visible["hermes_task_id"] = (
+                row.hermes_task_id if row is not None else None
+            )
+        finally:
+            fresh.close()
+        return {
+            "task_id": "hermes-stub-visibility-1",
+            "status": "ready",
+            "assignee": "builder",
+        }
+
+    monkeypatch.setattr(builder_router, "_create_hermes_task", _spy_hermes)
+
+    response = client.post(
+        f"/api/builder/work-items/{item.id}/start-build", json={}
+    )
+    assert response.status_code == 200, response.text
+
+    # The fresh session saw the stub row BEFORE the Hermes call
+    # returned. The hermes_task_id was still the placeholder; the
+    # hermes_status was still ``creating``. Both prove the commit
+    # happened before the Hermes hand-off, not after.
+    assert visible.get("row_id") is not None, (
+        "stub BuilderTask row was not visible to a fresh session "
+        "during the Hermes call — the up-front commit did not run"
+    )
+    assert visible.get("hermes_status") == "creating", visible
+    assert visible.get("hermes_task_id", "").startswith(f"pending-{item.id}-"), (
+        "stub row had a non-placeholder hermes_task_id during the "
+        "Hermes call; the up-front commit must have committed the "
+        "row before the placeholder was overwritten"
+    )
+
+
+def test_second_start_build_for_same_work_item_sees_committed_stub(
+    client, db_session, monkeypatch
+):
+    """A second start-build for the same work item, issued after
+    the first one's stub row is committed, must observe the
+    committed row through the active-task check and return 409
+    with the active-builder-task error — no duplicate Hermes
+    task, no duplicate worktree allocation.
+
+    The Python lock guards single-process concurrent starts; this
+    test pins the DB-level guarantee that the same protection
+    holds across sessions (and therefore across processes), which
+    is what the up-front commit unlocks.
+    """
+    from app import preview_deploy
+    from app.models import BuilderTask, WorkItem
+    from tests.test_builder import (
+        _patch_target_repo,
+        _stub_executor,
+        _stub_hermes,
+    )
+
+    item = WorkItem(
+        type="task",
+        title="Duplicate Start Returns 409",
+        status="approved",
+        priority="medium",
+        source="operator",
+        approved_by_operator=True,
+        target_app="legion-dashboard",
+    )
+    db_session.add(item)
+    db_session.commit()
+    db_session.refresh(item)
+
+    _patch_target_repo(monkeypatch, "/srv/repo/legion-dashboard")
+    _stub_executor(
+        monkeypatch,
+        preview_deploy.ExecutorResponse(
+            success=True,
+            raw={
+                "success": True,
+                "action": "repo_safety_check",
+                "is_clean": True,
+                "dirty_files": [],
+                "staged_files": [],
+                "untracked_files": [],
+                "current_branch": (
+                    "feature/wi-{0}-duplicate-start-returns-409-t_000001".format(
+                        item.id
+                    )
+                ),
+                "current_commit": "d" * 40,
+                "blocker_code": None,
+                "blocker_message": None,
+            },
+        ),
+    )
+    _stub_hermes(monkeypatch, task_id="hermes-dup-1")
+
+    first = client.post(
+        f"/api/builder/work-items/{item.id}/start-build", json={}
+    )
+    assert first.status_code == 200, first.text
+
+    # Second call sees the committed BuilderTask row through the
+    # active-task check and 409s. The detail names the active
+    # Hermes task so the operator can correlate.
+    second = client.post(
+        f"/api/builder/work-items/{item.id}/start-build", json={}
+    )
+    assert second.status_code == 409, second.text
+    detail = second.json()["detail"]
+    assert isinstance(detail, str), detail
+    assert "Active builder task already exists" in detail, detail
+    assert "hermes-dup-1" in detail, detail
+
+    # Exactly one BuilderTask row exists for this work item — the
+    # second call did not create a duplicate.
+    rows = (
+        db_session.query(BuilderTask)
+        .filter(BuilderTask.work_item_id == item.id)
+        .all()
+    )
+    assert len(rows) == 1, [r.hermes_task_id for r in rows]
+    assert rows[0].hermes_task_id == "hermes-dup-1"
