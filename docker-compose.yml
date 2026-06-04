@@ -23,7 +23,18 @@ services:
       db:
         condition: service_healthy
     volumes:
-      - /srv/repo:/srv/repo:ro
+      # /srv/repo is mounted read-write so ``git worktree add``
+      # can write the per-worktree metadata it deposits under
+      # ``<shared_repo>/.git/worktrees/<name>/``. The bind mount
+      # preserves host ownership, so the host's
+      # /srv/repo/<slug>/.git must ALSO be writable by the
+      # container's app user (uid 999, gid 999) — otherwise the
+      # rw mount is necessary-but-not-sufficient and Start Build
+      # still fails with EACCES. The host-side preflight
+      # (scripts/preflight-legion-worktrees.sh) handles that
+      # chown when run as root before ``docker compose build``.
+      - /srv/repo:/srv/repo
+      - /srv/worktrees:/srv/worktrees
       - /var/run/docker.sock:/var/run/docker.sock
       - /srv/repo/legion-dashboard/.hermes-config.yaml:/app/.hermes/config.yaml:ro  # Hermes config (copied for container access)
       - app-attachments:/app/attachments
@@ -33,6 +44,7 @@ services:
       APP_ID: ${APP_ID:-legion-dashboard}
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg2://legion:legion@db:5432/legion_dashboard}
       LEGION_DOCKER_CONTROL_ENABLED: ${LEGION_DOCKER_CONTROL_ENABLED:-true}
+      LEGION_WORKTREE_CREATE_TOOL: /usr/local/bin/legion-worktree-create
       HERMES_HOME: /app/.hermes  # Point to mounted config location
       HERMES_KANBAN_BRIDGE_URL: http://host.docker.internal:8765
       # API_SERVER_KEY must be set in .env or the execution environment.

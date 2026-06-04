@@ -40,6 +40,23 @@ RUN pip install --upgrade pip && pip install ./backend
 COPY backend/ ./backend/
 COPY --from=frontend-build /build/frontend/dist ./frontend/dist
 
+# ---- LEGION worktree tool: repo-owned, copied into the image
+# so the dashboard can create per-task worktrees without
+# depending on host-side /root/.hermes/.
+COPY scripts/legion-worktree-create /usr/local/bin/legion-worktree-create
+RUN chmod 0755 /usr/local/bin/legion-worktree-create \
+ && chown root:root /usr/local/bin/legion-worktree-create
+
+# Git safe.directory: the app container runs as `app` but
+# operates on a host-mounted /srv/repo/legion-dashboard that
+# is owned by host root. Mark the known /srv/repo paths as
+# safe so the app user can run git commands on them without
+# "dubious ownership" failures. Done with --system so the
+# config applies to every USER (including the `app` user
+# selected below) rather than only root's HOME.
+RUN git config --system --add safe.directory /srv/repo/legion-dashboard \
+ && git config --system --add safe.directory '*'
+
 RUN chown -R app:app /app
 RUN mkdir -p /app/attachments && chown app:app /app/attachments
 VOLUME ["/app/attachments"]

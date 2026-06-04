@@ -1,10 +1,37 @@
 """Dashboard-side orchestration for the per-task worktree.
 
 This module is the thin glue between :mod:`app.worktree_paths` (pure
-helpers) and the host-side tool
-``/root/.hermes/LEGION_TOOLS/bin/legion-worktree-create`` (which
-runs the actual ``git worktree add`` because the dashboard
-container mounts ``/srv/repo`` read-only).
+helpers) and the in-image tool ``legion-worktree-create`` (which
+runs the actual ``git worktree add`` inside the dashboard
+container).
+
+The dashboard container bind-mounts ``/srv/repo`` read-write so the
+container can write the per-worktree metadata that ``git worktree
+add`` deposits in
+``<shared_repo>/.git/worktrees/<name>/``. A read-only mount blocks
+that write, and ``Start Build`` fails before the orchestrator has
+a chance to surface the underlying error. The mount is rw on the
+app service only — every other service still mounts ``/srv/repo``
+read-only because they never run ``git worktree add``.
+
+The rw mount is necessary but not sufficient. The bind mount
+preserves host ownership, so the host's
+``/srv/repo/<repo-slug>/.git/`` must ALSO be writable by the
+container's app user (uid 999, gid 999) — otherwise the in-image
+``git worktree add`` call cannot create
+``.git/worktrees/<name>/`` and fails with ``EACCES``. The host-side
+preflight (``scripts/preflight-legion-worktrees.sh``) enforces
+this: when run as root it chowns each known source repo's
+``.git/`` to ``999:999`` and verifies the resulting mode/owner
+lets the app user write.
+
+The tool location is resolved at import time from the
+``LEGION_WORKTREE_CREATE_TOOL`` environment variable; if unset, it
+falls back to :data:`DEFAULT_WORKTREE_CREATE_TOOL`
+(``/usr/local/bin/legion-worktree-create``), which is the path the
+Dockerfile installs the repo-owned script to. This lets the
+dashboard be deployed without depending on any host-only path
+under the operator's home directory.
 
 The router calls :func:`ensure_task_worktree` before generating the
 implementation Kanban card prompt. If the worktree cannot be
@@ -29,7 +56,10 @@ from .worktree_paths import (
 )
 
 
-WORKTREE_CREATE_TOOL = "/root/.hermes/LEGION_TOOLS/bin/legion-worktree-create"
+DEFAULT_WORKTREE_CREATE_TOOL = "/usr/local/bin/legion-worktree-create"
+WORKTREE_CREATE_TOOL = os.environ.get(
+    "LEGION_WORKTREE_CREATE_TOOL", DEFAULT_WORKTREE_CREATE_TOOL
+)
 
 
 # Per-repo integration base refs. The dashboard-side worktree

@@ -12,6 +12,7 @@ Covers:
 """
 from __future__ import annotations
 
+import os
 import re
 from types import SimpleNamespace
 
@@ -1763,3 +1764,304 @@ def test_outer_wrapper_rolls_back_stub_when_prompt_generation_raises(
     )
     assert len(rows) == 1, [r.hermes_task_id for r in rows]
     assert rows[0].hermes_task_id == "hermes-prompt-raise-recovery-1"
+
+
+# ---------------------------------------------------------------------------
+# Container-native worktree tool: env-var resolution + deploy wiring
+# ---------------------------------------------------------------------------
+
+
+def _reload_task_worktree():
+    """Reimport :mod:`app.task_worktree` so module-level env-var
+    resolution re-runs against the current ``os.environ``."""
+    import importlib
+    from app import task_worktree
+
+    return importlib.reload(task_worktree)
+
+
+def _restore_env(key: str, original_value):
+    """Restore an env var to its pre-test value."""
+    if original_value is None:
+        os.environ.pop(key, None)
+    else:
+        os.environ[key] = original_value
+
+
+def test_default_worktree_create_tool_constant_is_image_default():
+    """The image-default path is the path the Dockerfile installs
+    the repo-owned script to. Test pins the constant so a future
+    edit cannot silently retarget the orchestrator at the legacy
+    host path."""
+    from app import task_worktree
+
+    assert (
+        task_worktree.DEFAULT_WORKTREE_CREATE_TOOL
+        == "/usr/local/bin/legion-worktree-create"
+    )
+
+
+def test_worktree_create_tool_defaults_to_image_path_when_env_unset():
+    """``WORKTREE_CREATE_TOOL`` falls back to
+    ``DEFAULT_WORKTREE_CREATE_TOOL`` when
+    ``LEGION_WORKTREE_CREATE_TOOL`` is not set in the environment."""
+    original = os.environ.get("LEGION_WORKTREE_CREATE_TOOL")
+    os.environ.pop("LEGION_WORKTREE_CREATE_TOOL", None)
+    try:
+        reloaded = _reload_task_worktree()
+        assert (
+            reloaded.WORKTREE_CREATE_TOOL
+            == reloaded.DEFAULT_WORKTREE_CREATE_TOOL
+            == "/usr/local/bin/legion-worktree-create"
+        )
+    finally:
+        _restore_env("LEGION_WORKTREE_CREATE_TOOL", original)
+        _reload_task_worktree()
+
+
+def test_worktree_create_tool_reflects_env_var_when_set():
+    """When ``LEGION_WORKTREE_CREATE_TOOL`` is set, the active
+    ``WORKTREE_CREATE_TOOL`` constant reflects the override."""
+    original = os.environ.get("LEGION_WORKTREE_CREATE_TOOL")
+    os.environ["LEGION_WORKTREE_CREATE_TOOL"] = "/opt/legion/bin/wtc-override"
+    try:
+        reloaded = _reload_task_worktree()
+        assert reloaded.WORKTREE_CREATE_TOOL == "/opt/legion/bin/wtc-override"
+        # The default is unchanged; only the active value moved.
+        assert (
+            reloaded.DEFAULT_WORKTREE_CREATE_TOOL
+            == "/usr/local/bin/legion-worktree-create"
+        )
+    finally:
+        _restore_env("LEGION_WORKTREE_CREATE_TOOL", original)
+        _reload_task_worktree()
+
+
+def test_worktree_create_result_missing_tool_error_includes_configured_path(
+    monkeypatch, tmp_path,
+):
+    """The ``_worktree_create_result`` error message names the
+    configured tool path so the operator can see which path the
+    orchestrator looked at — important when an env-var override is
+    misconfigured."""
+    from app import task_worktree
+
+    missing_path = str(tmp_path / "no-such-legion-worktree-create")
+    monkeypatch.setattr(task_worktree, "WORKTREE_CREATE_TOOL", missing_path)
+
+    ok, parsed, stderr = task_worktree._worktree_create_result(
+        worktree_path="/srv/worktrees/legion-dashboard/wi-1-x/t_000001",
+        feature_branch="feature/x",
+        base_ref="main",
+    )
+    assert ok is False
+    assert parsed == {}
+    assert "missing tool" in stderr
+    assert missing_path in stderr, (
+        f"error message must include the configured path; got {stderr!r}"
+    )
+
+
+def test_task_worktree_module_does_not_reference_legacy_host_path():
+    """No code path in ``task_worktree.py`` may bake in the legacy
+    ``/root/.hermes/...`` host-only path. The module must rely on
+    the env var + image default exclusively."""
+    import inspect
+    from app import task_worktree
+
+    source = inspect.getsource(task_worktree)
+    assert "/root/.hermes/" not in source, (
+        "task_worktree.py still references the legacy host-only "
+        "/root/.hermes/ path; the deploy must use the in-image "
+        "tool via LEGION_WORKTREE_CREATE_TOOL"
+    )
+
+
+def _load_compose_yaml() -> dict:
+    """Parse ``docker-compose.yml`` from the repo root and return
+    the loaded dict. The repo root is two parents above this test
+    file (backend/tests -> backend -> repo root)."""
+    import os
+    import yaml
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.abspath(os.path.join(here, "..", ".."))
+    compose_path = os.path.join(repo_root, "docker-compose.yml")
+    with open(compose_path, "r", encoding="utf-8") as fh:
+        return yaml.safe_load(fh)
+
+
+def test_docker_compose_app_service_mounts_srv_worktrees_read_write():
+    """The app service must bind-mount ``/srv/worktrees`` so the
+    container can create per-task worktrees the host can see, and
+    the mount MUST be read-write (no ``:ro``)."""
+    compose = _load_compose_yaml()
+    app_volumes = compose["services"]["app"]["volumes"]
+    matches = [
+        v for v in app_volumes
+        if isinstance(v, str) and v.startswith("/srv/worktrees:/srv/worktrees")
+    ]
+    assert matches, (
+        f"app service is missing /srv/worktrees bind mount; "
+        f"got volumes={app_volumes!r}"
+    )
+    for entry in matches:
+        assert not entry.endswith(":ro"), (
+            f"/srv/worktrees mount must be read-write (no :ro); "
+            f"got {entry!r}"
+        )
+
+
+def test_docker_compose_app_service_mounts_srv_repo_read_write():
+    """The app service must bind-mount ``/srv/repo`` read-write so the
+    container can write per-worktree metadata under
+    ``<shared_repo>/.git/worktrees/<name>/`` when ``git worktree
+    add`` runs. With ``:ro`` the worktree-create call fails and
+    ``Start Build`` 409s before the orchestrator can surface the
+    real error. The mount must NOT carry the ``:ro`` suffix.
+
+    This is the app service only — other services (e.g.
+    debate-worker) still mount ``/srv/repo`` read-only because they
+    never run ``git worktree add`` and benefit from the extra
+    isolation."""
+    compose = _load_compose_yaml()
+    app_volumes = compose["services"]["app"]["volumes"]
+    matches = [
+        v for v in app_volumes
+        if isinstance(v, str) and v.startswith("/srv/repo:/srv/repo")
+    ]
+    assert matches, (
+        f"app service is missing /srv/repo bind mount; "
+        f"got volumes={app_volumes!r}"
+    )
+    for entry in matches:
+        assert not entry.endswith(":ro"), (
+            f"/srv/repo mount must be read-write (no :ro) for the app "
+            f"service so git worktree add can write .git/worktrees/ "
+            f"metadata; got {entry!r}"
+        )
+
+
+def _read_preflight_script() -> str:
+    """Return the contents of ``scripts/preflight-legion-worktrees.sh``."""
+    import os
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.abspath(os.path.join(here, "..", ".."))
+    path = os.path.join(repo_root, "scripts", "preflight-legion-worktrees.sh")
+    with open(path, "r", encoding="utf-8") as fh:
+        return fh.read()
+
+
+def test_preflight_chowns_known_repo_git_dirs_to_app_user():
+    """The preflight must chown each known source repo's ``.git/``
+    to ``999:999`` when run as root, so the container's app user can
+    create ``.git/worktrees/<name>/`` during ``git worktree add``.
+    Without this, the rw bind mount is necessary-but-not-sufficient
+    and Start Build fails with EACCES on a fresh deploy."""
+    script = _read_preflight_script()
+    # Both known source repos appear in the chown list.
+    assert "/srv/repo/legion-dashboard/.git" in script, script
+    assert "/srv/repo/lgn-hub/.git" in script, script
+    # The chown is recursive and targets the app uid/gid. We do not
+    # pin the exact line shape so the implementation can iterate
+    # the paths in a loop without breaking this test, but the
+    # ``chown -R`` of ``${APP_UID}:${APP_GID}`` against a ``.git``
+    # path must be present.
+    assert 'chown -R "${APP_UID}:${APP_GID}"' in script, script
+    # And the script must run that chown only when invoked as root,
+    # so the unprivileged form does not silently fail.
+    assert 'if [ "$(id -u)" -eq 0 ]' in script, script
+
+
+def test_preflight_uses_mode_bit_writability_check():
+    """The preflight must accept any directory writable+traversable
+    by the app user (uid 999, gid 999) regardless of whether the
+    owner uid or gid is exactly 999. The valid ``root:999 0775``
+    configuration must pass, not be rejected by an exact-ownership
+    check. POSIX requires BOTH the write and execute bits to create
+    or traverse a directory, so the helper checks write+execute,
+    not write alone — the literal bitmasks for w+x in each scope
+    (0300 owner, 0030 group, 0003 other) must appear in the script."""
+    script = _read_preflight_script()
+    # Helper function name (renamed for the P2 consolidation to
+    # reflect the write+traverse semantics).
+    assert "_writable_traversable" in script, script
+    # The legacy single-write-bit helper must be fully gone — a
+    # straggler call site would silently accept a 0666 directory
+    # again.
+    assert "_app_user_can_write" not in script, script
+    # Pinning the literal write+execute bitmasks for owner (0300),
+    # group (0030) and other (0003) guarantees the helper checks
+    # both bits in every scope rather than only one.
+    assert "0300" in script, script
+    assert "0030" in script, script
+    assert "0003" in script, script
+    # And the prior write-bit-only masks (0200, 0020, 0002) must
+    # NOT appear; otherwise a stale check path would silently
+    # accept a directory writable on paper but missing the
+    # execute bit (e.g. mode 0666) and the next ``git worktree
+    # add`` would fail with EACCES.
+    assert "0200" not in script, script
+    assert "0020" not in script, script
+    assert "0002" not in script, script
+    # The check uses bash arithmetic on the octal mode string, so
+    # ``8#`` is the conversion. The previous "exact 999:999 or
+    # mode ends in 7" logic was wrong; the new check must read the
+    # mode bits explicitly.
+    assert "8#" in script, script
+
+
+def test_preflight_verifies_writability_of_repo_git_dirs():
+    """The preflight must verify each source repo's ``.git/`` is
+    writable by the app user (not just chown it and hope), so a
+    non-root invocation still surfaces an unrecoverable config."""
+    script = _read_preflight_script()
+    # The helper is invoked against the .git path inside the loop.
+    # We assert the helper name is called against ``$git_dir`` (the
+    # loop variable from the new script) so the check runs against
+    # the repo dir, not just /srv/worktrees.
+    assert '_writable_traversable "$git_dir"' in script, script
+    # And the failure message names the .git dir and the app uid/gid
+    # so the operator can act on it.
+    assert "not writable by the container app user" in script, script
+
+
+def test_preflight_verifies_writability_of_existing_git_worktrees_subdir():
+    """P2 regression: when ``.git/worktrees`` already exists on the
+    host (from a prior root-owned operation), the top-level ``.git``
+    writability check can pass while ``git worktree add`` still
+    fails creating ``.git/worktrees/<name>/`` because the
+    sub-directory itself is mode-restricted or wrong-owner. The
+    preflight must invoke the same writable-traversable helper
+    against ``$git_dir/worktrees`` whenever that subdirectory
+    exists."""
+    script = _read_preflight_script()
+    # The .git/worktrees subdir is checked conditionally — only
+    # when it already exists, because git itself creates it on
+    # first use otherwise. Pin both the `if [ -d ... ]` guard and
+    # the helper invocation against the worktrees subdir.
+    assert 'git_worktrees_dir="${git_dir}/worktrees"' in script, script
+    assert 'if [ -d "$git_worktrees_dir" ]' in script, script
+    assert '_writable_traversable "$git_worktrees_dir"' in script, script
+
+
+def test_docker_compose_app_service_sets_legion_worktree_create_tool_env():
+    """The app service must set ``LEGION_WORKTREE_CREATE_TOOL`` to
+    the in-image path so the orchestrator resolves to the
+    repo-owned, container-internal tool."""
+    compose = _load_compose_yaml()
+    env = compose["services"]["app"]["environment"]
+    # docker-compose accepts either a mapping or a list of KEY=VAL;
+    # this repo uses the mapping form.
+    assert isinstance(env, dict), (
+        f"docker-compose.yml app.environment is not a mapping; "
+        f"got {type(env).__name__}"
+    )
+    assert "LEGION_WORKTREE_CREATE_TOOL" in env, (
+        f"app service is missing LEGION_WORKTREE_CREATE_TOOL env var; "
+        f"got environment keys={sorted(env.keys())!r}"
+    )
+    assert env["LEGION_WORKTREE_CREATE_TOOL"] == (
+        "/usr/local/bin/legion-worktree-create"
+    ), env["LEGION_WORKTREE_CREATE_TOOL"]
