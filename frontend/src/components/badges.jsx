@@ -1,18 +1,45 @@
+// STATUS_META covers both raw Kanban statuses and the lifecycle
+// effective_state values produced by ``backend/app/lifecycle.py``. The list
+// page renders ``effective_state`` in the Work Status column, so every value
+// returned by ``compute_effective_state`` needs an entry here. "completed"
+// is reserved for Work Item lifecycle completion (slice 5 ``complete``); the
+// raw Kanban "completed" status is rendered as ``IMPLEMENTED`` to avoid the
+// debated-but-no-build confusion called out in WI-32.
 const STATUS_META = {
+  // Raw Kanban statuses
   draft:           { color: "#6B7280", label: "DRAFT" },
-  debated:         { color: "#A855F7", label: "DEBATED" },
-  approved:        { color: "#3B82F6", label: "APPROVED" },
   active:          { color: "#F59E0B", label: "ACTIVE" },
   running:         { color: "#F59E0B", label: "RUNNING" },
   stopped:         { color: "#6B7280", label: "STOPPED" },
   unknown:         { color: "#5A5A5A", label: "UNKNOWN" },
-  review_needed:   { color: "#F97316", label: "REVIEW" },
-  certified:       { color: "#14B8A6", label: "CERTIFIED" },
+  review_needed:   { color: "#F97316", label: "REVIEW NEEDED" },
   pr_open:         { color: "#6366F1", label: "PR OPEN" },
   ready_for_merge: { color: "#06B6D4", label: "READY MERGE" },
-  merged:          { color: "#22C55E", label: "MERGED" },
-  blocked:         { color: "#EF4444", label: "BLOCKED" },
   completed:       { color: "#10B981", label: "COMPLETED" },
+
+  // Lifecycle effective_state values (see backend/app/lifecycle.py)
+  drafting:                 { color: "#6B7280", label: "DRAFTING" },
+  debating:                 { color: "#3B82F6", label: "DEBATING" },
+  debated:                  { color: "#A855F7", label: "DEBATED" },
+  approved:                 { color: "#3B82F6", label: "APPROVED" },
+  building:                 { color: "#F59E0B", label: "BUILDING" },
+  implemented:              { color: "#FACC15", label: "IMPLEMENTED" },
+  in_review:                { color: "#6366F1", label: "REVIEW REQUIRED" },
+  code_reviewed:            { color: "#06B6D4", label: "CODE REVIEWED" },
+  changes_requested:        { color: "#F97316", label: "CHANGES REQUESTED" },
+  review_failed:            { color: "#EF4444", label: "REVIEW FAILED" },
+  preview_pending:          { color: "#F59E0B", label: "PREVIEW PENDING" },
+  preview_ready:            { color: "#06B6D4", label: "PREVIEW READY" },
+  needs_rework:             { color: "#F97316", label: "NEEDS REWORK" },
+  certified:                { color: "#14B8A6", label: "CERTIFIED" },
+  ready_to_merge:           { color: "#06B6D4", label: "READY TO MERGE" },
+  merged:                   { color: "#22C55E", label: "MERGED" },
+  merged_deployment_failed: { color: "#EF4444", label: "DEPLOY FAILED" },
+  blocked_merge:            { color: "#EF4444", label: "MERGE BLOCKED" },
+  blocked:                  { color: "#EF4444", label: "BLOCKED" },
+  rejected:                 { color: "#8A8A8A", label: "REJECTED" },
+  archived:                 { color: "#5A5A5A", label: "ARCHIVED" },
+  complete:                 { color: "#10B981", label: "COMPLETE" },
 };
 
 const TYPE_META = {
@@ -54,9 +81,37 @@ export function sourceMeta(source) {
   return SOURCE_META[source] || { color: "#5A5A5A", label: (source || "—").toUpperCase() };
 }
 
-export const ALL_STATUSES = Object.keys(STATUS_META).filter(
-  (k) => !["running", "stopped", "unknown"].includes(k),
-);
+// The set of raw Kanban statuses the form's status picker exposes. Includes
+// every value the backend can persist into ``WorkItem.status`` so an existing
+// item never opens with an unselectable status value. ``debated`` is written
+// by the debate executor (backend/app/debate_executor.py); ``certified`` is
+// surfaced as a snapshot label by older flows. Excludes runtime app statuses
+// (``running``/``stopped``/``unknown``) and the derived lifecycle states.
+const _KANBAN_STATUSES = [
+  "draft",
+  "debated",
+  "approved",
+  "active",
+  "review_needed",
+  "pr_open",
+  "ready_for_merge",
+  "merged",
+  "blocked",
+  "certified",
+  "completed",
+];
+export const ALL_STATUSES = _KANBAN_STATUSES;
+
+// Lifecycle filter buckets shown above the Work Item list. Each bucket maps
+// to a set of effective_state values; see WorkItemList for the mapping.
+export const LIFECYCLE_FILTERS = [
+  { key: "active", label: "ACTIVE", color: "#F59E0B" },
+  { key: "blocked", label: "BLOCKED", color: "#EF4444" },
+  { key: "review_required", label: "REVIEW REQUIRED", color: "#6366F1" },
+  { key: "parked", label: "PARKED", color: "#8A8A8A" },
+  { key: "completed", label: "COMPLETED", color: "#10B981" },
+  { key: "all", label: "ALL", color: "#EAEAEA" },
+];
 export const ALL_TYPES = Object.keys(TYPE_META);
 export const INTAKE_TYPES = ["idea", "bug", "change", "task", "slice"];
 export const ALL_PRIORITIES = Object.keys(PRIORITY_META);
