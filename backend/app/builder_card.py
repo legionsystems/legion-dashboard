@@ -474,13 +474,42 @@ def build_implementation_card_prompt(
     mandatory_edits: Sequence[dict],
     contradiction_warnings: Sequence[dict] = (),
     target_repo: str = "/srv/repo/legion-dashboard",
+    target_worktree: Optional[str] = None,
+    feature_branch: Optional[str] = None,
+    chosen_base_ref: Optional[str] = None,
 ) -> str:
     """Render the final implementation Kanban card body for a work item.
 
     This is the single source of truth for the builder prompt body. It
     does not touch debate execution, the arbiter, the repo safety gate,
     or the Hermes bridge HTTP call — those stay in ``routers/builder.py``.
+
+    ``target_worktree`` is the per-task worktree path under
+    ``/srv/worktrees/`` that the builder should use for ALL repo, git,
+    test, build, and Codex review operations. When provided, the
+    prompt renders an explicit ``TARGET WORKTREE`` block, a
+    ``SHARED REPO RULE`` warning, and a ``WORKTREE RULE`` that
+    includes a fail-fast check: any attempt to operate in the shared
+    ``/srv/repo/legion-dashboard`` operator/control worktree must
+    block.
+
+    ``target_repo`` is the legacy alias kept for backwards
+    compatibility with the safety gate. It is now derived from the
+    worktree path when a worktree is provided.
     """
+    # If the caller passed a task worktree, that becomes the
+    # authoritative target. ``target_repo`` is kept in sync so the
+    # rest of the prompt (PHASE 1, secret scan, Codex review) sees
+    # the same path. If the caller passed the shared repo as
+    # ``target_repo`` and no worktree, the prompt body still emits
+    # the shared-repo warning so an operator sees the inconsistency.
+    shared_repo_for_wi = _resolve_shared_repo_path(work_item)
+    if target_worktree:
+        effective_target_repo = target_worktree
+        using_worktree = True
+    else:
+        effective_target_repo = target_repo
+        using_worktree = _is_under_worktrees(target_repo)
     # Render mandatory edits as a canonical section if present.
     mandatory_edits_block = render_mandatory_edits_section(mandatory_edits)
 
@@ -531,7 +560,7 @@ def build_implementation_card_prompt(
         f"PROMPT ID: LEGION-IMPLEMENT-WI-{work_item.id}-CARD-001\n"
         f"PROMPT TYPE: approved-implementation-merge-deploy\n"
         f"TARGET HOST: lgn-remote-01\n"
-        f"TARGET REPO: {target_repo}\n"
+        f"TARGET REPO: {effective_target_repo}\n"
         f"TARGET PR: new PR only AFTER local pre-push review passes\n"
         f"TASK: {work_item.title}\n"
         f"EXPECTED OUTCOME: Implement approved work item according to debate outcome\n\n"
@@ -539,7 +568,7 @@ def build_implementation_card_prompt(
         f"You are working on lgn-remote-01.\n\n"
         f"Before doing any repo, git, Docker, or file mutation:\n"
         f"1. Verify hostname is lgn-remote-01.\n"
-        f"2. Verify repo path is {target_repo}.\n"
+        f"2. Verify repo path is {effective_target_repo}.\n"
         f"3. Verify current branch and git status.\n"
         f"4. Preserve dirty work.\n"
         f"5. Do not modify Hermes source/config.\n"
@@ -548,6 +577,22 @@ def build_implementation_card_prompt(
         f"8. Do not hard-delete any history.\n"
         f"9. Do NOT push branch or create PR until local pre-push review passes.\n"
         f"10. Do not auto-approve or auto-implement without certification.\n\n"
+        f"WORKTREE RULE\n\n"
+        f"All repo, git, test, build, and Codex review operations for this\n"
+        f"task MUST occur inside the target worktree below. The shared\n"
+        f"operator/control worktree is reserved for operator/control work\n"
+        f"only and must NOT be used as an implementation target by any\n"
+        f"builder or reviewer process.\n\n"
+        f"FAIL FAST: if `git rev-parse --show-toplevel` resolves to\n"
+        f"{shared_repo_for_wi} you are in the wrong worktree. STOP, do\n"
+        f"not modify state, and report the misrouted worktree path to the\n"
+        f"operator. Do not auto-stash, auto-checkout, or auto-recover.\n\n"
+        f"WORKTREE METADATA\n\n"
+        f"- Target Worktree: {target_worktree or '(not assigned — using shared repo as legacy fallback; this is a configuration error)'}\n"
+        f"- Feature Branch: {feature_branch or '(not assigned — orchestrator did not record the branch name)'}\n"
+        f"- Base Ref: {chosen_base_ref or '(not recorded — orchestrator did not record the base ref)'}\n"
+        f"- Shared Operator/Control Repo: {shared_repo_for_wi}\n"
+        f"- Using Dedicated Worktree: {'yes' if using_worktree else 'NO'}\n\n"
         f"WORK ITEM DETAILS\n\n"
         f"- ID: {work_item.id}\n"
         f"- Type: {work_item.type}\n"
@@ -576,8 +621,15 @@ def build_implementation_card_prompt(
     body += (
         "\nLOCAL PRE-PUSH REVIEW GATE — MANDATORY\n\n"
         "Before pushing any branch or creating a PR, you MUST complete these steps locally:\n\n"
-        "1. Create local implementation branch (do NOT push yet):\n"
-        "   git checkout -b feature/<your-feature-name>\n\n"
+        "1. Use the provisioned worktree branch (do NOT create a new branch):\n"
+        f"   feature_branch={feature_branch or '(not assigned — see WORKTREE METADATA)'}\n"
+        "   Verify with: git branch --show-current\n"
+        "   If the current branch does not match, run:\n"
+        f"     git checkout {feature_branch or '<feature_branch>'}\n"
+        "   Do NOT run `git checkout -b feature/<your-feature-name>` — the orchestrator\n"
+        "   has already provisioned the worktree on the branch above. Creating a\n"
+        "   second branch detaches the worktree from the per-attempt branch and\n"
+        "   breaks retry / re-send correlation.\n\n"
         "2. Implement and commit locally:\n"
         "   git add <files>\n"
         "   git commit -m \"descriptive message\"\n\n"
@@ -586,27 +638,42 @@ def build_implementation_card_prompt(
         f"   cd backend && .venv/bin/pytest tests/ -q\n"
         f"   cd frontend && npm run build\n\n"
         "4. Run local secret scan:\n"
-        f"   /root/.hermes/LEGION_TOOLS/bin/legion-secret-scan --repo {target_repo} --base <base-branch> --head <your-branch>\n\n"
+        f"   /root/.hermes/LEGION_TOOLS/bin/legion-secret-scan --repo {effective_target_repo} --base {chosen_base_ref or 'main'} --head {feature_branch or '<your-branch>'}\n\n"
         "5. Run local Codex review (NO PR REQUIRED):\n"
         "   /root/.hermes/LEGION_TOOLS/bin/legion-codex-local-review \\\n"
-        f"     --repo {target_repo} \\\n"
-        "     --base <base-branch> \\\n"
-        "     --head <your-branch> \\\n"
+        f"     --repo {effective_target_repo} \\\n"
+        f"     --base {chosen_base_ref or 'main'} \\\n"
+        f"     --head {feature_branch or '<your-branch>'} \\\n"
         f"     --report /root/.hermes/LEGION_TOOLS/LOCAL_CODEX_REVIEW_<WI_ID>.md\n\n"
         "6. Verify local review verdict:\n"
         "   - Must be APPROVE or APPROVE_WITH_NON_BLOCKING_NOTES\n"
         "   - If REQUEST_CHANGES or BLOCKED: fix issues, re-run gates, DO NOT PUSH\n\n"
         "7. ONLY AFTER local review passes:\n"
-        "   git push origin <your-branch>\n"
-        "   gh pr create --base <base-branch> --head <your-branch> ...\n\n"
+        f"   git push origin {feature_branch or '<your-branch>'}\n"
+        f"   gh pr create --base {chosen_base_ref or 'main'} --head {feature_branch or '<your-branch>'} ...\n\n"
         "WARNING: Pushing before local review passes may expose secrets or incomplete work.\n\n"
         "PHASE 1 — INSPECT\n\n"
         "Run:\n"
         "hostname\n"
-        f"cd {target_repo} || exit 1\n"
+        f"cd {effective_target_repo} || exit 1\n"
         "git status --short\n"
         "git branch --show-current\n"
         "git log -60 --oneline --decorate\n\n"
+        "Verify the worktree is the dedicated task worktree:\n"
+        "  expected_topdir=$(git rev-parse --show-toplevel)\n"
+        f"  if [ \"$expected_topdir\" != \"{effective_target_repo}\" ]; then\n"
+        f"    echo \"FAIL: wrong worktree (expected {effective_target_repo}, got $expected_topdir)\" >&2\n"
+        "    exit 1\n"
+        "  fi\n"
+        f"  expected_branch={feature_branch or '<see WORKTREE METADATA>'}\n"
+        "  current_branch=$(git branch --show-current)\n"
+        "  if [ \"$current_branch\" != \"$expected_branch\" ]; then\n"
+        "    echo \"FAIL: wrong branch (expected $expected_branch, got $current_branch)\" >&2\n"
+        "    exit 1\n"
+        "  fi\n\n"
+        "Do NOT cd into /srv/repo/legion-dashboard at any point. The\n"
+        "shared operator/control worktree is not an implementation\n"
+        "target for this task.\n\n"
         "Preserve dirty work before making changes.\n\n"
         "PHASE 2 — IMPLEMENT\n\n"
         "Implement the approved scope according to:\n"
@@ -660,3 +727,24 @@ def _render_debate_outcome(
 
 def _render_out_of_scope(items: Iterable[str]) -> str:
     return "\n".join(f"- {item}" for item in items)
+
+
+def _resolve_shared_repo_path(work_item: WorkItem) -> str:
+    """Return the shared operator/control repo path for ``work_item``.
+
+    Mirrors :func:`app.worktree_paths.shared_repo_path_for_work_item`
+    so the prompt body's "shared repo" reference and the safety gate
+    agree on the same baseline.
+    """
+    target = getattr(work_item, "target_app", None)
+    if target and "hub" in target.lower():
+        return "/srv/repo/lgn-hub"
+    return "/srv/repo/legion-dashboard"
+
+
+def _is_under_worktrees(path: Optional[str]) -> bool:
+    """Return True if ``path`` lives under ``/srv/worktrees/``."""
+    if not path:
+        return False
+    norm = path.rstrip("/")
+    return norm == "/srv/worktrees" or norm.startswith("/srv/worktrees/")

@@ -14,6 +14,11 @@ from ..builder_card import (
     build_implementation_card_prompt,
     load_arbiter_mandatory_edits,
 )
+from ..worktree_paths import (
+    build_task_worktree_path,
+    is_shared_repo_path,
+)
+from ..task_worktree import ensure_task_worktree
 from ..models import BuilderTask, DebateRun, RepoLock, WorkItem
 from .. import repo_safety
 from ..schemas_builder import BuilderTaskResponse, SendToBuilderRequest
@@ -32,6 +37,32 @@ def _resolve_target_repo_path(work_item: WorkItem) -> str:
     return "/srv/repo/legion-dashboard"
 
 
+def _compute_task_worktree_path(
+    work_item: WorkItem,
+    builder_task_id: Optional[int] = None,
+) -> str:
+    """Return the task-specific worktree path the builder should use.
+
+    This is the SINGLE place that decides what worktree a given
+    builder task is assigned to. The shared operator/control worktree
+    is never returned for an implementation task.
+    """
+    path = build_task_worktree_path(
+        work_item, builder_task_id=builder_task_id
+    )
+    # Defensive: a future regression in the helper could conceivably
+    # produce a path that collides with the shared operator/control
+    # repo. Fail loudly so the operator sees the misrouting rather
+    # than the builder working in the wrong worktree.
+    if is_shared_repo_path(path):
+        raise RuntimeError(
+            f"Task worktree path {path!r} collides with a shared "
+            f"operator/control repo path. Refusing to generate a "
+            f"builder prompt for work item {work_item.id}."
+        )
+    return path
+
+
 def _generate_hermes_prompt(
     work_item: WorkItem,
     db: Optional[Session] = None,
@@ -39,6 +70,9 @@ def _generate_hermes_prompt(
     recommendation: Optional[str] = None,
     implementation_readiness: Optional[str] = None,
     mandatory_edits: Optional[list] = None,
+    builder_task_id: Optional[int] = None,
+    feature_branch: Optional[str] = None,
+    chosen_base_ref: Optional[str] = None,
 ) -> str:
     """Generate the Hermes Kanban implementation card body.
 
@@ -48,8 +82,27 @@ def _generate_hermes_prompt(
     from the structured source (the Final Arbiter's JSON, parsed from
     the latest ``DebateArgument``) rather than the previous misuse of
     ``DebateRun.summary`` (which stores the rationale text).
+
+    The generated prompt ALWAYS targets a task-specific worktree
+    under ``/srv/worktrees/``. The shared operator/control worktree
+    is reserved for operator/control work only and is never used as
+    the implementation target.
     """
-    target_repo = _resolve_target_repo_path(work_item)
+    target_worktree = _compute_task_worktree_path(
+        work_item, builder_task_id=builder_task_id
+    )
+    # ``target_repo`` stays in sync with the worktree so the rest of
+    # the prompt (PHASE 1, secret scan, Codex review) sees the same
+    # path. Keeping the alias also preserves the safety gate
+    # contract: it expects a path it can ``cd`` into.
+    target_repo = target_worktree
+
+    # If the caller passed an explicit feature branch, surface it in
+    # the prompt. Otherwise leave it unset; the builder card's
+    # WORKTREE METADATA block reports the omission so the
+    # operator can see the orchestrator's branch name does not
+    # round-trip.
+    feature_branch_kwarg = feature_branch
 
     # Resolve mandatory edits in priority order:
     #   1. explicit ``mandatory_edits`` list passed in
@@ -72,8 +125,10 @@ def _generate_hermes_prompt(
         implementation_readiness=implementation_readiness,
         mandatory_edits=edits,
         target_repo=target_repo,
+        target_worktree=target_worktree,
+        feature_branch=feature_branch,
+        chosen_base_ref=chosen_base_ref,
     )
-    return prompt
 
 
 def _create_hermes_task(title: str, body: str, assignee: Optional[str] = None, idempotency_key: Optional[str] = None, priority: Optional[str] = None, status_override: Optional[str] = None) -> dict:
@@ -155,7 +210,38 @@ def _resolve_target_repo(work_item: WorkItem) -> tuple[str, str]:
 
 
 def _create_builder_task(db: Session, work_item_id: int, request: SendToBuilderRequest, status_override: str = None) -> BuilderTaskResponse:
-    """Internal helper to create builder task."""
+    """Public entry point. Acquires a per-work-item Python
+    lock for the active-task check + BuilderTask stub insert
+    window, then delegates to ``_create_builder_task_locked``
+    for the slow operations (worktree allocation, safety
+    check, Hermes POST). The lock is released before the
+    slow operations run, so a slow build does not block
+    operator actions on a different work item.
+
+    The Python lock is the in-process tie-breaker for a
+    single-process race. Cross-process correctness is
+    provided by the committed BuilderTask row (the
+    active-task filter ``hermes_status NOT IN ['archived',
+    'done']``), which is enforced by the active-task check
+    inside the locked function below.
+    """
+    from ..worktree_locks import acquire_work_item_lock
+    work_item_lock = acquire_work_item_lock(work_item_id)
+    with work_item_lock:
+        return _create_builder_task_locked(
+            db, work_item_id, request, status_override
+        )
+
+
+def _create_builder_task_locked(
+    db: Session, work_item_id: int, request: SendToBuilderRequest,
+    status_override: str = None
+) -> BuilderTaskResponse:
+    """Body of ``_create_builder_task``; runs under the
+    per-work-item Python lock acquired by the outer
+    function. Do not call directly.
+    """
+    # Internal helper to create builder task.
     # Fetch work item
     work_item = db.query(WorkItem).filter(WorkItem.id == work_item_id).first()
     if not work_item:
@@ -187,157 +273,35 @@ def _create_builder_task(db: Session, work_item_id: int, request: SendToBuilderR
             detail=f"Active builder task already exists: {existing.hermes_task_id}"
         )
 
-    # ------------------------------------------------------------------
-    # Repo safety gate (workflow slice 3): refuse to start a build when
-    # the target repo has uncommitted changes or is already locked by
-    # another in-flight build.
-    # ------------------------------------------------------------------
-    target_repo, repo_name = _resolve_target_repo(work_item)
-    skip_gate = os.environ.get("LEGION_SKIP_REPO_SAFETY_GATE") == "1"
-    # Triage-only sends queue a Hermes card without starting a build, so they
-    # must not lock the repo (or be blocked by an in-flight build's lock).
-    # We still run the dirty/branch checks so an operator sees the same gate
-    # feedback whether they triage or start immediately.
-    skip_lock = status_override == "triage"
-    acquired_lock: Optional[RepoLock] = None
-    if not skip_gate:
-        # Run the safety inspection on the host (via the preview executor)
-        # rather than inside the container. The container's /srv/repo mount
-        # is not a valid git worktree, so an in-container ``git status``
-        # would fail with ``fatal: not a git repository`` and the gate
-        # would 409 every Start Build with ``git_inspection_failed``. The
-        # host executor inspects the real worktree and returns the same
-        # RepoSafetyResult shape.
-        safety = repo_safety.check_repo_clean_via_executor(target_repo)
-        if not safety.is_clean:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "blocker_code": safety.blocker_code or "blocked_dirty_repo",
-                    "blocker_message": (
-                        safety.blocker_message
-                        or f"Repo {target_repo} is not clean"
-                    ),
-                    "repo_path": target_repo,
-                    "dirty_files": safety.dirty_files,
-                    "staged_files": safety.staged_files,
-                    "untracked_files": safety.untracked_files,
-                    "current_branch": safety.current_branch,
-                    "current_commit": safety.current_commit,
-                },
-            )
-
-        # When the work item explicitly names a branch and the worktree is on
-        # a different one, refuse to start so the builder doesn't push to the
-        # wrong head.
-        if (
-            work_item.branch_name
-            and safety.current_branch
-            and work_item.branch_name != safety.current_branch
-        ):
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "blocker_code": "blocked_branch_mismatch",
-                    "blocker_message": (
-                        f"Repo {target_repo} is on branch "
-                        f"'{safety.current_branch}' but work item expects "
-                        f"'{work_item.branch_name}'"
-                    ),
-                    "repo_path": target_repo,
-                    "current_branch": safety.current_branch,
-                    "expected_branch": work_item.branch_name,
-                },
-            )
-
-        if not skip_lock:
-            existing_lock = repo_safety.check_repo_busy(db, target_repo)
-            if existing_lock is not None:
-                raise HTTPException(
-                    status_code=409,
-                    detail={
-                        "blocker_code": "blocked_repo_busy",
-                        "blocker_message": (
-                            f"Repo {target_repo} is already locked by an "
-                            f"in-flight build (lock id {existing_lock.id})"
-                        ),
-                        "repo_path": target_repo,
-                        "existing_lock_id": existing_lock.id,
-                        "existing_lock_branch": existing_lock.branch_name,
-                        "existing_lock_work_item_id": existing_lock.work_item_id,
-                    },
-                )
-
-            lock_result = repo_safety.acquire_repo_lock(
-                session=db,
-                repo_path=target_repo,
-                repo_name=repo_name,
-                branch_name=safety.current_branch or "unknown",
-                commit_sha=safety.current_commit or "unknown",
-                work_item_id=work_item_id,
-                task_id=None,  # populated below after Hermes responds
-                lock_owner=request.hermes_assignee or "builder",
-            )
-            if not lock_result.acquired:
-                # Race lost between check_repo_busy and the INSERT. Treat the
-                # same as busy.
-                raise HTTPException(
-                    status_code=409,
-                    detail={
-                        "blocker_code": lock_result.blocker_code or "blocked_repo_busy",
-                        "blocker_message": (
-                            lock_result.blocker_message
-                            or f"Repo {target_repo} became busy during lock acquire"
-                        ),
-                        "repo_path": target_repo,
-                    },
-                )
-            acquired_lock = lock_result.lock
-    
-    # Get latest completed debate run for this work item
+    # Get latest completed debate run for this work item. Pulled
+    # up here so the BuilderTask stub row below can record the
+    # debate metadata before we get to the prompt-generation
+    # step.
     from ..models import DebateRun
     latest_debate = db.query(DebateRun).filter(
         DebateRun.work_item_id == work_item_id,
         DebateRun.status == "completed"
     ).order_by(DebateRun.completed_at.desc()).first()
-    
-    # Generate prompt
-    prompt_body = _generate_hermes_prompt(
-        work_item=work_item,
-        db=db,
-        debate_run_id=latest_debate.id if latest_debate else None,
-        recommendation=latest_debate.final_recommendation if latest_debate else None,
-        implementation_readiness=latest_debate.implementation_readiness if latest_debate else None,
-    )
-    
-    # Create Hermes task. If this fails we must release the lock we just
-    # acquired so the repo doesn't stay pinned to a build that never started.
-    idempotency_key = f"legion-dashboard-work-item-{work_item_id}-builder-v1"
-    try:
-        hermes_result = _create_hermes_task(
-            title=f"LEGION-WI-{work_item_id} — {work_item.title[:100]}",
-            body=prompt_body,
-            assignee=request.hermes_assignee or "builder",
-            idempotency_key=idempotency_key,
-            priority=request.priority or work_item.priority,
-            status_override=status_override,
-        )
-    except Exception:
-        if acquired_lock is not None:
-            repo_safety.release_repo_lock(
-                db,
-                target_repo,
-                release_reason="hermes_task_create_failed",
-                final_status="failed",
-            )
-        raise
 
-    # Create builder task record
-    # mandatory_edits_json is now a real JSON list of mandatory edits
-    # extracted from the Final Arbiter's structured output. It used to
-    # be set to DebateRun.summary (which is the rationale text) — that
-    # was a prompt-generation bug. The actual edits live on the latest
-    # DebateArgument with side='arbiter'.
+    # ------------------------------------------------------------------
+    # Per-task worktree allocation. The implementation Kanban card
+    # body MUST point the builder at a dedicated worktree under
+    # ``/srv/worktrees/`` rather than the shared operator/control
+    # worktree, so we create (or reuse) the worktree BEFORE we
+    # run the safety gate. The gate then inspects the actual
+    # checkout the builder will operate in (the task worktree),
+    # not the shared repo the builder is about to leave.
+    #
+    # Per-attempt identity comes from the BuilderTask auto-increment
+    # id (allocated by ``db.add(...); db.flush()`` below). The DB
+    # autoincrement is the single source of truth for uniqueness:
+    # even if two worker retries for the same work item somehow
+    # both pass the active-task check (e.g. the previous attempt
+    # is already ``done``/``archived``), each gets a distinct
+    # ``builder_task.id``, a distinct worktree path, and a
+    # distinct feature branch. This solves retry/duplicate
+    # branch collision without a multi-user locking system.
+    # ------------------------------------------------------------------
     mandatory_edits_for_record: list = []
     if latest_debate is not None:
         mandatory_edits_for_record = load_arbiter_mandatory_edits(
@@ -345,13 +309,18 @@ def _create_builder_task(db: Session, work_item_id: int, request: SendToBuilderR
         )
     builder_task = BuilderTask(
         work_item_id=work_item_id,
-        hermes_task_id=hermes_result["task_id"],
+        # Placeholder hermes_task_id — overwritten with the real
+        # value once _create_hermes_task() returns. Using a
+        # unique sentinel keeps the row visible in the
+        # active-task list while signalling "not yet handed off
+        # to Hermes" to any reader.
+        hermes_task_id=f"pending-{work_item_id}-{int(datetime.utcnow().timestamp())}",
         hermes_board="legion-apps-build-queue",
-        hermes_status=hermes_result["status"],
+        hermes_status="creating",
         hermes_assignee=request.hermes_assignee or "builder",
         title=work_item.title,
         target_app=work_item.target_app,
-        target_repo=target_repo,
+        target_repo=None,
         priority=request.priority or work_item.priority,
         debate_run_id=latest_debate.id if latest_debate else None,
         recommendation=latest_debate.final_recommendation if latest_debate else None,
@@ -361,26 +330,341 @@ def _create_builder_task(db: Session, work_item_id: int, request: SendToBuilderR
             if mandatory_edits_for_record
             else None
         ),
-        generated_prompt_snapshot=prompt_body,
     )
-
     db.add(builder_task)
-    db.commit()
+    # Flush so the autoincrement id is populated, then COMMIT the
+    # stub row immediately — before any slow work runs.
+    #
+    # The stub row is the cross-process visibility token: a
+    # second start-build/send-to-builder call for the same work
+    # item (whether from another process, an automated worker
+    # retry, or a duplicate operator click after the per-work-item
+    # Python lock has been released) must see this row through
+    # the active-task check (hermes_status NOT IN ['archived',
+    # 'done']) and 409 instead of allocating a duplicate
+    # worktree/branch and a duplicate Hermes task.
+    #
+    # The slow operations that follow (worktree allocation, safety
+    # check, repo lock, prompt generation, Hermes POST) run
+    # without holding the per-work-item Python lock and without
+    # holding the DB transaction. If any of them fail, we roll
+    # the stub row back with delete+commit so a fresh retry can
+    # allocate a new builder_task.id.
+    db.flush()
     db.refresh(builder_task)
+    attempt_id = builder_task.id
+    db.commit()
 
-    # Backfill the lock's task_id now that we have the Hermes ID.
-    if acquired_lock is not None and hermes_result.get("task_id"):
-        acquired_lock.task_id = str(hermes_result["task_id"])
+    stub_rolled_back = False
+
+    def _rollback_stub() -> None:
+        """Delete the stub BuilderTask row and commit.
+
+        Used on every downstream failure path so the row does not
+        appear in the active-task list (which would block a fresh
+        retry of the same work item). Idempotent: the catch-all
+        wrapper below may also call this after an inner handler
+        already rolled back; the second call is a no-op so the
+        rollback never double-deletes.
+        """
+        nonlocal stub_rolled_back
+        if stub_rolled_back:
+            return
+        db.delete(builder_task)
         db.commit()
+        stub_rolled_back = True
 
-    # Project Hermes status to Work Item status (reusable lifecycle transition)
-    sync_work_item_status_from_builder(
-        db,
-        builder_task.work_item_id,  # type: ignore[arg-type]
-        builder_task.hermes_status,  # type: ignore[arg-type]
-    )
+    # ------------------------------------------------------------------
+    # Catch-all wrapper around every post-stub-commit step.
+    #
+    # The specific handlers below (worktree-create RuntimeError,
+    # dirty repo, existing lock, lock-acquire failure, Hermes
+    # try/except) already roll back the stub on their own known
+    # failure modes. This outer wrapper is the safety net for any
+    # OTHER exception path between the stub commit and the final
+    # commit — most importantly ``_generate_hermes_prompt`` (which
+    # sits between the repo-lock acquire and the Hermes try
+    # block). Without this wrapper, a raise from prompt
+    # generation (malformed debate metadata, prompt-assembly bug,
+    # etc.) would leave the stub row committed with
+    # ``hermes_status='creating'`` and the cross-process
+    # active-task check would 409 every future start-build for
+    # the same work item.
+    #
+    # ``target_repo`` and ``acquired_lock`` are initialised to
+    # None up front so the except handler can reference them even
+    # if the exception fires before the assignments inside the
+    # try block.
+    # ------------------------------------------------------------------
+    target_repo: Optional[str] = None
+    acquired_lock: Optional[RepoLock] = None
+    # ``finalized`` flips to True once the Hermes card exists AND
+    # the BuilderTask row has been updated with the real Hermes
+    # task id AND that commit has returned. After that point any
+    # later exception (lock task_id backfill, status projection,
+    # …) is a known late-failure on a row that already points at
+    # a live Hermes card — the catch-all below must NOT delete
+    # the row (that would orphan the card and confuse retries).
+    # The 500 to the caller is acceptable; the operator
+    # reconciles the late-failure state manually.
+    finalized = False
+    try:
+        try:
+            (
+                target_worktree,
+                feature_branch,
+                chosen_base_ref,
+                _wt_result,
+            ) = ensure_task_worktree(
+                db, work_item, builder_task_id=attempt_id
+            )
+        except RuntimeError as exc:
+            # Worktree creation failed. Roll back the stub BuilderTask
+            # row so it does not appear in the active-task list and
+            # does not block a fresh retry.
+            _rollback_stub()
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "blocker_code": "blocked_worktree_create_failed",
+                    "blocker_message": str(exc),
+                    "work_item_id": work_item_id,
+                },
+            )
+        # Save the orchestrator's metadata on the BuilderTask so the
+        # task record is self-describing and operators can audit
+        # which worktree/branch/base ref this task used.
+        builder_task.target_repo = target_worktree
+        builder_task.generated_prompt_snapshot = None  # set after prompt is generated
 
-    return builder_task
+        # ------------------------------------------------------------------
+        # Repo safety gate, retargeted at the task worktree. The
+        # /srv/repo/legion-dashboard shared checkout is the
+        # operator/control worktree. For worktree-isolated builds the
+        # path the builder will operate in is the new task worktree.
+        # Shared-repo checks (which would block because the operator
+        # may have other dirty work in the shared checkout) are NOT
+        # applied to the implementation path. The gate here is the
+        # last line of defence against an already-dirty task
+        # worktree leaking into the build (e.g. a previous builder
+        # crashed mid-edit). Triage-only sends still want the gate's
+        # dirty/branch feedback but skip the lock (mirroring the
+        # original behaviour).
+        # ------------------------------------------------------------------
+        target_repo = target_worktree
+        skip_gate = os.environ.get("LEGION_SKIP_REPO_SAFETY_GATE") == "1"
+        # Triage-only sends queue a Hermes card without starting a
+        # build, so they must not lock the repo (or be blocked by an
+        # in-flight build's lock). We still run the dirty/branch
+        # checks so an operator sees the same gate feedback whether
+        # they triage or start immediately.
+        skip_lock = status_override == "triage"
+        # _resolve_target_repo returns the shared operator/control
+        # repo path; we use the slug for the lock-name table and
+        # otherwise point the gate at the task worktree.
+        _, repo_name = _resolve_target_repo(work_item)
+        if not skip_gate:
+            safety = repo_safety.check_repo_clean_via_executor(target_repo)
+            if not safety.is_clean:
+                # Roll back the stub before raising; the stub was
+                # committed up front to give cross-process callers
+                # visibility, but this work item is not actually
+                # going to launch a build, so the row would otherwise
+                # block a fresh retry once the operator clears the
+                # dirty/unreachable state.
+                _rollback_stub()
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "blocker_code": safety.blocker_code or "blocked_dirty_repo",
+                        "blocker_message": (
+                            safety.blocker_message
+                            or f"Repo {target_repo} is not clean"
+                        ),
+                        "repo_path": target_repo,
+                        "dirty_files": safety.dirty_files,
+                        "staged_files": safety.staged_files,
+                        "untracked_files": safety.untracked_files,
+                        "current_branch": safety.current_branch,
+                        "current_commit": safety.current_commit,
+                    },
+                )
+
+            # Note: the original code compared safety.current_branch
+            # (the SHARED repo's branch) to work_item.branch_name as
+            # a sanity check that the shared checkout was on the
+            # expected branch. After the worktree-isolation
+            # consolidation the safety check runs against the task
+            # worktree, where the current branch is the
+            # orchestrator-created per-attempt feature branch
+            # (returned by ensure_task_worktree above), not the work
+            # item's base branch. Comparing work_item.branch_name
+            # against the per-attempt branch would always fail and
+            # block any work item that had a populated branch_name
+            # (e.g. an imported or retry work item). The
+            # worktree-isolated build is the source of truth for
+            # "this task is on the right branch": the orchestrator
+            # already created the worktree on the per-attempt
+            # feature branch, and the prompt body's Phase 1 INSPECT
+            # step tells the builder to verify that. Skip the
+            # mismatch check here.
+
+            if not skip_lock:
+                existing_lock = repo_safety.check_repo_busy(db, target_repo)
+                if existing_lock is not None:
+                    _rollback_stub()
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "blocker_code": "blocked_repo_busy",
+                            "blocker_message": (
+                                f"Repo {target_repo} is already locked by an "
+                                f"in-flight build (lock id {existing_lock.id})"
+                            ),
+                            "repo_path": target_repo,
+                            "existing_lock_id": existing_lock.id,
+                            "existing_lock_branch": existing_lock.branch_name,
+                            "existing_lock_work_item_id": existing_lock.work_item_id,
+                        },
+                    )
+
+                lock_result = repo_safety.acquire_repo_lock(
+                    session=db,
+                    repo_path=target_repo,
+                    repo_name=repo_name,
+                    branch_name=safety.current_branch or "unknown",
+                    commit_sha=safety.current_commit or "unknown",
+                    work_item_id=work_item_id,
+                    task_id=None,
+                    lock_owner=request.hermes_assignee or "builder",
+                )
+                if not lock_result.acquired:
+                    _rollback_stub()
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "blocker_code": lock_result.blocker_code or "blocked_repo_busy",
+                            "blocker_message": (
+                                lock_result.blocker_message
+                                or f"Repo {target_repo} became busy during lock acquire"
+                            ),
+                            "repo_path": target_repo,
+                        },
+                    )
+                acquired_lock = lock_result.lock
+
+        # Generate prompt. Pass the same builder_task.id and the same
+        # feature branch we used to create the worktree so the prompt
+        # body renders the exact path and branch the orchestrator just
+        # provisioned. Without this, the prompt would point the
+        # builder at a different (uncreated) worktree and on retry
+        # would re-use a branch that ``git worktree add`` cannot check
+        # out a second time.
+        prompt_body = _generate_hermes_prompt(
+            work_item=work_item,
+            db=db,
+            debate_run_id=latest_debate.id if latest_debate else None,
+            recommendation=latest_debate.final_recommendation if latest_debate else None,
+            implementation_readiness=latest_debate.implementation_readiness if latest_debate else None,
+            builder_task_id=attempt_id,
+            feature_branch=feature_branch,
+            chosen_base_ref=chosen_base_ref,
+        )
+
+        # Create Hermes task. If this fails we must release the lock we just
+        # acquired so the repo doesn't stay pinned to a build that never started.
+        # The idempotency key is stable per work item (NOT per
+        # attempt) so Hermes can coalesce duplicate
+        # start-build/send-to-builder requests that race across
+        # processes — the in-process lock prevents the race
+        # within a single process, and the per-work-item
+        # idempotency key prevents duplicate Hermes tasks across
+        # processes for the same logical request.
+        idempotency_key = f"legion-dashboard-work-item-{work_item_id}-builder-v1"
+        try:
+            hermes_result = _create_hermes_task(
+                title=f"LEGION-WI-{work_item_id} — {work_item.title[:100]}",
+                body=prompt_body,
+                assignee=request.hermes_assignee or "builder",
+                idempotency_key=idempotency_key,
+                priority=request.priority or work_item.priority,
+                status_override=status_override,
+            )
+        except Exception:
+            if acquired_lock is not None:
+                repo_safety.release_repo_lock(
+                    db,
+                    target_repo,
+                    release_reason="hermes_task_create_failed",
+                    final_status="failed",
+                )
+            # Roll back the stub BuilderTask row so a fresh retry can
+            # allocate a new builder_task.id (and therefore a new
+            # worktree + branch).
+            _rollback_stub()
+            raise
+
+        # Populate the BuilderTask stub row with the Hermes metadata
+        # and the generated prompt snapshot, then commit.
+        builder_task.hermes_task_id = hermes_result["task_id"]
+        builder_task.hermes_board = "legion-apps-build-queue"
+        builder_task.hermes_status = hermes_result["status"]
+        builder_task.hermes_assignee = request.hermes_assignee or "builder"
+        builder_task.target_repo = target_worktree
+        builder_task.generated_prompt_snapshot = prompt_body
+        db.commit()
+        # Hermes card exists, BuilderTask row points at it, the
+        # commit returned: from here on the row is the live record
+        # of a live card. Flip ``finalized`` BEFORE ``db.refresh``
+        # so a transient refresh error cannot trigger
+        # ``_rollback_stub`` and DELETE the live row.
+        finalized = True
+        db.refresh(builder_task)
+
+        # Backfill the lock's task_id now that we have the Hermes ID.
+        if acquired_lock is not None and hermes_result.get("task_id"):
+            acquired_lock.task_id = str(hermes_result["task_id"])
+            db.commit()
+
+        # Project Hermes status to Work Item status (reusable lifecycle transition)
+        sync_work_item_status_from_builder(
+            db,
+            builder_task.work_item_id,  # type: ignore[arg-type]
+            builder_task.hermes_status,  # type: ignore[arg-type]
+        )
+
+        return builder_task
+    except Exception:
+        # Catch-all rollback. The specific handlers above already
+        # cover their known failure modes; this branch fires when
+        # ``_generate_hermes_prompt`` (or anything else between the
+        # stub commit and the Hermes try block) raises an
+        # unexpected exception. ``_rollback_stub`` is idempotent,
+        # so this is a no-op when the inner handler already ran.
+        # ``release_repo_lock`` is also idempotent (it checks
+        # whether an active lock still exists before mutating).
+        # The lock release is wrapped so we never mask the
+        # original exception if the session has already been
+        # invalidated.
+        #
+        # Both the stub rollback and the lock release are gated on
+        # ``not finalized``: once the BuilderTask row points at a
+        # live Hermes card, a late-stage exception is a known
+        # late-failure and we leave the row + lock intact so the
+        # operator can reconcile rather than orphaning the card.
+        if not finalized:
+            _rollback_stub()
+            if acquired_lock is not None and target_repo is not None:
+                try:
+                    repo_safety.release_repo_lock(
+                        db,
+                        target_repo,
+                        release_reason="builder_task_create_failed",
+                        final_status="failed",
+                    )
+                except Exception:
+                    pass
+        raise
 
 
 @router.post("/work-items/{work_item_id}/send-to-builder", response_model=BuilderTaskResponse)
