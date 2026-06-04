@@ -398,6 +398,16 @@ def _create_builder_task_locked(
     # ------------------------------------------------------------------
     target_repo: Optional[str] = None
     acquired_lock: Optional[RepoLock] = None
+    # ``finalized`` flips to True once the Hermes card exists AND
+    # the BuilderTask row has been updated with the real Hermes
+    # task id AND that commit has returned. After that point any
+    # later exception (lock task_id backfill, status projection,
+    # …) is a known late-failure on a row that already points at
+    # a live Hermes card — the catch-all below must NOT delete
+    # the row (that would orphan the card and confuse retries).
+    # The 500 to the caller is acceptable; the operator
+    # reconciles the late-failure state manually.
+    finalized = False
     try:
         try:
             (
@@ -604,6 +614,11 @@ def _create_builder_task_locked(
         builder_task.generated_prompt_snapshot = prompt_body
         db.commit()
         db.refresh(builder_task)
+        # Hermes card exists, BuilderTask row points at it, the
+        # commit returned: from here on the row is the live record
+        # of a live card. Any exception below must NOT roll the
+        # row back.
+        finalized = True
 
         # Backfill the lock's task_id now that we have the Hermes ID.
         if acquired_lock is not None and hermes_result.get("task_id"):
@@ -630,17 +645,24 @@ def _create_builder_task_locked(
         # The lock release is wrapped so we never mask the
         # original exception if the session has already been
         # invalidated.
-        _rollback_stub()
-        if acquired_lock is not None and target_repo is not None:
-            try:
-                repo_safety.release_repo_lock(
-                    db,
-                    target_repo,
-                    release_reason="builder_task_create_failed",
-                    final_status="failed",
-                )
-            except Exception:
-                pass
+        #
+        # Both the stub rollback and the lock release are gated on
+        # ``not finalized``: once the BuilderTask row points at a
+        # live Hermes card, a late-stage exception is a known
+        # late-failure and we leave the row + lock intact so the
+        # operator can reconcile rather than orphaning the card.
+        if not finalized:
+            _rollback_stub()
+            if acquired_lock is not None and target_repo is not None:
+                try:
+                    repo_safety.release_repo_lock(
+                        db,
+                        target_repo,
+                        release_reason="builder_task_create_failed",
+                        final_status="failed",
+                    )
+                except Exception:
+                    pass
         raise
 
 

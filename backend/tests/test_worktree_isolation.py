@@ -1729,10 +1729,13 @@ def test_outer_wrapper_rolls_back_stub_when_prompt_generation_raises(
 
     # The repo lock acquired before the prompt-gen failure must
     # have been released so the second build is not pinned by a
-    # phantom lock.
+    # phantom lock. Query by work_item_id (NOT the legacy shared
+    # /srv/repo/legion-dashboard path) — worktree-isolated builds
+    # lock the task worktree path, so a repo_path filter would
+    # pass vacuously and miss a real leak on the worktree path.
     active_locks = (
         db_session.query(RepoLock)
-        .filter(RepoLock.repo_path == "/srv/repo/legion-dashboard")
+        .filter(RepoLock.work_item_id == item.id)
         .filter(RepoLock.lock_status == "active")
         .count()
     )
