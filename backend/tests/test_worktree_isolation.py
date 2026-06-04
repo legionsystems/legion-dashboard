@@ -1280,3 +1280,75 @@ def test_ensure_task_worktree_safely_handles_concurrent_attempt_ids(
     # is on a different branch.
     assert "t_000101" in b1
     assert "t_000102" in b2
+
+
+def test_worktree_isolated_build_skips_branch_mismatch_check(
+    client, db_session, monkeypatch
+):
+    """When the safety check runs against the task worktree
+    (post-consolidation), the current branch is the
+    orchestrator-created per-attempt feature branch, not the
+    work item's existing ``branch_name``. The
+    worktree-isolated build must not block a work item whose
+    ``branch_name`` is set but does not match the
+    per-attempt feature branch — that comparison is
+    meaningless after the safety gate is retargeted."""
+    from app.routers import builder as builder_router
+    from app import preview_deploy
+    from app.models import WorkItem
+    from tests.test_builder import (
+        _patch_target_repo,
+        _stub_hermes,
+        _stub_executor,
+    )
+
+    # Persist a work item with a populated branch_name (as
+    # would be the case for an imported or retry work item).
+    item = WorkItem(
+        type="task",
+        title="Imported Retry Item",
+        status="approved",
+        priority="medium",
+        source="operator",
+        approved_by_operator=True,
+        target_app="legion-dashboard",
+        branch_name="feature/some-other-branch",
+    )
+    db_session.add(item)
+    db_session.commit()
+    db_session.refresh(item)
+
+    # Stub the executor to report the safety check on the
+    # task worktree. After the worktree-create the current
+    # branch will be the per-attempt feature branch
+    # (feature/wi-<id>-slug-t_<id>), NOT
+    # "feature/some-other-branch". The old branch-mismatch
+    # check would block this; the new code must NOT.
+    _stub_executor(
+        monkeypatch,
+        preview_deploy.ExecutorResponse(
+            success=True,
+            raw={
+                "success": True,
+                "action": "repo_safety_check",
+                "is_clean": True,
+                "dirty_files": [],
+                "staged_files": [],
+                "untracked_files": [],
+                "current_branch": "feature/wi-50-imported-retry-item-t_000050",
+                "current_commit": "d" * 40,
+                "blocker_code": None,
+                "blocker_message": None,
+            },
+        ),
+    )
+    _stub_hermes(monkeypatch, task_id="hermes-imported-1")
+    _patch_target_repo(monkeypatch, "/srv/repo/legion-dashboard")
+
+    response = client.post(
+        f"/api/builder/work-items/{item.id}/start-build", json={}
+    )
+    # Must NOT 409 with blocked_branch_mismatch.
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["hermes_task_id"] == "hermes-imported-1"

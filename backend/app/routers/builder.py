@@ -385,25 +385,24 @@ def _create_builder_task(db: Session, work_item_id: int, request: SendToBuilderR
                 },
             )
 
-        if (
-            work_item.branch_name
-            and safety.current_branch
-            and work_item.branch_name != safety.current_branch
-        ):
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "blocker_code": "blocked_branch_mismatch",
-                    "blocker_message": (
-                        f"Repo {target_repo} is on branch "
-                        f"'{safety.current_branch}' but work item expects "
-                        f"'{work_item.branch_name}'"
-                    ),
-                    "repo_path": target_repo,
-                    "current_branch": safety.current_branch,
-                    "expected_branch": work_item.branch_name,
-                },
-            )
+        # Note: the original code compared safety.current_branch
+        # (the SHARED repo's branch) to work_item.branch_name as
+        # a sanity check that the shared checkout was on the
+        # expected branch. After the worktree-isolation
+        # consolidation the safety check runs against the task
+        # worktree, where the current branch is the
+        # orchestrator-created per-attempt feature branch
+        # (returned by ensure_task_worktree above), not the work
+        # item's base branch. Comparing work_item.branch_name
+        # against the per-attempt branch would always fail and
+        # block any work item that had a populated branch_name
+        # (e.g. an imported or retry work item). The
+        # worktree-isolated build is the source of truth for
+        # "this task is on the right branch": the orchestrator
+        # already created the worktree on the per-attempt
+        # feature branch, and the prompt body's Phase 1 INSPECT
+        # step tells the builder to verify that. Skip the
+        # mismatch check here.
 
         if not skip_lock:
             existing_lock = repo_safety.check_repo_busy(db, target_repo)
