@@ -57,14 +57,62 @@ Whichever path you use, the executor canonicalizes the candidate
 `..`-traversal and symlink escapes cannot smuggle a request past the
 gate.
 
-### Future: dashboard GUI surface
+## Configuring the allowlist at runtime
 
-The long-term plan is to manage this list from the LEGION Dashboard
-itself — see the draft `Surface executor allowlist config in LEGION
-Dashboard` in
-[`/root/.hermes/LEGION_TOOLS/FUTURE_WORKFLOW_WORK_ITEM_DRAFTS.md`](../../../root/.hermes/LEGION_TOOLS/FUTURE_WORKFLOW_WORK_ITEM_DRAFTS.md).
-The dashboard will persist the operator's list and write it back to
-`/etc/legion/preview-executor.env` for systemd to pick up on restart.
+The LEGION Dashboard surfaces the allowlist at
+**`/settings/executor-allowlist`** (API: `/api/executor-allowlist`).
+The dashboard is the **primary** way to add a new repo root — operators
+do not need to ssh into the host for a routine onboarding.
+
+### Precedence (env var wins)
+
+1. **`LEGION_EXECUTOR_ALLOWED_REPO_ROOTS` env var** (set on the
+   executor's systemd unit via `/etc/legion/preview-executor.env`):
+   the executor reads this verbatim at start and **completely
+   replaces** the in-source defaults. When the env var is non-empty,
+   the dashboard's persisted list is ignored by the executor.
+   The dashboard surfaces an "override active" banner so the operator
+   sees this state.
+2. **Dashboard-persisted list** (via the UI/API): on each apply, the
+   dashboard writes the joined enabled list out to
+   `/etc/legion/executor-allowlist.conf` as a systemd
+   `EnvironmentFile=` line:
+
+   ```env
+   LEGION_EXECUTOR_ALLOWED_REPO_ROOTS=/srv/repo/legion-dashboard,/srv/repo/lgn-hub,...
+   ```
+
+   The systemd unit picks up that file via an additional
+   `EnvironmentFile=` directive (host operator wires the bind mount
+   from `/etc/legion/` into the dashboard container).
+3. **In-source defaults**: if neither is set, the executor falls back
+   to `_DEFAULT_ALLOWED_REPO_ROOTS`.
+
+### Default roots are seeded
+
+The migration seeds the three in-source defaults
+(`/srv/repo/legion-dashboard`, `/srv/repo/lgn-hub`,
+`/srv/worktrees/legion-dashboard`) into the dashboard DB on first
+run, flagged `is_default = true`. Defaults can be **disabled** via
+the UI (so the executor will not match against them on next restart)
+but cannot be **deleted** — a fresh install always shows them.
+
+### Apply restarts the executor
+
+The dashboard's `POST /api/executor-allowlist/apply` writes the
+config file atomically (tmp + rename) and then runs
+`systemctl restart legion-preview-executor`. The result is surfaced
+to the operator and recorded in the `executor_allowlist_apply_log`
+audit table.
+
+### Add via the UI
+
+Open the dashboard → Settings → Executor Allowlist → Add Root.
+Paste the absolute path, add a note explaining why, and click Apply
+when ready to restart the service. Validation refuses non-absolute
+paths, `..` segments, symlinks, and any path under `/root`, `/etc`,
+`/tmp`, `/var`, `/usr`, `/bin`, `/sbin`, `/proc`, `/sys`, `/dev`,
+`/boot`, or `/home`.
 
 ## EnvironmentFile contract
 
