@@ -14,6 +14,17 @@ a chance to surface the underlying error. The mount is rw on the
 app service only — every other service still mounts ``/srv/repo``
 read-only because they never run ``git worktree add``.
 
+The rw mount is necessary but not sufficient. The bind mount
+preserves host ownership, so the host's
+``/srv/repo/<repo-slug>/.git/`` must ALSO be writable by the
+container's app user (uid 999, gid 999) — otherwise the in-image
+``git worktree add`` call cannot create
+``.git/worktrees/<name>/`` and fails with ``EACCES``. The host-side
+preflight (``scripts/preflight-legion-worktrees.sh``) enforces
+this: when run as root it chowns each known source repo's
+``.git/`` to ``999:999`` and verifies the resulting mode/owner
+lets the app user write.
+
 The tool location is resolved at import time from the
 ``LEGION_WORKTREE_CREATE_TOOL`` environment variable; if unset, it
 falls back to :data:`DEFAULT_WORKTREE_CREATE_TOOL`

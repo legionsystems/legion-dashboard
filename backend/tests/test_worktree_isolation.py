@@ -1942,6 +1942,75 @@ def test_docker_compose_app_service_mounts_srv_repo_read_write():
         )
 
 
+def _read_preflight_script() -> str:
+    """Return the contents of ``scripts/preflight-legion-worktrees.sh``."""
+    import os
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.abspath(os.path.join(here, "..", ".."))
+    path = os.path.join(repo_root, "scripts", "preflight-legion-worktrees.sh")
+    with open(path, "r", encoding="utf-8") as fh:
+        return fh.read()
+
+
+def test_preflight_chowns_known_repo_git_dirs_to_app_user():
+    """The preflight must chown each known source repo's ``.git/``
+    to ``999:999`` when run as root, so the container's app user can
+    create ``.git/worktrees/<name>/`` during ``git worktree add``.
+    Without this, the rw bind mount is necessary-but-not-sufficient
+    and Start Build fails with EACCES on a fresh deploy."""
+    script = _read_preflight_script()
+    # Both known source repos appear in the chown list.
+    assert "/srv/repo/legion-dashboard/.git" in script, script
+    assert "/srv/repo/lgn-hub/.git" in script, script
+    # The chown is recursive and targets the app uid/gid. We do not
+    # pin the exact line shape so the implementation can iterate
+    # the paths in a loop without breaking this test, but the
+    # ``chown -R`` of ``${APP_UID}:${APP_GID}`` against a ``.git``
+    # path must be present.
+    assert 'chown -R "${APP_UID}:${APP_GID}"' in script, script
+    # And the script must run that chown only when invoked as root,
+    # so the unprivileged form does not silently fail.
+    assert 'if [ "$(id -u)" -eq 0 ]' in script, script
+
+
+def test_preflight_uses_mode_bit_writability_check():
+    """The preflight must accept any directory writable by the app
+    user (uid 999, gid 999) regardless of whether the owner uid or
+    gid is exactly 999. The valid ``root:999 0775`` configuration
+    must pass, not be rejected by an exact-ownership check."""
+    script = _read_preflight_script()
+    # Helper function name.
+    assert "_app_user_can_write" in script, script
+    # The check inspects all three write bits (owner=0200,
+    # group=0020, other=0002). Pinning the literal bitmasks
+    # guarantees the check considers each scope rather than only
+    # one or two of them.
+    assert "0200" in script, script
+    assert "0020" in script, script
+    assert "0002" in script, script
+    # The check uses bash arithmetic on the octal mode string, so
+    # ``8#`` is the conversion. The previous "exact 999:999 or
+    # mode ends in 7" logic was wrong; the new check must read the
+    # mode bits explicitly.
+    assert "8#" in script, script
+
+
+def test_preflight_verifies_writability_of_repo_git_dirs():
+    """The preflight must verify each source repo's ``.git/`` is
+    writable by the app user (not just chown it and hope), so a
+    non-root invocation still surfaces an unrecoverable config."""
+    script = _read_preflight_script()
+    # The helper is invoked against the .git path inside the loop.
+    # We assert the helper name is called against ``$git_dir`` (the
+    # loop variable from the new script) so the check runs against
+    # the repo dir, not just /srv/worktrees.
+    assert '_app_user_can_write "$git_dir"' in script, script
+    # And the failure message names the .git dir and the app uid/gid
+    # so the operator can act on it.
+    assert "not writable by the container app user" in script, script
+
+
 def test_docker_compose_app_service_sets_legion_worktree_create_tool_env():
     """The app service must set ``LEGION_WORKTREE_CREATE_TOOL`` to
     the in-image path so the orchestrator resolves to the

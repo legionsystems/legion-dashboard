@@ -5,36 +5,79 @@ LEGION Dashboard container has everything it needs to create
 per-task git worktrees after a fresh `docker compose build app`
 + `docker compose up -d app` cycle.
 
-The dashboard cannot create worktrees on its own — `/srv/repo` is
-mounted read-only — so it shells out to the in-image tool
-`/usr/local/bin/legion-worktree-create`. That tool is the
-repo-owned copy of `scripts/legion-worktree-create`. The
-container also needs `/srv/worktrees` bind-mounted so the host
-can see the resulting worktrees, and git must treat
-`/srv/repo/legion-dashboard` as a safe directory even though
-its host owner (root) differs from the in-container `app` user.
+The dashboard shells out to the in-image tool
+`/usr/local/bin/legion-worktree-create` (the repo-owned copy of
+`scripts/legion-worktree-create`) to run `git worktree add`
+inside the container. `/srv/repo` is bind-mounted read-write so
+the call can write the per-worktree metadata it deposits under
+`<shared_repo>/.git/worktrees/<name>/`, and `/srv/worktrees` is
+bind-mounted so the host can see the resulting worktrees. Git
+must also treat `/srv/repo/legion-dashboard` as a safe directory
+even though its host owner (root) differs from the in-container
+`app` user.
 
-The checks below verify each of those pieces.
+For the per-task worktree creation to actually succeed at
+runtime, the container's app user (uid 999, gid 999) must be
+able to write to BOTH paths:
+
+1. `/srv/repo/<repo-slug>/.git/` — specifically `.git/worktrees/`
+   where `git worktree add` deposits per-worktree metadata.
+2. `/srv/worktrees/` — the parent of every per-task worktree.
+
+The host-side preflight enforces both. The checks below verify
+each piece.
+
+## .git ownership requirement
+
+A writable bind mount is necessary but not sufficient. The bind
+mount preserves host ownership, so if `/srv/repo/legion-dashboard/.git`
+on the host is owned by root with mode 0755, the container's
+non-root app user still cannot create files under
+`.git/worktrees/<name>/` and `git worktree add` fails with
+`EACCES`.
+
+The preflight (step 1 below) handles this. When run as root, it
+`chown -R 999:999 /srv/repo/<slug>/.git` and `chmod g+w` the
+top-level `.git/` so the app user can write. When not run as
+root, it verifies the existing owner/mode lets uid 999 / gid 999
+write — using a mode-bit check that accepts owner-write,
+group-write, or other-write as valid (e.g. `root:999 0775` is
+fine, even though neither the owner uid nor the owner gid is
+999).
 
 ## 1. Host-side preflight (run BEFORE `docker compose build`)
 
-Run on the host that owns the bind-mount source. This creates
-`/srv/worktrees` if missing and confirms it is writable by the
-docker user. Idempotent.
+Run on the host that owns the bind-mount source. This:
+
+* creates `/srv/worktrees` if missing and confirms the container
+  app user (uid 999, gid 999) can write to it;
+* for each known source repo (`/srv/repo/legion-dashboard`,
+  `/srv/repo/lgn-hub`), when run as root, `chown -R 999:999` its
+  `.git/` directory and `chmod g+w` the top-level `.git/` so the
+  container app user can create per-worktree metadata under
+  `.git/worktrees/<name>/`;
+* verifies each `.git/` is writable by uid 999 / gid 999 using a
+  mode-bit check (owner-write, group-write, or other-write all
+  qualify);
+* exits 0 on success, non-zero with a clear `FAIL: ...` line on
+  unrecoverable failure.
+
+Idempotent.
 
 ```bash
 sudo /srv/repo/legion-dashboard/scripts/preflight-legion-worktrees.sh
 ```
 
-Expected output:
+Expected output (truncated):
 
 ```
-[preflight] OK: /srv/worktrees is writable
+[preflight] OK: /srv/worktrees is writable by app user (owner=999:999 mode=775)
+[preflight] OK: /srv/repo/legion-dashboard/.git is writable by app user (owner=999:999 mode=775)
+[preflight] OK: all checks passed; the container app user can create per-task worktrees
 ```
 
-If the script exits non-zero, fix the directory ownership
-(`chown` to the user docker runs as) and re-run before
-attempting to build the app image.
+If the script exits non-zero, follow the `FAIL: ...` hint and
+re-run before attempting to build the app image.
 
 ## 2. Container-internal smoke (run AFTER `docker compose up -d app`)
 

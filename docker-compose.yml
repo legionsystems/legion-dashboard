@@ -23,6 +23,16 @@ services:
       db:
         condition: service_healthy
     volumes:
+      # /srv/repo is mounted read-write so ``git worktree add``
+      # can write the per-worktree metadata it deposits under
+      # ``<shared_repo>/.git/worktrees/<name>/``. The bind mount
+      # preserves host ownership, so the host's
+      # /srv/repo/<slug>/.git must ALSO be writable by the
+      # container's app user (uid 999, gid 999) — otherwise the
+      # rw mount is necessary-but-not-sufficient and Start Build
+      # still fails with EACCES. The host-side preflight
+      # (scripts/preflight-legion-worktrees.sh) handles that
+      # chown when run as root before ``docker compose build``.
       - /srv/repo:/srv/repo
       - /srv/worktrees:/srv/worktrees
       - /var/run/docker.sock:/var/run/docker.sock

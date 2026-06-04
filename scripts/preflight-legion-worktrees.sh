@@ -1,72 +1,155 @@
 #!/usr/bin/env bash
-# Host-side preflight for the LEGION Dashboard worktree directory.
+# Host-side preflight for the LEGION Dashboard per-task worktrees.
 #
-# The dashboard app container creates per-task git worktrees under
-# /srv/worktrees/<repo-slug>/<task>/. Docker bind-mounts this
-# directory into the container at the same path, so it must exist
-# on the host AND be writable by the uid/gid the container's `app`
-# user maps to through the bind mount. The Dockerfile creates an
-# `app:app` user with uid 999 / gid 999; the bind mount preserves
-# host ownership, so the host directory must be owned by 999:999
-# (or world-writable) for the container's app user to create task
-# directories in it.
+# For the dashboard's per-task worktree creation to work in a fresh
+# `docker compose build app && docker compose up -d app` cycle on
+# this host, the container's app user (uid 999, gid 999) must be
+# able to write to BOTH:
 #
-# Run this on the host BEFORE `docker compose build app` (or
-# before the first deploy on a new host). The script is
-# idempotent: it creates /srv/worktrees if missing, fixes
-# ownership to 999:999 when run as root, verifies writability,
-# and fails clearly otherwise.
+#   1. /srv/repo/<repo-slug>/.git/  — specifically the
+#      .git/worktrees/ metadata directory that ``git worktree add``
+#      creates per worktree. Without write access here the call
+#      fails with EACCES and ``Start Build`` 409s before the
+#      orchestrator can surface the real error.
+#
+#   2. /srv/worktrees/  — the parent of every per-task worktree
+#      the dashboard creates. The container bind-mounts this
+#      directory at the same path, so the in-container app user
+#      must be able to create new subdirectories here.
+#
+# Git's safe.directory configuration for /srv/repo/legion-dashboard
+# is the third leg; that one is set in the Dockerfile so it does
+# not need a host-side preflight.
+#
+# This script verifies (1) and (2) and, when run as root, fixes
+# them in place. Idempotent. Run on the host BEFORE
+# `docker compose build app` (or before the first deploy on a new
+# host).
 set -euo pipefail
 
 WT_DIR="${LEGION_WORKTREES_DIR:-/srv/worktrees}"
 
+# Source repos whose .git/ must be writable by the container's app
+# user. Both repos run through ``git worktree add`` from inside
+# the dashboard container (legion-dashboard via the dashboard
+# orchestrator; lgn-hub via the same orchestrator with a hub
+# target_app).
+REPO_GIT_DIRS=(
+  "/srv/repo/legion-dashboard/.git"
+  "/srv/repo/lgn-hub/.git"
+)
+
 # The uid/gid the app container runs as (see Dockerfile: app:app).
 APP_UID=999
 APP_GID=999
+
+# Return 0 if the app user (uid=$APP_UID, gid=$APP_GID) can write
+# to $1 based on the directory's owner uid/gid and mode bits.
+# Accepts any combination where the relevant write bit is set:
+#   - other-write set        -> anyone can write
+#   - owner is APP_UID, ow-w -> app user can write as owner
+#   - group is APP_GID, gr-w -> app user can write through group
+# A directory like root:999 mode 0775 is therefore accepted; the
+# previous logic that required exact 999:999 ownership rejected
+# this valid configuration.
+_app_user_can_write() {
+  local path="$1"
+  local owner_uid owner_gid mode mode_oct
+  owner_uid=$(stat -c '%u' "$path")
+  owner_gid=$(stat -c '%g' "$path")
+  mode=$(stat -c '%a' "$path")
+  # ``8#`` forces the integer literal to be interpreted as octal so
+  # bash's bitwise tests below see the same bits ``stat -c %a``
+  # reports.
+  mode_oct=$((8#${mode}))
+  # Other-writable: app user can write regardless of ownership.
+  if [ $(( mode_oct & 0002 )) -ne 0 ]; then
+    return 0
+  fi
+  # Owner is the app uid AND owner-writable.
+  if [ "$owner_uid" = "$APP_UID" ] && [ $(( mode_oct & 0200 )) -ne 0 ]; then
+    return 0
+  fi
+  # Group is the app gid AND group-writable. This is the common
+  # "root:999 0775" case the prior preflight wrongly rejected.
+  if [ "$owner_gid" = "$APP_GID" ] && [ $(( mode_oct & 0020 )) -ne 0 ]; then
+    return 0
+  fi
+  return 1
+}
+
+# Print a stable owner/mode summary for the operator log.
+_describe() {
+  local path="$1"
+  printf 'owner=%s:%s mode=%s' \
+    "$(stat -c '%u' "$path")" \
+    "$(stat -c '%g' "$path")" \
+    "$(stat -c '%a' "$path")"
+}
+
+# --- (2) /srv/worktrees ---------------------------------------------------
 
 if [ ! -d "$WT_DIR" ]; then
   echo "[preflight] creating $WT_DIR"
   mkdir -p "$WT_DIR"
 fi
 
-# When running as root, fix ownership to the container's app
-# uid/gid so the bind mount is writable by the in-container user.
-# A directory created by sudo/root with mode 0755 is NOT writable
-# by uid 999, and `touch` below would pass (because root can write
-# anywhere) but the container would still fail at runtime.
+# When running as root, normalise ownership/mode so the bind mount
+# is writable by the in-container app user. A directory created by
+# sudo/root with mode 0755 is NOT writable by uid 999, and the
+# downstream worktree-create call would fail at container runtime.
 if [ "$(id -u)" -eq 0 ]; then
   echo "[preflight] running as root: chown $WT_DIR to ${APP_UID}:${APP_GID} (container app user) and chmod 0775"
   chown "${APP_UID}:${APP_GID}" "$WT_DIR"
   chmod 0775 "$WT_DIR"
 fi
 
-if ! touch "$WT_DIR/.preflight-write-test" 2>/dev/null; then
-  echo "[preflight] FAIL: $WT_DIR is not writable by the current user (uid=$(id -u))"
-  echo "[preflight] hint: ensure $WT_DIR is owned by ${APP_UID}:${APP_GID}"
-  echo "          (the container's app user), or run this preflight as root."
+if ! _app_user_can_write "$WT_DIR"; then
+  echo "[preflight] FAIL: $WT_DIR is not writable by the container app user (uid=$APP_UID gid=$APP_GID); $(_describe "$WT_DIR")"
+  echo "          Re-run this preflight as root, or chown manually so the"
+  echo "          app user can write — e.g."
+  echo "             sudo chown ${APP_UID}:${APP_GID} $WT_DIR && sudo chmod 0775 $WT_DIR"
   exit 2
 fi
-rm -f "$WT_DIR/.preflight-write-test"
+echo "[preflight] OK: $WT_DIR is writable by app user ($(_describe "$WT_DIR"))"
 
-# Additional verification: explicitly check the directory is owned
-# by ${APP_UID}:${APP_GID} (or is world-writable). A root-owned
-# directory with mode 0755 will pass the touch above but fail at
-# container runtime — this guard catches that case.
-owner_uid=$(stat -c '%u' "$WT_DIR")
-owner_gid=$(stat -c '%g' "$WT_DIR")
-dir_mode=$(stat -c '%a' "$WT_DIR")
-if [ "$owner_uid" != "$APP_UID" ] || [ "$owner_gid" != "$APP_GID" ]; then
-  # Not owned by app:app. Only OK if world-writable (e.g. 0777).
-  case "$dir_mode" in
-    *7) : ;;  # mode ends in 7 -> world-writable
-    *)
-      echo "[preflight] FAIL: $WT_DIR is owned by ${owner_uid}:${owner_gid} mode ${dir_mode}"
-      echo "          but the container's app user is uid=${APP_UID} gid=${APP_GID}."
-      echo "          Re-run this preflight as root, or chown manually:"
-      echo "             sudo chown ${APP_UID}:${APP_GID} $WT_DIR && sudo chmod 0775 $WT_DIR"
-      exit 3
-      ;;
-  esac
+# --- (1) /srv/repo/<slug>/.git --------------------------------------------
+
+# git worktree add writes new files under .git/worktrees/<name>/.
+# The mount is now rw on the app service (see docker-compose.yml),
+# but the bind mount preserves host ownership: if the source
+# repo's .git is owned by host root the in-container app user
+# still cannot create files inside it. When running as root, fix
+# the ownership in place; otherwise verify the existing mode/owner
+# is one the app user can write to.
+git_fail=0
+for git_dir in "${REPO_GIT_DIRS[@]}"; do
+  if [ ! -d "$git_dir" ]; then
+    echo "[preflight] skip: $git_dir (no such directory on this host)"
+    continue
+  fi
+  if [ "$(id -u)" -eq 0 ]; then
+    echo "[preflight] running as root: chown -R $git_dir to ${APP_UID}:${APP_GID} (container app user)"
+    chown -R "${APP_UID}:${APP_GID}" "$git_dir"
+    # Ensure the top-level .git is group-writable so the app user
+    # can create .git/worktrees/ if it does not exist yet.
+    chmod g+w "$git_dir"
+  fi
+  if ! _app_user_can_write "$git_dir"; then
+    echo "[preflight] FAIL: $git_dir is not writable by the container app user (uid=$APP_UID gid=$APP_GID); $(_describe "$git_dir")"
+    echo "          Without write access here, ``git worktree add`` in the dashboard"
+    echo "          container cannot create .git/worktrees/<name>/ and Start Build will"
+    echo "          409 with blocked_worktree_create_failed. Re-run this preflight as"
+    echo "          root, or chown manually:"
+    echo "             sudo chown -R ${APP_UID}:${APP_GID} $git_dir"
+    git_fail=1
+    continue
+  fi
+  echo "[preflight] OK: $git_dir is writable by app user ($(_describe "$git_dir"))"
+done
+
+if [ "$git_fail" -ne 0 ]; then
+  exit 4
 fi
 
-echo "[preflight] OK: $WT_DIR is writable (owner=${owner_uid}:${owner_gid} mode=${dir_mode})"
+echo "[preflight] OK: all checks passed; the container app user can create per-task worktrees"
