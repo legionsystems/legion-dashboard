@@ -603,6 +603,48 @@ class RepoLock(Base):
     release_reason = Column(String(200), nullable=True)
 
 
+class ExecutorAllowlistRoot(Base):
+    """A single allowed repo-root path for the host preview executor.
+
+    The dashboard owns the persisted list; the apply endpoint writes the
+    enabled rows out to the executor's ``EnvironmentFile=`` and restarts the
+    systemd unit. Default roots are seeded at migration time and protect the
+    out-of-the-box surface — operators can disable them but not delete them,
+    so a fresh install always boots with the executor's baked-in
+    ``_DEFAULT_ALLOWED_REPO_ROOTS`` reachable through the UI.
+    """
+
+    __tablename__ = "executor_allowlist_roots"
+
+    id = Column(Integer, primary_key=True, index=True)
+    path = Column(String(500), nullable=False, unique=True)
+    added_at = Column(DateTime, server_default=func.now(), nullable=False)
+    added_by = Column(String(200), nullable=True)
+    note = Column(String(500), nullable=True)
+    is_default = Column(Boolean, nullable=False, default=False)
+    is_enabled = Column(Boolean, nullable=False, default=True)
+
+
+class ExecutorAllowlistApplyLog(Base):
+    """Audit row recording an ``apply`` of the executor allowlist.
+
+    Each row captures the joined enabled list that was written out, the
+    on-disk config path, whether the systemd restart succeeded, and any
+    error string. The most recent row drives ``last_apply_at`` /
+    ``last_apply_error`` on the GET response.
+    """
+
+    __tablename__ = "executor_allowlist_apply_log"
+
+    id = Column(Integer, primary_key=True, index=True)
+    applied_at = Column(DateTime, server_default=func.now(), nullable=False)
+    applied_by = Column(String(200), nullable=True)
+    joined_roots = Column(Text, nullable=False)
+    config_path = Column(String(500), nullable=False)
+    restart_ok = Column(Boolean, nullable=False, default=False)
+    error = Column(Text, nullable=True)
+
+
 class AppActionLog(Base):
     __tablename__ = "app_action_logs"
 
