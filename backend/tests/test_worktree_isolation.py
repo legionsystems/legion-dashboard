@@ -1000,3 +1000,182 @@ def test_prompt_body_records_chosen_base_ref_from_orchestrator(monkeypatch):
     # The prompt's Target Worktree line shows the orchestrator's
     # path verbatim.
     assert f"Target Worktree: {target_worktree}" in body
+
+
+# ---------------------------------------------------------------------------
+# P2 fix: prompt body uses chosen_base_ref and does not ask the
+# builder to create a second branch
+# ---------------------------------------------------------------------------
+
+
+def test_prompt_body_uses_chosen_base_ref_in_pr_and_review_instructions():
+    """For a worktree-isolated task the local secret scan, the
+    local Codex review, and the ``gh pr create`` command MUST use
+    the orchestrator's resolved base ref (``chosen_base_ref``)
+    rather than the literal placeholder ``<base-branch>`` or
+    the literal ``main``."""
+    wi = _make_work_item(id=42, title="Use Resolved Base Ref")
+    body = build_implementation_card_prompt(
+        wi,
+        debate_run_id=None,
+        recommendation=None,
+        implementation_readiness=None,
+        mandatory_edits=[],
+        target_repo="/srv/worktrees/legion-dashboard/wi-42-use-resolved-base-ref/t_000007",
+        target_worktree="/srv/worktrees/legion-dashboard/wi-42-use-resolved-base-ref/t_000007",
+        feature_branch="feature/wi-42-use-resolved-base-ref-t_000007",
+        chosen_base_ref="feature/dashboard-bootstrap-control-plane",
+    )
+    # The chosen base ref must appear in the secret-scan, local
+    # Codex review, and PR-create lines verbatim.
+    assert (
+        "legion-secret-scan --repo "
+        "/srv/worktrees/legion-dashboard/wi-42-use-resolved-base-ref/t_000007"
+        " --base feature/dashboard-bootstrap-control-plane "
+        "--head feature/wi-42-use-resolved-base-ref-t_000007"
+        in body
+    )
+    assert (
+        "legion-codex-local-review \\\n"
+        "     --repo /srv/worktrees/legion-dashboard/wi-42-use-resolved-base-ref/t_000007 \\\n"
+        "     --base feature/dashboard-bootstrap-control-plane \\\n"
+        "     --head feature/wi-42-use-resolved-base-ref-t_000007"
+        in body
+    )
+    assert (
+        "gh pr create --base feature/dashboard-bootstrap-control-plane --head feature/wi-42-use-resolved-base-ref-t_000007"
+        in body
+    )
+    # And the prompt must not contain the literal placeholder
+    # <base-branch> (anywhere) or the old hardcoded "PR to main"
+    # line. The remaining <your-branch> is replaced by the
+    # feature_branch above, so the placeholder is also gone.
+    assert "<base-branch>" not in body, body
+    assert "open/update the PR to main" not in body, body
+
+
+def test_prompt_body_does_not_instruct_builder_to_create_second_branch():
+    """For a worktree-isolated task the prompt must NOT tell the
+    builder to run ``git checkout -b feature/<your-feature-name>``.
+    The worktree is already on the orchestrator-provisioned
+    branch; creating a second branch detaches from it and
+    breaks retry / re-send correlation."""
+    wi = _make_work_item(id=43, title="No Second Branch")
+    body = build_implementation_card_prompt(
+        wi,
+        debate_run_id=None,
+        recommendation=None,
+        implementation_readiness=None,
+        mandatory_edits=[],
+        target_repo="/srv/worktrees/legion-dashboard/wi-43-no-second-branch/t_000004",
+        target_worktree="/srv/worktrees/legion-dashboard/wi-43-no-second-branch/t_000004",
+        feature_branch="feature/wi-43-no-second-branch-t_000004",
+        chosen_base_ref="main",
+    )
+    # The instruction must be replaced — the literal
+    # ``git checkout -b feature/<your-feature-name>`` is not the
+    # active command anywhere in the prompt. The new prompt
+    # tells the builder to verify and check out the
+    # provisioned branch. The legacy command string may still
+    # appear inside a "Do NOT run ..." warning block, which is
+    # the desired form: it teaches the model what NOT to do
+    # without telling it to do it. We assert the legacy form is
+    # only present inside that warning, never as an active
+    # command.
+    legacy_command = "   git checkout -b feature/<your-feature-name>\n"
+    legacy_command_alt = "   git checkout -b feature/<your-feature-name>\r\n"
+    assert legacy_command not in body, body
+    assert legacy_command_alt not in body, body
+    # The prompt instead instructs the builder to verify and
+    # check out the provisioned branch.
+    assert "Use the provisioned worktree branch" in body, body
+    # The legacy command is mentioned only as a do-NOT instruction.
+    assert (
+        "Do NOT run `git checkout -b feature/<your-feature-name>`"
+        in body
+    )
+    # The provisioned feature branch name is rendered in the
+    # step-1 instructions so the builder has the literal value.
+    assert "feature/wi-43-no-second-branch-t_000004" in body
+
+
+def test_prompt_body_falls_back_to_main_when_chosen_base_ref_omitted():
+    """When ``chosen_base_ref`` is not supplied (legacy call
+    site, no orchestrator), the prompt falls back to the
+    literal ``main`` for the secret scan, local Codex, and PR
+    base — preserving the prior behaviour for non-worktree
+    tasks."""
+    wi = _make_work_item(id=44, title="Legacy No Base Ref")
+    body = build_implementation_card_prompt(
+        wi,
+        debate_run_id=None,
+        recommendation=None,
+        implementation_readiness=None,
+        mandatory_edits=[],
+        target_repo="/srv/worktrees/legion-dashboard/wi-44-legacy-no-base-ref/t_000005",
+        target_worktree="/srv/worktrees/legion-dashboard/wi-44-legacy-no-base-ref/t_000005",
+        feature_branch="feature/wi-44-legacy-no-base-ref-t_000005",
+        chosen_base_ref=None,
+    )
+    # The fallback is 'main'.
+    assert (
+        "legion-secret-scan --repo "
+        "/srv/worktrees/legion-dashboard/wi-44-legacy-no-base-ref/t_000005"
+        " --base main"
+        " --head feature/wi-44-legacy-no-base-ref-t_000005"
+        in body
+    )
+    assert (
+        "gh pr create --base main --head feature/wi-44-legacy-no-base-ref-t_000005"
+        in body
+    )
+
+
+def test_prompt_body_contains_provisioned_feature_branch_in_instructions():
+    """The local-pre-push-review-gate step 1 must show the
+    literal provisioned feature branch so the builder has the
+    exact string for ``git checkout`` and ``git push``."""
+    wi = _make_work_item(id=45, title="Show Feature Branch")
+    body = build_implementation_card_prompt(
+        wi,
+        debate_run_id=None,
+        recommendation=None,
+        implementation_readiness=None,
+        mandatory_edits=[],
+        target_repo="/srv/worktrees/legion-dashboard/wi-45-show-feature-branch/t_000006",
+        target_worktree="/srv/worktrees/legion-dashboard/wi-45-show-feature-branch/t_000006",
+        feature_branch="feature/wi-45-show-feature-branch-t_000006",
+        chosen_base_ref="main",
+    )
+    # The step-1 instruction literally names the provisioned branch.
+    assert (
+        "feature_branch=feature/wi-45-show-feature-branch-t_000006"
+        in body
+    )
+    # And the push / PR-create commands use it.
+    assert (
+        "git push origin feature/wi-45-show-feature-branch-t_000006"
+        in body
+    )
+    assert (
+        "gh pr create --base main --head feature/wi-45-show-feature-branch-t_000006"
+        in body
+    )
+
+
+def test_prompt_body_contains_chosen_base_ref_in_worktree_metadata():
+    """The WORKTREE METADATA block must surface the chosen base
+    ref so the operator and the builder can both verify it."""
+    wi = _make_work_item(id=46, title="Show Base Ref In Metadata")
+    body = build_implementation_card_prompt(
+        wi,
+        debate_run_id=None,
+        recommendation=None,
+        implementation_readiness=None,
+        mandatory_edits=[],
+        target_repo="/srv/worktrees/legion-dashboard/wi-46-show-base-ref-in-metadata/t_000008",
+        target_worktree="/srv/worktrees/legion-dashboard/wi-46-show-base-ref-in-metadata/t_000008",
+        feature_branch="feature/wi-46-show-base-ref-in-metadata-t_000008",
+        chosen_base_ref="feature/dashboard-bootstrap-control-plane",
+    )
+    assert "Base Ref: feature/dashboard-bootstrap-control-plane" in body, body
