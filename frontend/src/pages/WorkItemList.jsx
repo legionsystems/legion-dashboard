@@ -4,11 +4,11 @@ import { getJson } from "../api/client.js";
 import {
   StatusBadge,
   TypeBadge,
-  ALL_STATUSES,
   ALL_TYPES,
+  LIFECYCLE_FILTERS,
 } from "../components/badges.jsx";
 import { Panel } from "../components/panel.jsx";
-import { StatusPill, FilterPill } from "../components/pill.jsx";
+import { FilterPill } from "../components/pill.jsx";
 import {
   EmptyState,
   ErrorBanner,
@@ -33,14 +33,97 @@ const RUN_STATUS_COLOR = {
   failed: "#EF4444",
 };
 
-const RECOMMENDATION_LABEL = {
-  APPROVE_AS_IS: "APPROVE",
-  APPROVE_WITH_EDITS: "APPROVE+EDITS",
-  SPLIT_FIRST: "SPLIT FIRST",
-  NEEDS_MORE_DETAIL: "MORE DETAIL",
-  DO_NOT_BUILD_NOW: "DO NOT BUILD",
+// Debate recommendations. APPROVE_WITH_EDITS (aka
+// "APPROVE_WITH_MANDATORY_EDITS" in WI-32 phrasing) is given a distinct
+// amber/orange palette so a glance at the row makes it obvious that required
+// work remains, rather than reading like a clean approval.
+const RECOMMENDATION_META = {
+  APPROVE_AS_IS: { label: "APPROVE", color: "#10B981" },
+  APPROVE_WITH_EDITS: { label: "APPROVE+EDITS REQUIRED", color: "#F97316" },
+  SPLIT_FIRST: { label: "SPLIT FIRST", color: "#A855F7" },
+  NEEDS_MORE_DETAIL: { label: "MORE DETAIL", color: "#F59E0B" },
+  DO_NOT_BUILD_NOW: { label: "DO NOT BUILD", color: "#EF4444" },
 };
 
+// Lifecycle bucket → set of effective_state values it includes. Buckets are
+// exclusive (no overlap) so the count next to each pill accurately reflects
+// how many rows the filter will show. The keys here mirror
+// LIFECYCLE_FILTERS in badges.jsx.
+const LIFECYCLE_BUCKETS = {
+  active: new Set([
+    "drafting",
+    "debating",
+    "debated",
+    "approved",
+    "building",
+    "implemented",
+  ]),
+  blocked: new Set([
+    "blocked",
+    "blocked_merge",
+    "merged_deployment_failed",
+  ]),
+  review_required: new Set([
+    "in_review",
+    "code_reviewed",
+    "changes_requested",
+    "review_failed",
+    "needs_rework",
+    "preview_pending",
+    "preview_ready",
+    "certified",
+    "ready_to_merge",
+  ]),
+  parked: new Set(["archived", "rejected"]),
+  completed: new Set(["complete", "merged"]),
+};
+
+// Map effective_state → one-word/short next action the operator should take.
+// The Next Action column reads from this so an operator can scan the list
+// without opening each item (WI-32 acceptance criterion).
+const NEXT_ACTION = {
+  drafting: "DEBATE",
+  debating: "WAIT DEBATE",
+  // debated falls back to debate recommendation (see nextActionFor)
+  debated: "REVIEW DEBATE",
+  approved: "SEND TO BUILDER",
+  building: "WAIT BUILD",
+  implemented: "REVIEW CONTRACT",
+  in_review: "REVIEW PR",
+  code_reviewed: "CERTIFY",
+  changes_requested: "REWORK",
+  review_failed: "REWORK",
+  needs_rework: "REWORK",
+  preview_pending: "DEPLOY PREVIEW",
+  preview_ready: "CERTIFY",
+  certified: "MERGE",
+  ready_to_merge: "MERGE",
+  blocked: "UNBLOCK",
+  blocked_merge: "RETRY MERGE",
+  merged: "COMPLETE",
+  merged_deployment_failed: "FIX DEPLOY",
+  complete: "—",
+  rejected: "PARK / CLEANUP",
+  archived: "—",
+};
+
+function nextActionFor(item) {
+  const state = item.effective_state || item.status || "";
+  // When the debate just finished and no later signal has arrived, the next
+  // action depends on the debate's final recommendation rather than the
+  // generic "REVIEW DEBATE" fallback.
+  if (state === "debated" && item.latest_debate) {
+    const rec = item.latest_debate.final_recommendation;
+    if (rec === "APPROVE_AS_IS") return "APPROVE";
+    if (rec === "APPROVE_WITH_EDITS") return "APPROVE + APPLY EDITS";
+    if (rec === "SPLIT_FIRST") return "SPLIT FIRST";
+    if (rec === "NEEDS_MORE_DETAIL") return "ADD DETAIL";
+    if (rec === "DO_NOT_BUILD_NOW") return "PARK";
+  }
+  return NEXT_ACTION[state] || "—";
+}
+
+// Render the debate cell — status of the latest run + final recommendation.
 function DebateCell({ item }) {
   const latest = item.latest_debate;
   if (!latest) {
@@ -63,6 +146,9 @@ function DebateCell({ item }) {
     );
   }
   const color = RUN_STATUS_COLOR[latest.status] || "#5A5A5A";
+  const rec = latest.final_recommendation
+    ? RECOMMENDATION_META[latest.final_recommendation]
+    : null;
   return (
     <div className="flex flex-wrap items-center gap-1.5">
       <span
@@ -77,23 +163,185 @@ function DebateCell({ item }) {
           className="inline-block h-1.5 w-1.5"
           style={{ backgroundColor: color }}
         />
-        {latest.status.toUpperCase()}
+        DEBATE: {latest.status.toUpperCase()}
       </span>
-      {latest.final_recommendation && (
-        <span className="font-mono uppercase tracking-telemetry text-[10px] text-fg-secondary border border-edge px-1.5 py-0.5">
-          {RECOMMENDATION_LABEL[latest.final_recommendation] ||
-            latest.final_recommendation}
+      {rec && (
+        <span
+          className="font-mono uppercase tracking-telemetry text-[10px] font-semibold border px-1.5 py-0.5"
+          style={{
+            color: rec.color,
+            borderColor: `${rec.color}55`,
+            backgroundColor: `${rec.color}14`,
+          }}
+        >
+          {rec.label}
         </span>
       )}
     </div>
   );
 }
 
+// Implementation column — what does the builder say about this work item?
+// Reads the raw Kanban status (which the builder updates as it moves through
+// active → completed) plus operator approval. Deliberately distinct from the
+// Work Status column so an item with completed debate but no build does not
+// look done.
+function ImplementationCell({ item }) {
+  const state = item.effective_state || "";
+  const status = (item.status || "").toLowerCase();
+  if (item.merge_commit_sha) {
+    return (
+      <span className="font-mono text-[10px] tracking-telemetry text-fg-secondary">
+        MERGED · {String(item.merge_commit_sha).slice(0, 7)}
+      </span>
+    );
+  }
+  if (status === "active" || status === "building" || status === "in_progress") {
+    return (
+      <span
+        className="font-mono uppercase tracking-telemetry text-[10px] font-semibold border px-1.5 py-0.5"
+        style={{
+          color: "#F59E0B",
+          borderColor: "#F59E0B55",
+          backgroundColor: "#F59E0B14",
+        }}
+      >
+        BUILDING
+      </span>
+    );
+  }
+  if (status === "completed" || status === "implemented" || status === "done") {
+    return (
+      <span
+        className="font-mono uppercase tracking-telemetry text-[10px] font-semibold border px-1.5 py-0.5"
+        style={{
+          color: "#FACC15",
+          borderColor: "#FACC1555",
+          backgroundColor: "#FACC1514",
+        }}
+      >
+        IMPLEMENTED
+      </span>
+    );
+  }
+  if (item.approved_by_operator && state !== "drafting") {
+    return (
+      <span
+        className="font-mono uppercase tracking-telemetry text-[10px] font-semibold border px-1.5 py-0.5"
+        style={{
+          color: "#3B82F6",
+          borderColor: "#3B82F655",
+          backgroundColor: "#3B82F614",
+        }}
+      >
+        READY TO BUILD
+      </span>
+    );
+  }
+  return (
+    <span className="font-mono text-[10px] tracking-telemetry text-fg-muted">
+      —
+    </span>
+  );
+}
+
+// Review / PR column — surfaces PR, code review verdict, and preview state.
+function ReviewCell({ item }) {
+  const parts = [];
+  const cr = (item.code_review_status || "").toLowerCase();
+  if (cr === "approved") {
+    parts.push({ color: "#10B981", label: "REVIEW: APPROVED" });
+  } else if (cr === "changes_requested" || cr === "changes-requested") {
+    parts.push({ color: "#F97316", label: "REVIEW: CHANGES" });
+  } else if (cr === "failed") {
+    parts.push({ color: "#EF4444", label: "REVIEW: FAILED" });
+  }
+  if (item.preview_deployed) {
+    parts.push({ color: "#06B6D4", label: "PREVIEW: READY" });
+  } else if (item.preview_required) {
+    parts.push({ color: "#F59E0B", label: "PREVIEW: PENDING" });
+  }
+  if (item.pr_number || item.pr_url) {
+    const label = item.pr_number ? `PR #${item.pr_number}` : "PR";
+    parts.push({ color: "#6366F1", label });
+  }
+  if (item.operator_certified) {
+    parts.push({ color: "#14B8A6", label: "CERTIFIED" });
+  }
+  if (item.ready_to_merge) {
+    parts.push({ color: "#06B6D4", label: "READY MERGE" });
+  }
+  if (!parts.length) {
+    return (
+      <span className="font-mono text-[10px] tracking-telemetry text-fg-muted">
+        —
+      </span>
+    );
+  }
+  return (
+    <div className="flex flex-wrap items-center gap-1">
+      {parts.map((p, i) => (
+        <span
+          key={i}
+          className="inline-flex items-center gap-1 font-mono uppercase tracking-telemetry text-[10px] font-semibold border px-1.5 py-0.5"
+          style={{
+            color: p.color,
+            borderColor: `${p.color}55`,
+            backgroundColor: `${p.color}14`,
+          }}
+        >
+          {p.label}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+// Next Action column. Most actions are neutral grey; "—" (no action) is
+// muted; rework/blocked actions get a warning tint so they stand out.
+function NextActionCell({ item }) {
+  const label = nextActionFor(item);
+  const state = item.effective_state || "";
+  let color = "#EAEAEA";
+  if (label === "—") color = "#5A5A5A";
+  else if (
+    state === "blocked" ||
+    state === "blocked_merge" ||
+    state === "merged_deployment_failed" ||
+    state === "changes_requested" ||
+    state === "review_failed" ||
+    state === "needs_rework"
+  ) {
+    color = "#F97316";
+  } else if (state === "rejected" || state === "archived") {
+    color = "#8A8A8A";
+  } else if (
+    state === "approved" ||
+    state === "ready_to_merge" ||
+    state === "certified" ||
+    state === "merged" ||
+    state === "code_reviewed"
+  ) {
+    color = "#06B6D4";
+  }
+  return (
+    <span
+      className="inline-flex items-center font-mono uppercase tracking-telemetry text-[10px] font-semibold border px-1.5 py-0.5"
+      style={{
+        color,
+        borderColor: `${color}55`,
+        backgroundColor: `${color}14`,
+      }}
+    >
+      {label}
+    </span>
+  );
+}
+
 export default function WorkItemList() {
   const [items, setItems] = useState([]);
   const [type, setType] = useState("");
-  const [status, setStatus] = useState("");
-  const [view, setView] = useState("active"); // active | archived | all
+  const [lifecycle, setLifecycle] = useState("active"); // bucket key
   const [generated, setGenerated] = useState("all"); // human | system | test | all
   const [app, setApp] = useState(""); // "" = All | app_id | __unassigned__
   const [query, setQuery] = useState("");
@@ -107,11 +355,15 @@ export default function WorkItemList() {
       .catch(() => {});
   }, []);
 
+  // Server-side ``view`` param maps from the lifecycle bucket: PARKED and ALL
+  // need archived rows, everything else is restricted to non-archived.
+  const serverView =
+    lifecycle === "parked" || lifecycle === "all" ? "all" : "active";
+
   useEffect(() => {
     const params = new URLSearchParams();
     if (type) params.set("type", type);
-    if (status) params.set("status", status);
-    if (view) params.set("view", view);
+    if (serverView) params.set("view", serverView);
     if (generated) params.set("generated", generated);
     if (app) params.set("app", app);
     const qs = params.toString();
@@ -129,25 +381,38 @@ export default function WorkItemList() {
     return () => {
       cancelled = true;
     };
-  }, [type, status, view, generated, app]);
+  }, [type, serverView, generated, app]);
 
-  const statusCounts = useMemo(() => {
-    // counts reflect currently-loaded set (server already filtered by status if applied)
-    const c = {};
-    for (const it of items) c[it.status] = (c[it.status] || 0) + 1;
+  // Client-side projection of the loaded items into lifecycle buckets.
+  const lifecycleCounts = useMemo(() => {
+    const c = { active: 0, blocked: 0, review_required: 0, parked: 0, completed: 0, all: 0 };
+    for (const it of items) {
+      c.all += 1;
+      const state = it.effective_state || it.status || "";
+      for (const [k, set] of Object.entries(LIFECYCLE_BUCKETS)) {
+        if (set.has(state)) c[k] += 1;
+      }
+    }
     return c;
   }, [items]);
 
+  const bucketed = useMemo(() => {
+    if (lifecycle === "all") return items;
+    const set = LIFECYCLE_BUCKETS[lifecycle];
+    if (!set) return items;
+    return items.filter((it) => set.has(it.effective_state || it.status || ""));
+  }, [items, lifecycle]);
+
   const filtered = useMemo(() => {
-    if (!query.trim()) return items;
+    if (!query.trim()) return bucketed;
     const q = query.toLowerCase();
-    return items.filter(
+    return bucketed.filter(
       (it) =>
         it.title.toLowerCase().includes(q) ||
         String(it.id).includes(q) ||
         (it.body || "").toLowerCase().includes(q),
     );
-  }, [items, query]);
+  }, [bucketed, query]);
 
   return (
     <div className="space-y-5">
@@ -171,118 +436,42 @@ export default function WorkItemList() {
       <ErrorBanner message={error} />
 
       <Panel
-        title="VIEW / ORIGIN"
-        subtitle={`// ${view} · ${generated}`}
+        title="FILTER / LIFECYCLE"
+        subtitle={`// ${lifecycle.replace("_", " ")}`}
       >
-        <div className="flex flex-wrap gap-2 items-center">
-          <div className="flex items-center gap-1.5 mr-4">
-            <span className="label-tel">VIEW:</span>
-            <button
-              onClick={() => setView("active")}
-              className={`px-2 py-1 font-mono uppercase tracking-telemetry text-[10px] font-semibold border ${
-                view === "active"
-                  ? "border-fg-primary text-fg-primary bg-raised"
-                  : "border-edge text-fg-secondary hover:text-fg-primary"
-              }`}
-            >
-              ACTIVE
-            </button>
-            <button
-              onClick={() => setView("archived")}
-              className={`px-2 py-1 font-mono uppercase tracking-telemetry text-[10px] font-semibold border ${
-                view === "archived"
-                  ? "border-fg-primary text-fg-primary bg-raised"
-                  : "border-edge text-fg-secondary hover:text-fg-primary"
-              }`}
-            >
-              ARCHIVED
-            </button>
-            <button
-              onClick={() => setView("all")}
-              className={`px-2 py-1 font-mono uppercase tracking-telemetry text-[10px] font-semibold border ${
-                view === "all"
-                  ? "border-fg-primary text-fg-primary bg-raised"
-                  : "border-edge text-fg-secondary hover:text-fg-primary"
-              }`}
-            >
-              ALL
-            </button>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <span className="label-tel">ORIGIN:</span>
-            <button
-              onClick={() => setGenerated("human")}
-              className={`px-2 py-1 font-mono uppercase tracking-telemetry text-[10px] font-semibold border ${
-                generated === "human"
-                  ? "border-fg-primary text-fg-primary bg-raised"
-                  : "border-edge text-fg-secondary hover:text-fg-primary"
-              }`}
-            >
-              HUMAN
-            </button>
-            <button
-              onClick={() => setGenerated("system")}
-              className={`px-2 py-1 font-mono uppercase tracking-telemetry text-[10px] font-semibold border ${
-                generated === "system"
-                  ? "border-fg-primary text-fg-primary bg-raised"
-                  : "border-edge text-fg-secondary hover:text-fg-primary"
-              }`}
-            >
-              SYSTEM
-            </button>
-            <button
-              onClick={() => setGenerated("test")}
-              className={`px-2 py-1 font-mono uppercase tracking-telemetry text-[10px] font-semibold border ${
-                generated === "test"
-                  ? "border-fg-primary text-fg-primary bg-raised"
-                  : "border-edge text-fg-secondary hover:text-fg-primary"
-              }`}
-            >
-              TEST
-            </button>
-            <button
-              onClick={() => setGenerated("all")}
-              className={`px-2 py-1 font-mono uppercase tracking-telemetry text-[10px] font-semibold border ${
-                generated === "all"
-                  ? "border-fg-primary text-fg-primary bg-raised"
-                  : "border-edge text-fg-secondary hover:text-fg-primary"
-              }`}
-            >
-              ALL
-            </button>
-          </div>
+        <div className="flex flex-wrap gap-1.5">
+          {LIFECYCLE_FILTERS.map((f) => (
+            <FilterPill
+              key={f.key}
+              active={lifecycle === f.key}
+              onClick={() => setLifecycle(f.key)}
+              color={f.color}
+              label={f.label}
+              count={
+                f.key === "all"
+                  ? lifecycleCounts.all
+                  : lifecycleCounts[f.key]
+              }
+            />
+          ))}
         </div>
       </Panel>
 
-      <Panel
-        title="FILTER / STATUS"
-        subtitle={status ? `// ${status}` : "// all"}
-        right={
-          status && (
+      <Panel title="FILTER / ORIGIN" subtitle={`// ${generated}`}>
+        <div className="flex items-center gap-1.5">
+          <span className="label-tel">ORIGIN:</span>
+          {["human", "system", "test", "all"].map((g) => (
             <button
-              onClick={() => setStatus("")}
-              className="font-mono uppercase tracking-telemetry text-[11px] font-semibold text-fg-secondary hover:text-fg-primary"
+              key={g}
+              onClick={() => setGenerated(g)}
+              className={`px-2 py-1 font-mono uppercase tracking-telemetry text-[10px] font-semibold border ${
+                generated === g
+                  ? "border-fg-primary text-fg-primary bg-raised"
+                  : "border-edge text-fg-secondary hover:text-fg-primary"
+              }`}
             >
-              CLEAR ×
+              {g.toUpperCase()}
             </button>
-          )
-        }
-      >
-        <div className="flex flex-wrap gap-1.5">
-          <FilterPill
-            active={status === ""}
-            onClick={() => setStatus("")}
-            color="#EAEAEA"
-            label="ALL"
-          />
-          {ALL_STATUSES.map((s) => (
-            <StatusPill
-              key={s}
-              status={s}
-              active={status === s}
-              onClick={() => setStatus(status === s ? "" : s)}
-              count={statusCounts[s]}
-            />
           ))}
         </div>
       </Panel>
@@ -380,101 +569,108 @@ export default function WorkItemList() {
             <table className="min-w-full border-collapse">
               <thead>
                 <tr className="border-b border-edge text-left">
-                  <th className="label-tel px-3 py-2 w-[80px]">ID</th>
-                  <th className="label-tel px-3 py-2 w-[110px]">TYPE</th>
+                  <th className="label-tel px-3 py-2 w-[70px]">ID</th>
+                  <th className="label-tel px-3 py-2 w-[100px]">TYPE</th>
                   <th className="label-tel px-3 py-2">TITLE</th>
-                  <th className="label-tel px-3 py-2 w-[140px]">STATUS</th>
-                  <th className="label-tel px-3 py-2 w-[180px]">DEBATE</th>
-                  <th className="label-tel px-3 py-2 w-[90px] text-right">APPRV</th>
+                  <th className="label-tel px-3 py-2 w-[150px]">WORK STATUS</th>
+                  <th className="label-tel px-3 py-2 w-[220px]">DEBATE</th>
+                  <th className="label-tel px-3 py-2 w-[140px]">IMPLEMENTATION</th>
+                  <th className="label-tel px-3 py-2 w-[210px]">REVIEW / PR</th>
+                  <th className="label-tel px-3 py-2 w-[160px]">NEXT ACTION</th>
                 </tr>
               </thead>
               <tbody>
                 {loading &&
                   Array.from({ length: 5 }).map((_, i) => (
-                    <SkeletonRow key={i} cols={6} />
+                    <SkeletonRow key={i} cols={8} />
                   ))}
                 {!loading &&
-                  filtered.map((item) => (
-                    <tr
-                      key={item.id}
-                      className="border-b border-edge/60 hover:bg-raised transition-colors group"
-                    >
-                      <td className="px-3 py-2.5 font-mono text-xs text-fg-muted tabular-nums">
-                        #{String(item.id).padStart(4, "0")}
-                      </td>
-                      <td className="px-3 py-2.5">
-                        <TypeBadge type={item.type} />
-                      </td>
-                      <td className="px-3 py-2.5">
-                        <Link
-                          to={`/work-items/${item.id}`}
-                          className="text-fg-primary group-hover:underline decoration-fg-primary/40 underline-offset-4"
-                        >
-                          {item.title}
-                        </Link>
-                        {item.body && (
-                          <p className="text-xs text-fg-muted mt-0.5 line-clamp-1">
-                            {item.body}
-                          </p>
-                        )}
-                        <div className="flex gap-1 mt-1 flex-wrap">
-                          {item.archived && (
-                            <span
-                              className="inline-flex items-center gap-1 border px-1 py-0.5 text-[9px] font-mono uppercase tracking-telemetry font-semibold"
-                              style={{
-                                color: "#8A8A8A",
-                                borderColor: "#8A8A8A55",
-                                backgroundColor: "#8A8A8A14",
-                              }}
-                            >
-                              ARCHIVED
-                            </span>
+                  filtered.map((item) => {
+                    const state = item.effective_state || item.status || "";
+                    const isParked =
+                      state === "archived" || state === "rejected";
+                    return (
+                      <tr
+                        key={item.id}
+                        className={`border-b border-edge/60 hover:bg-raised transition-colors group ${
+                          isParked ? "opacity-60" : ""
+                        }`}
+                      >
+                        <td className="px-3 py-2.5 font-mono text-xs text-fg-muted tabular-nums">
+                          #{String(item.id).padStart(4, "0")}
+                        </td>
+                        <td className="px-3 py-2.5">
+                          <TypeBadge type={item.type} />
+                        </td>
+                        <td className="px-3 py-2.5">
+                          <Link
+                            to={`/work-items/${item.id}`}
+                            className="text-fg-primary group-hover:underline decoration-fg-primary/40 underline-offset-4"
+                          >
+                            {item.title}
+                          </Link>
+                          {item.body && (
+                            <p className="text-xs text-fg-muted mt-0.5 line-clamp-1">
+                              {item.body}
+                            </p>
                           )}
-                          {item.is_system_generated && (
-                            <span
-                              className="inline-flex items-center gap-1 border px-1 py-0.5 text-[9px] font-mono uppercase tracking-telemetry font-semibold"
-                              style={{
-                                color: "#A855F7",
-                                borderColor: "#A855F755",
-                                backgroundColor: "#A855F714",
-                              }}
-                            >
-                              SYSTEM
-                            </span>
-                          )}
-                          {item.is_test_item && (
-                            <span
-                              className="inline-flex items-center gap-1 border px-1 py-0.5 text-[9px] font-mono uppercase tracking-telemetry font-semibold"
-                              style={{
-                                color: "#F59E0B",
-                                borderColor: "#F59E0B55",
-                                backgroundColor: "#F59E0B14",
-                              }}
-                            >
-                              TEST
-                            </span>
-                          )}
-                        </div>
-                      </td>
-                      <td className="px-3 py-2.5">
-                        <StatusBadge status={item.effective_state || item.status} />
-                      </td>
-                      <td className="px-3 py-2.5">
-                        <DebateCell item={item} />
-                      </td>
-                      <td className="px-3 py-2.5 text-right">
-                        {item.approved_by_operator ? (
-                          <span className="font-mono text-[10px] tracking-telemetry text-st-completed">
-                            ✓ OK
-                          </span>
-                        ) : (
-                          <span className="font-mono text-[10px] tracking-telemetry text-fg-muted">
-                            —
-                          </span>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
+                          <div className="flex gap-1 mt-1 flex-wrap">
+                            {item.archived && (
+                              <span
+                                className="inline-flex items-center gap-1 border px-1 py-0.5 text-[9px] font-mono uppercase tracking-telemetry font-semibold"
+                                style={{
+                                  color: "#8A8A8A",
+                                  borderColor: "#8A8A8A55",
+                                  backgroundColor: "#8A8A8A14",
+                                }}
+                              >
+                                ARCHIVED
+                              </span>
+                            )}
+                            {item.is_system_generated && (
+                              <span
+                                className="inline-flex items-center gap-1 border px-1 py-0.5 text-[9px] font-mono uppercase tracking-telemetry font-semibold"
+                                style={{
+                                  color: "#A855F7",
+                                  borderColor: "#A855F755",
+                                  backgroundColor: "#A855F714",
+                                }}
+                              >
+                                SYSTEM
+                              </span>
+                            )}
+                            {item.is_test_item && (
+                              <span
+                                className="inline-flex items-center gap-1 border px-1 py-0.5 text-[9px] font-mono uppercase tracking-telemetry font-semibold"
+                                style={{
+                                  color: "#F59E0B",
+                                  borderColor: "#F59E0B55",
+                                  backgroundColor: "#F59E0B14",
+                                }}
+                              >
+                                TEST
+                              </span>
+                            )}
+                          </div>
+                        </td>
+                        <td className="px-3 py-2.5">
+                          <StatusBadge status={state} />
+                        </td>
+                        <td className="px-3 py-2.5">
+                          <DebateCell item={item} />
+                        </td>
+                        <td className="px-3 py-2.5">
+                          <ImplementationCell item={item} />
+                        </td>
+                        <td className="px-3 py-2.5">
+                          <ReviewCell item={item} />
+                        </td>
+                        <td className="px-3 py-2.5">
+                          <NextActionCell item={item} />
+                        </td>
+                      </tr>
+                    );
+                  })}
               </tbody>
             </table>
           </div>
