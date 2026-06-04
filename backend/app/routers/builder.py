@@ -613,12 +613,13 @@ def _create_builder_task_locked(
         builder_task.target_repo = target_worktree
         builder_task.generated_prompt_snapshot = prompt_body
         db.commit()
-        db.refresh(builder_task)
         # Hermes card exists, BuilderTask row points at it, the
         # commit returned: from here on the row is the live record
-        # of a live card. Any exception below must NOT roll the
-        # row back.
+        # of a live card. Flip ``finalized`` BEFORE ``db.refresh``
+        # so a transient refresh error cannot trigger
+        # ``_rollback_stub`` and DELETE the live row.
         finalized = True
+        db.refresh(builder_task)
 
         # Backfill the lock's task_id now that we have the Hermes ID.
         if acquired_lock is not None and hermes_result.get("task_id"):
