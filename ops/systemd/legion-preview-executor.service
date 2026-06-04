@@ -32,14 +32,18 @@ StandardOutput=append:/var/log/legion-preview-executor.log
 StandardError=append:/var/log/legion-preview-executor.log
 
 # Security hardening. The executor must be able to:
-#   * write inside /srv/repo (git checkout)
+#   * write inside /srv/repo (git checkout — legacy single-app layout)
+#   * write inside /srv/worktrees (per-app git worktrees; required by
+#     LEGION_EXECUTOR_ALLOWED_REPO_ROOTS entries such as
+#     /srv/worktrees/legion-dashboard so operators can onboard new
+#     apps without editing this unit)
 #   * talk to /var/run/docker.sock (docker compose)
 #   * append to its own log file
 # Anything else is read-only.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/srv/repo /var/log /var/run/docker.sock
+ReadWritePaths=/srv/repo /srv/worktrees /var/log /var/run/docker.sock
 PrivateTmp=true
 
 # Resource limits — the executor itself is small; docker compose does
