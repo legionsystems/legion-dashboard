@@ -388,15 +388,15 @@ export default function WorkItemList() {
       .catch(() => {});
   }, []);
 
-  // Server-side ``view`` param maps from the lifecycle bucket: PARKED and ALL
-  // need archived rows, everything else is restricted to non-archived.
-  const serverView =
-    lifecycle === "parked" || lifecycle === "all" ? "all" : "active";
-
+  // Always fetch the full set (including archived/parked rows) so the
+  // lifecycle pill counts and the ``ALL`` filter are accurate regardless of
+  // which bucket is currently selected. Client-side bucketing then narrows
+  // the rendered list. Work item counts are small enough that this is
+  // cheaper than juggling separate per-bucket count queries.
   useEffect(() => {
     const params = new URLSearchParams();
     if (type) params.set("type", type);
-    if (serverView) params.set("view", serverView);
+    params.set("view", "all");
     if (generated) params.set("generated", generated);
     if (app) params.set("app", app);
     const qs = params.toString();
@@ -414,7 +414,7 @@ export default function WorkItemList() {
     return () => {
       cancelled = true;
     };
-  }, [type, serverView, generated, app]);
+  }, [type, generated, app]);
 
   // Client-side projection of the loaded items into lifecycle buckets. ACTIVE
   // is the residual — any state not in BLOCKED/REVIEW_REQUIRED/PARKED/COMPLETED
