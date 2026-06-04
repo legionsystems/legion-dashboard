@@ -662,7 +662,7 @@ def build_implementation_card_prompt(
         "Verify the worktree is the dedicated task worktree:\n"
         "  expected_topdir=$(git rev-parse --show-toplevel)\n"
         f"  if [ \"$expected_topdir\" != \"{effective_target_repo}\" ]; then\n"
-        "    echo \"FAIL: wrong worktree (expected {effective_target_repo}, got $expected_topdir)\" >&2\n"
+        f"    echo \"FAIL: wrong worktree (expected {effective_target_repo}, got $expected_topdir)\" >&2\n"
         "    exit 1\n"
         "  fi\n"
         f"  expected_branch={feature_branch or '<see WORKTREE METADATA>'}\n"

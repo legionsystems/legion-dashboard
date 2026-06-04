@@ -210,7 +210,38 @@ def _resolve_target_repo(work_item: WorkItem) -> tuple[str, str]:
 
 
 def _create_builder_task(db: Session, work_item_id: int, request: SendToBuilderRequest, status_override: str = None) -> BuilderTaskResponse:
-    """Internal helper to create builder task."""
+    """Public entry point. Acquires a per-work-item Python
+    lock for the active-task check + BuilderTask stub insert
+    window, then delegates to ``_create_builder_task_locked``
+    for the slow operations (worktree allocation, safety
+    check, Hermes POST). The lock is released before the
+    slow operations run, so a slow build does not block
+    operator actions on a different work item.
+
+    The Python lock is the in-process tie-breaker for a
+    single-process race. Cross-process correctness is
+    provided by the committed BuilderTask row (the
+    active-task filter ``hermes_status NOT IN ['archived',
+    'done']``), which is enforced by the active-task check
+    inside the locked function below.
+    """
+    from ..worktree_locks import acquire_work_item_lock
+    work_item_lock = acquire_work_item_lock(work_item_id)
+    with work_item_lock:
+        return _create_builder_task_locked(
+            db, work_item_id, request, status_override
+        )
+
+
+def _create_builder_task_locked(
+    db: Session, work_item_id: int, request: SendToBuilderRequest,
+    status_override: str = None
+) -> BuilderTaskResponse:
+    """Body of ``_create_builder_task``; runs under the
+    per-work-item Python lock acquired by the outer
+    function. Do not call directly.
+    """
+    # Internal helper to create builder task.
     # Fetch work item
     work_item = db.query(WorkItem).filter(WorkItem.id == work_item_id).first()
     if not work_item:

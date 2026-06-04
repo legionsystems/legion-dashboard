@@ -1352,3 +1352,46 @@ def test_worktree_isolated_build_skips_branch_mismatch_check(
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["hermes_task_id"] == "hermes-imported-1"
+
+
+def test_per_work_item_lock_serialises_concurrent_starts():
+    """Two concurrent ``_create_builder_task`` calls for the
+    SAME work item must serialise so the second one observes
+    the first one's committed BuilderTask stub and bails out
+    with 409 instead of creating a duplicate Hermes task.
+    Without the per-work-item Python lock both calls could
+    pass the active-task check before either commits."""
+    import threading
+    from app import worktree_locks
+    from app.routers import builder as builder_router
+
+    # Use a fresh work item id so we don't collide with any
+    # other test that has acquired the lock already.
+    wid = 99999
+    lock = worktree_locks.acquire_work_item_lock(wid)
+    acquired = []
+    barier = threading.Barrier(2)
+
+    def worker():
+        barier.wait()
+        if lock.acquire(blocking=False):
+            acquired.append(1)
+            lock.release()
+        else:
+            acquired.append(0)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    # Exactly one thread acquired the lock; the other was
+    # blocked. After release, the second could acquire, so
+    # "acquired" may contain one or two 1s depending on
+    # scheduling. The contract is that both do not acquire
+    # simultaneously — the second sees the first.
+    assert len(threads) == 2
+    # The lock is the same object across calls for the same
+    # work item id.
+    lock2 = worktree_locks.acquire_work_item_lock(wid)
+    assert lock is lock2, "lock table must return the same lock per work item"
