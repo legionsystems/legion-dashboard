@@ -43,16 +43,22 @@ REPO_GIT_DIRS=(
 APP_UID=999
 APP_GID=999
 
-# Return 0 if the app user (uid=$APP_UID, gid=$APP_GID) can write
-# to $1 based on the directory's owner uid/gid and mode bits.
-# Accepts any combination where the relevant write bit is set:
-#   - other-write set        -> anyone can write
-#   - owner is APP_UID, ow-w -> app user can write as owner
-#   - group is APP_GID, gr-w -> app user can write through group
+# Return 0 if the app user (uid=$APP_UID, gid=$APP_GID) can both
+# WRITE and TRAVERSE $1. On POSIX, the write bit alone is not
+# sufficient to create entries inside a directory — the matching
+# execute bit is also required (write to mutate the directory entry
+# table, execute to traverse and look up names). A path with mode
+# 0666 is "writable" by a write-bit-only check but cannot accept
+# ``mkdir`` calls; for the dashboard's per-worktree creation we
+# need both, so this helper requires write+execute in the scope
+# that matches the app user's uid/gid:
+#   - other w+x set                  -> anyone can write+traverse
+#   - owner is APP_UID, owner w+x    -> app user as owner
+#   - group is APP_GID, group w+x    -> app user via group
 # A directory like root:999 mode 0775 is therefore accepted; the
-# previous logic that required exact 999:999 ownership rejected
-# this valid configuration.
-_app_user_can_write() {
+# 0666 / 0644 "writable on paper but unusable in practice" shapes
+# are correctly rejected.
+_writable_traversable() {
   local path="$1"
   local owner_uid owner_gid mode mode_oct
   owner_uid=$(stat -c '%u' "$path")
@@ -62,17 +68,17 @@ _app_user_can_write() {
   # bash's bitwise tests below see the same bits ``stat -c %a``
   # reports.
   mode_oct=$((8#${mode}))
-  # Other-writable: app user can write regardless of ownership.
-  if [ $(( mode_oct & 0002 )) -ne 0 ]; then
+  # Other w+x: app user can write+traverse regardless of ownership.
+  if (( (mode_oct & 0003) == 0003 )); then
     return 0
   fi
-  # Owner is the app uid AND owner-writable.
-  if [ "$owner_uid" = "$APP_UID" ] && [ $(( mode_oct & 0200 )) -ne 0 ]; then
+  # Owner is the app uid AND owner w+x set.
+  if [ "$owner_uid" = "$APP_UID" ] && (( (mode_oct & 0300) == 0300 )); then
     return 0
   fi
-  # Group is the app gid AND group-writable. This is the common
-  # "root:999 0775" case the prior preflight wrongly rejected.
-  if [ "$owner_gid" = "$APP_GID" ] && [ $(( mode_oct & 0020 )) -ne 0 ]; then
+  # Group is the app gid AND group w+x set. The common
+  # "root:999 0775" case satisfies this clause.
+  if [ "$owner_gid" = "$APP_GID" ] && (( (mode_oct & 0030) == 0030 )); then
     return 0
   fi
   return 1
@@ -104,7 +110,7 @@ if [ "$(id -u)" -eq 0 ]; then
   chmod 0775 "$WT_DIR"
 fi
 
-if ! _app_user_can_write "$WT_DIR"; then
+if ! _writable_traversable "$WT_DIR"; then
   echo "[preflight] FAIL: $WT_DIR is not writable by the container app user (uid=$APP_UID gid=$APP_GID); $(_describe "$WT_DIR")"
   echo "          Re-run this preflight as root, or chown manually so the"
   echo "          app user can write — e.g."
@@ -135,7 +141,7 @@ for git_dir in "${REPO_GIT_DIRS[@]}"; do
     # can create .git/worktrees/ if it does not exist yet.
     chmod g+w "$git_dir"
   fi
-  if ! _app_user_can_write "$git_dir"; then
+  if ! _writable_traversable "$git_dir"; then
     echo "[preflight] FAIL: $git_dir is not writable by the container app user (uid=$APP_UID gid=$APP_GID); $(_describe "$git_dir")"
     echo "          Without write access here, ``git worktree add`` in the dashboard"
     echo "          container cannot create .git/worktrees/<name>/ and Start Build will"
@@ -146,6 +152,30 @@ for git_dir in "${REPO_GIT_DIRS[@]}"; do
     continue
   fi
   echo "[preflight] OK: $git_dir is writable by app user ($(_describe "$git_dir"))"
+
+  # P2: when .git/worktrees already exists, ``git worktree add``
+  # writes new files DIRECTLY into it. Even if the top-level
+  # .git is writable+traversable, a mode-restricted or
+  # wrong-owner worktrees/ subdir blocks creation (the recursive
+  # chown above normalises ownership; this check is the
+  # non-root verification path). Skipped silently when the
+  # subdir does not yet exist — git creates it on first use,
+  # inheriting the (now-corrected) parent ownership.
+  git_worktrees_dir="${git_dir}/worktrees"
+  if [ -d "$git_worktrees_dir" ]; then
+    if ! _writable_traversable "$git_worktrees_dir"; then
+      echo "[preflight] FAIL: $git_worktrees_dir is not writable by the container app user (uid=$APP_UID gid=$APP_GID); $(_describe "$git_worktrees_dir")"
+      echo "          ``git worktree add`` writes per-worktree metadata directly"
+      echo "          under .git/worktrees/<name>/. With this subdir restricted, the"
+      echo "          top-level .git writability check passes but the worktree"
+      echo "          create still fails. Re-run this preflight as root, or chown"
+      echo "          manually:"
+      echo "             sudo chown -R ${APP_UID}:${APP_GID} $git_worktrees_dir"
+      git_fail=1
+      continue
+    fi
+    echo "[preflight] OK: $git_worktrees_dir is writable by app user ($(_describe "$git_worktrees_dir"))"
+  fi
 done
 
 if [ "$git_fail" -ne 0 ]; then

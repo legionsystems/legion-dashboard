@@ -40,10 +40,21 @@ The preflight (step 1 below) handles this. When run as root, it
 `chown -R 999:999 /srv/repo/<slug>/.git` and `chmod g+w` the
 top-level `.git/` so the app user can write. When not run as
 root, it verifies the existing owner/mode lets uid 999 / gid 999
-write — using a mode-bit check that accepts owner-write,
-group-write, or other-write as valid (e.g. `root:999 0775` is
-fine, even though neither the owner uid nor the owner gid is
-999).
+write AND traverse — POSIX requires both bits to create entries
+inside a directory, so the mode-bit check requires write+execute
+in the relevant scope (owner w+x, group w+x, or other w+x). A
+`root:999 0775` configuration qualifies via group, even though
+neither the owner uid nor the owner gid is 999. A
+write-bit-only directory like `0666` is correctly rejected — it
+would pass a naive write-bit check but `git worktree add` would
+still fail.
+
+The preflight also verifies the `.git/worktrees/` subdirectory
+when it already exists. `git worktree add` writes new files
+directly into that subdir, so an earlier root-owned worktree
+operation that left the subdir mode-restricted would block the
+in-container `git worktree add` even when the top-level `.git/`
+check passes.
 
 ## 1. Host-side preflight (run BEFORE `docker compose build`)
 
@@ -56,9 +67,12 @@ Run on the host that owns the bind-mount source. This:
   `.git/` directory and `chmod g+w` the top-level `.git/` so the
   container app user can create per-worktree metadata under
   `.git/worktrees/<name>/`;
-* verifies each `.git/` is writable by uid 999 / gid 999 using a
-  mode-bit check (owner-write, group-write, or other-write all
-  qualify);
+* verifies each `.git/` is writable+traversable by uid 999 /
+  gid 999 using a mode-bit check that requires both the write and
+  execute bits (owner w+x, group w+x, or other w+x all qualify);
+* verifies the `.git/worktrees/` subdirectory the same way when
+  it already exists, since `git worktree add` writes directly
+  under it;
 * exits 0 on success, non-zero with a clear `FAIL: ...` line on
   unrecoverable failure.
 
@@ -68,11 +82,13 @@ Idempotent.
 sudo /srv/repo/legion-dashboard/scripts/preflight-legion-worktrees.sh
 ```
 
-Expected output (truncated):
+Expected output (truncated; the `.git/worktrees` lines appear
+only when that subdirectory already exists on the host):
 
 ```
 [preflight] OK: /srv/worktrees is writable by app user (owner=999:999 mode=775)
 [preflight] OK: /srv/repo/legion-dashboard/.git is writable by app user (owner=999:999 mode=775)
+[preflight] OK: /srv/repo/legion-dashboard/.git/worktrees is writable by app user (owner=999:999 mode=775)
 [preflight] OK: all checks passed; the container app user can create per-task worktrees
 ```
 

@@ -1975,20 +1975,36 @@ def test_preflight_chowns_known_repo_git_dirs_to_app_user():
 
 
 def test_preflight_uses_mode_bit_writability_check():
-    """The preflight must accept any directory writable by the app
-    user (uid 999, gid 999) regardless of whether the owner uid or
-    gid is exactly 999. The valid ``root:999 0775`` configuration
-    must pass, not be rejected by an exact-ownership check."""
+    """The preflight must accept any directory writable+traversable
+    by the app user (uid 999, gid 999) regardless of whether the
+    owner uid or gid is exactly 999. The valid ``root:999 0775``
+    configuration must pass, not be rejected by an exact-ownership
+    check. POSIX requires BOTH the write and execute bits to create
+    or traverse a directory, so the helper checks write+execute,
+    not write alone — the literal bitmasks for w+x in each scope
+    (0300 owner, 0030 group, 0003 other) must appear in the script."""
     script = _read_preflight_script()
-    # Helper function name.
-    assert "_app_user_can_write" in script, script
-    # The check inspects all three write bits (owner=0200,
-    # group=0020, other=0002). Pinning the literal bitmasks
-    # guarantees the check considers each scope rather than only
-    # one or two of them.
-    assert "0200" in script, script
-    assert "0020" in script, script
-    assert "0002" in script, script
+    # Helper function name (renamed for the P2 consolidation to
+    # reflect the write+traverse semantics).
+    assert "_writable_traversable" in script, script
+    # The legacy single-write-bit helper must be fully gone — a
+    # straggler call site would silently accept a 0666 directory
+    # again.
+    assert "_app_user_can_write" not in script, script
+    # Pinning the literal write+execute bitmasks for owner (0300),
+    # group (0030) and other (0003) guarantees the helper checks
+    # both bits in every scope rather than only one.
+    assert "0300" in script, script
+    assert "0030" in script, script
+    assert "0003" in script, script
+    # And the prior write-bit-only masks (0200, 0020, 0002) must
+    # NOT appear; otherwise a stale check path would silently
+    # accept a directory writable on paper but missing the
+    # execute bit (e.g. mode 0666) and the next ``git worktree
+    # add`` would fail with EACCES.
+    assert "0200" not in script, script
+    assert "0020" not in script, script
+    assert "0002" not in script, script
     # The check uses bash arithmetic on the octal mode string, so
     # ``8#`` is the conversion. The previous "exact 999:999 or
     # mode ends in 7" logic was wrong; the new check must read the
@@ -2005,10 +2021,29 @@ def test_preflight_verifies_writability_of_repo_git_dirs():
     # We assert the helper name is called against ``$git_dir`` (the
     # loop variable from the new script) so the check runs against
     # the repo dir, not just /srv/worktrees.
-    assert '_app_user_can_write "$git_dir"' in script, script
+    assert '_writable_traversable "$git_dir"' in script, script
     # And the failure message names the .git dir and the app uid/gid
     # so the operator can act on it.
     assert "not writable by the container app user" in script, script
+
+
+def test_preflight_verifies_writability_of_existing_git_worktrees_subdir():
+    """P2 regression: when ``.git/worktrees`` already exists on the
+    host (from a prior root-owned operation), the top-level ``.git``
+    writability check can pass while ``git worktree add`` still
+    fails creating ``.git/worktrees/<name>/`` because the
+    sub-directory itself is mode-restricted or wrong-owner. The
+    preflight must invoke the same writable-traversable helper
+    against ``$git_dir/worktrees`` whenever that subdirectory
+    exists."""
+    script = _read_preflight_script()
+    # The .git/worktrees subdir is checked conditionally — only
+    # when it already exists, because git itself creates it on
+    # first use otherwise. Pin both the `if [ -d ... ]` guard and
+    # the helper invocation against the worktrees subdir.
+    assert 'git_worktrees_dir="${git_dir}/worktrees"' in script, script
+    assert 'if [ -d "$git_worktrees_dir" ]' in script, script
+    assert '_writable_traversable "$git_worktrees_dir"' in script, script
 
 
 def test_docker_compose_app_service_sets_legion_worktree_create_tool_env():
