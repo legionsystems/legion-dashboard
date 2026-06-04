@@ -314,9 +314,14 @@ export default function Settings() {
             Configure debate execution and model providers
           </p>
         </div>
-        <Button onClick={() => navigate("/settings/model-providers")} variant="secondary" size="sm">
-          Manage Model Providers
-        </Button>
+        <div className="flex gap-2">
+          <Button onClick={() => navigate("/settings/executor-allowlist")} variant="secondary" size="sm">
+            Executor Allowlist
+          </Button>
+          <Button onClick={() => navigate("/settings/model-providers")} variant="secondary" size="sm">
+            Manage Model Providers
+          </Button>
+        </div>
       </div>
 
       {error && (
