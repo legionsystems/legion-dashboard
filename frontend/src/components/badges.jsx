@@ -81,11 +81,15 @@ export function sourceMeta(source) {
   return SOURCE_META[source] || { color: "#5A5A5A", label: (source || "—").toUpperCase() };
 }
 
-// The set of raw Kanban statuses operators can pick on the Work Item form.
-// Excludes lifecycle effective_state values (those are derived, not editable)
-// and runtime app statuses (``running``/``stopped``/``unknown``).
+// The set of raw Kanban statuses the form's status picker exposes. Includes
+// every value the backend can persist into ``WorkItem.status`` so an existing
+// item never opens with an unselectable status value. ``debated`` is written
+// by the debate executor (backend/app/debate_executor.py); ``certified`` is
+// surfaced as a snapshot label by older flows. Excludes runtime app statuses
+// (``running``/``stopped``/``unknown``) and the derived lifecycle states.
 const _KANBAN_STATUSES = [
   "draft",
+  "debated",
   "approved",
   "active",
   "review_needed",
@@ -93,6 +97,7 @@ const _KANBAN_STATUSES = [
   "ready_for_merge",
   "merged",
   "blocked",
+  "certified",
   "completed",
 ];
 export const ALL_STATUSES = _KANBAN_STATUSES;
