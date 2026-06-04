@@ -2,8 +2,17 @@
 
 This module is the thin glue between :mod:`app.worktree_paths` (pure
 helpers) and the in-image tool ``legion-worktree-create`` (which
-runs the actual ``git worktree add`` because the dashboard
-container mounts ``/srv/repo`` read-only).
+runs the actual ``git worktree add`` inside the dashboard
+container).
+
+The dashboard container bind-mounts ``/srv/repo`` read-write so the
+container can write the per-worktree metadata that ``git worktree
+add`` deposits in
+``<shared_repo>/.git/worktrees/<name>/``. A read-only mount blocks
+that write, and ``Start Build`` fails before the orchestrator has
+a chance to surface the underlying error. The mount is rw on the
+app service only — every other service still mounts ``/srv/repo``
+read-only because they never run ``git worktree add``.
 
 The tool location is resolved at import time from the
 ``LEGION_WORKTREE_CREATE_TOOL`` environment variable; if unset, it

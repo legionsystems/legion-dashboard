@@ -1912,6 +1912,36 @@ def test_docker_compose_app_service_mounts_srv_worktrees_read_write():
         )
 
 
+def test_docker_compose_app_service_mounts_srv_repo_read_write():
+    """The app service must bind-mount ``/srv/repo`` read-write so the
+    container can write per-worktree metadata under
+    ``<shared_repo>/.git/worktrees/<name>/`` when ``git worktree
+    add`` runs. With ``:ro`` the worktree-create call fails and
+    ``Start Build`` 409s before the orchestrator can surface the
+    real error. The mount must NOT carry the ``:ro`` suffix.
+
+    This is the app service only — other services (e.g.
+    debate-worker) still mount ``/srv/repo`` read-only because they
+    never run ``git worktree add`` and benefit from the extra
+    isolation."""
+    compose = _load_compose_yaml()
+    app_volumes = compose["services"]["app"]["volumes"]
+    matches = [
+        v for v in app_volumes
+        if isinstance(v, str) and v.startswith("/srv/repo:/srv/repo")
+    ]
+    assert matches, (
+        f"app service is missing /srv/repo bind mount; "
+        f"got volumes={app_volumes!r}"
+    )
+    for entry in matches:
+        assert not entry.endswith(":ro"), (
+            f"/srv/repo mount must be read-write (no :ro) for the app "
+            f"service so git worktree add can write .git/worktrees/ "
+            f"metadata; got {entry!r}"
+        )
+
+
 def test_docker_compose_app_service_sets_legion_worktree_create_tool_env():
     """The app service must set ``LEGION_WORKTREE_CREATE_TOOL`` to
     the in-image path so the orchestrator resolves to the

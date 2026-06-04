@@ -23,7 +23,7 @@ services:
       db:
         condition: service_healthy
     volumes:
-      - /srv/repo:/srv/repo:ro
+      - /srv/repo:/srv/repo
       - /srv/worktrees:/srv/worktrees
       - /var/run/docker.sock:/var/run/docker.sock
       - /srv/repo/legion-dashboard/.hermes-config.yaml:/app/.hermes/config.yaml:ro  # Hermes config (copied for container access)
