@@ -31,6 +31,18 @@ from app.routers import executor_allowlist as allowlist_router
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _isolate_executor_env(monkeypatch):
+    """Clear ``LEGION_EXECUTOR_ALLOWED_REPO_ROOTS`` for every test in this
+    module. On operator hosts this variable is the documented way to
+    override the executor's allowlist, so it may legitimately be exported
+    in the runner's environment. The tests in this file own the override
+    state explicitly — those that need it active call
+    ``monkeypatch.setenv`` themselves — so make the default state
+    deterministic regardless of who launches pytest."""
+    monkeypatch.delenv("LEGION_EXECUTOR_ALLOWED_REPO_ROOTS", raising=False)
+
+
 @pytest.fixture()
 def config_path(tmp_path, monkeypatch):
     """Point the apply-endpoint at a tmp file so the test suite never
