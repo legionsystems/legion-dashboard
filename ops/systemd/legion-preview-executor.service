@@ -36,14 +36,18 @@ StandardError=append:/var/log/legion-preview-executor.log
 #   * write inside /srv/worktrees (per-app git worktrees; required by
 #     LEGION_EXECUTOR_ALLOWED_REPO_ROOTS entries such as
 #     /srv/worktrees/legion-dashboard so operators can onboard new
-#     apps without editing this unit)
+#     apps without editing this unit). The leading ``-`` marks the
+#     path optional so legacy hosts that have not yet provisioned
+#     /srv/worktrees can still start the service; once the directory
+#     exists systemd adds it to the writable set on the next restart.
 #   * talk to /var/run/docker.sock (docker compose)
 #   * append to its own log file
 # Anything else is read-only.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/srv/repo /srv/worktrees /var/log /var/run/docker.sock
+ReadWritePaths=/srv/repo /var/log /var/run/docker.sock
+ReadWritePaths=-/srv/worktrees
 PrivateTmp=true
 
 # Resource limits — the executor itself is small; docker compose does
