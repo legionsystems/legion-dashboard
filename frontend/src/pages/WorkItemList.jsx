@@ -96,7 +96,10 @@ const EXPLICIT_LIFECYCLE_BUCKETS = {
     "ready_for_merge",
   ]),
   parked: new Set(["archived", "rejected"]),
-  completed: new Set(["complete", "merged"]),
+  // Only ``complete`` is terminal-positive — ``merged`` still has an
+  // outstanding operator action (mark complete), so leave it in the residual
+  // ACTIVE bucket where it remains visible on the default queue.
+  completed: new Set(["complete"]),
 };
 
 function bucketFor(state) {
@@ -257,7 +260,11 @@ function ImplementationCell({ item }) {
       </span>
     );
   }
-  if (item.approved_by_operator && state !== "drafting") {
+  // READY TO BUILD only renders when the lifecycle is actually ``approved``
+  // — operator approval persists across later states (review_needed, blocked)
+  // and we don't want to advertise build readiness once the item has moved
+  // past that gate.
+  if (state === "approved") {
     return (
       <span
         className="font-mono uppercase tracking-telemetry text-[10px] font-semibold border px-1.5 py-0.5"
