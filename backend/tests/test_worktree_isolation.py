@@ -1597,3 +1597,166 @@ def test_second_start_build_for_same_work_item_sees_committed_stub(
     )
     assert len(rows) == 1, [r.hermes_task_id for r in rows]
     assert rows[0].hermes_task_id == "hermes-dup-1"
+
+
+def test_outer_wrapper_rolls_back_stub_when_prompt_generation_raises(
+    client, db_session, monkeypatch
+):
+    """Regression: when ``_generate_hermes_prompt`` raises an
+    unexpected exception (which sits between the repo-lock
+    acquire and the Hermes try/except), the catch-all wrapper
+    around the post-stub-commit section must roll back the
+    committed BuilderTask stub row and release the repo lock so
+    a fresh second start-build for the same work item is not
+    permanently blocked by the active-task check.
+
+    Without the outer wrapper, the stub row would stay
+    committed with ``hermes_status='creating'`` and every
+    subsequent start-build for the same work item would 409
+    with the active-builder-task error.
+    """
+    from app import preview_deploy
+    from app.models import BuilderTask, RepoLock, WorkItem
+    from app.routers import builder as builder_router
+    from tests.test_builder import (
+        _patch_target_repo,
+        _stub_executor,
+        _stub_hermes,
+    )
+
+    item = WorkItem(
+        type="task",
+        title="Prompt Builder Raises",
+        status="approved",
+        priority="medium",
+        source="operator",
+        approved_by_operator=True,
+        target_app="legion-dashboard",
+    )
+    db_session.add(item)
+    db_session.commit()
+    db_session.refresh(item)
+
+    _patch_target_repo(monkeypatch, "/srv/repo/legion-dashboard")
+    _stub_executor(
+        monkeypatch,
+        preview_deploy.ExecutorResponse(
+            success=True,
+            raw={
+                "success": True,
+                "action": "repo_safety_check",
+                "is_clean": True,
+                "dirty_files": [],
+                "staged_files": [],
+                "untracked_files": [],
+                "current_branch": (
+                    "feature/wi-{0}-prompt-builder-raises-t_000001".format(
+                        item.id
+                    )
+                ),
+                "current_commit": "d" * 40,
+                "blocker_code": None,
+                "blocker_message": None,
+            },
+        ),
+    )
+    _stub_hermes(monkeypatch, task_id="hermes-prompt-raise-recovery-1")
+
+    # Stub the worktree orchestrator so the test is deterministic
+    # and doesn't depend on the host ``legion-worktree-create``
+    # tool. The path/branch shape mirrors what the real
+    # orchestrator returns for this work item.
+    def _fake_worktree(db, work_item, builder_task_id=None):
+        path = (
+            f"/srv/worktrees/legion-dashboard/wi-{work_item.id}-"
+            f"prompt-builder-raises/t_{(builder_task_id or 0):06d}"
+        )
+        branch = (
+            f"feature/wi-{work_item.id}-prompt-builder-raises-"
+            f"t_{(builder_task_id or 0):06d}"
+        )
+        return path, branch, "main", {
+            "success": True,
+            "reused": False,
+            "base_ref": "main",
+        }
+
+    monkeypatch.setattr(
+        builder_router, "ensure_task_worktree", _fake_worktree
+    )
+
+    # Make the prompt builder raise on the first invocation, then
+    # fall back to the real implementation for the second
+    # start-build.
+    real_prompt = builder_router._generate_hermes_prompt
+    call_state = {"raised": False}
+
+    def _fake_prompt(**kwargs):
+        if not call_state["raised"]:
+            call_state["raised"] = True
+            raise RuntimeError("simulated prompt generation failure")
+        return real_prompt(**kwargs)
+
+    monkeypatch.setattr(
+        builder_router, "_generate_hermes_prompt", _fake_prompt
+    )
+
+    # Stop the TestClient from re-raising server exceptions so we
+    # observe the 5xx response the operator would see in
+    # production rather than the bare ``RuntimeError`` Starlette
+    # surfaces in debug mode. The flag lives on the underlying
+    # ``_TestClientTransport`` (not the TestClient itself), so we
+    # flip it on the transport directly. Restored implicitly by
+    # the fixture teardown (a fresh client is built per test).
+    client._transport.raise_server_exceptions = False
+
+    # First start-build: the prompt builder raises mid-flight.
+    # The outer wrapper rolls back the stub and re-raises; the
+    # unhandled RuntimeError surfaces as a 500.
+    first = client.post(
+        f"/api/builder/work-items/{item.id}/start-build", json={}
+    )
+    assert first.status_code >= 500, first.text
+
+    # The stub row must have been rolled back: zero BuilderTask
+    # rows for this work item exist.
+    rows = (
+        db_session.query(BuilderTask)
+        .filter(BuilderTask.work_item_id == item.id)
+        .all()
+    )
+    assert len(rows) == 0, [r.hermes_task_id for r in rows]
+
+    # The repo lock acquired before the prompt-gen failure must
+    # have been released so the second build is not pinned by a
+    # phantom lock.
+    active_locks = (
+        db_session.query(RepoLock)
+        .filter(RepoLock.repo_path == "/srv/repo/legion-dashboard")
+        .filter(RepoLock.lock_status == "active")
+        .count()
+    )
+    assert active_locks == 0, (
+        f"repo lock leaked after prompt-generation failure: "
+        f"{active_locks}"
+    )
+
+    # A fresh second start-build for the same work item sees no
+    # active task, generates the prompt successfully, and returns
+    # 200.
+    second = client.post(
+        f"/api/builder/work-items/{item.id}/start-build", json={}
+    )
+    assert second.status_code == 200, second.text
+    body = second.json()
+    assert body["hermes_task_id"] == "hermes-prompt-raise-recovery-1"
+
+    # Exactly one BuilderTask row exists after the recovery —
+    # the rolled-back stub from the first attempt is gone.
+    rows = (
+        db_session.query(BuilderTask)
+        .filter(BuilderTask.work_item_id == item.id)
+        .all()
+    )
+    assert len(rows) == 1, [r.hermes_task_id for r in rows]
+    assert rows[0].hermes_task_id == "hermes-prompt-raise-recovery-1"
