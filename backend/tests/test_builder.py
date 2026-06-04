@@ -128,10 +128,15 @@ def test_start_build_invokes_executor_safety_check_not_direct_git(
     )
     assert response.status_code == 200, response.text
 
-    # The executor was called for the safety check, with the resolved repo.
+    # The executor was called for the safety check. After
+    # worktree-isolation consolidation, the safety check inspects
+    # the task worktree path (the checkout the builder will
+    # operate in), not the shared operator/control repo.
     safety_calls = [c for c in executor_calls if c.get("action") == "repo_safety_check"]
     assert len(safety_calls) == 1
-    assert safety_calls[0]["repo_path"] == "/srv/repo/legion-dashboard"
+    assert safety_calls[0]["repo_path"] == (
+        f"/srv/worktrees/legion-dashboard/wi-{item.id}-start-build-candidate/t_000001"
+    )
 
     # The in-container direct inspector was never reached.
     assert direct_calls == []
@@ -277,7 +282,10 @@ def test_start_build_proceeds_when_executor_reports_clean(
     )
     assert response.status_code == 200, response.text
 
-    # Builder task created and lock acquired against the host-side worktree.
+    # Builder task created and lock acquired against the task
+    # worktree (post-consolidation: the safety check and the
+    # lock apply to the path the builder will operate in,
+    # not the shared operator/control repo).
     builder_tasks = (
         db_session.query(BuilderTask)
         .filter(BuilderTask.work_item_id == item.id)
@@ -288,11 +296,15 @@ def test_start_build_proceeds_when_executor_reports_clean(
 
     lock = (
         db_session.query(RepoLock)
-        .filter(RepoLock.repo_path == "/srv/repo/legion-dashboard")
+        .filter(
+            RepoLock.repo_path
+            == f"/srv/worktrees/legion-dashboard/wi-{item.id}-start-build-candidate/t_000001"
+        )
         .one()
     )
     assert lock.lock_status == "active"
-    # The lock recorded the branch/commit the executor reported — proves
-    # the dashboard trusts the host's view rather than the container's.
+    # The lock recorded the branch/commit the executor reported for
+    # the task worktree — proves the dashboard trusts the host's
+    # view of the path the builder will operate in.
     assert lock.branch_name == "feature/host-side-gate"
     assert lock.commit_sha == "d" * 40

@@ -242,27 +242,130 @@ def _create_builder_task(db: Session, work_item_id: int, request: SendToBuilderR
             detail=f"Active builder task already exists: {existing.hermes_task_id}"
         )
 
+    # Get latest completed debate run for this work item. Pulled
+    # up here so the BuilderTask stub row below can record the
+    # debate metadata before we get to the prompt-generation
+    # step.
+    from ..models import DebateRun
+    latest_debate = db.query(DebateRun).filter(
+        DebateRun.work_item_id == work_item_id,
+        DebateRun.status == "completed"
+    ).order_by(DebateRun.completed_at.desc()).first()
+
     # ------------------------------------------------------------------
-    # Repo safety gate (workflow slice 3): refuse to start a build when
-    # the target repo has uncommitted changes or is already locked by
-    # another in-flight build.
+    # Per-task worktree allocation. The implementation Kanban card
+    # body MUST point the builder at a dedicated worktree under
+    # ``/srv/worktrees/`` rather than the shared operator/control
+    # worktree, so we create (or reuse) the worktree BEFORE we
+    # run the safety gate. The gate then inspects the actual
+    # checkout the builder will operate in (the task worktree),
+    # not the shared repo the builder is about to leave.
+    #
+    # Per-attempt identity comes from the BuilderTask auto-increment
+    # id (allocated by ``db.add(...); db.flush()`` below). The DB
+    # autoincrement is the single source of truth for uniqueness:
+    # even if two worker retries for the same work item somehow
+    # both pass the active-task check (e.g. the previous attempt
+    # is already ``done``/``archived``), each gets a distinct
+    # ``builder_task.id``, a distinct worktree path, and a
+    # distinct feature branch. This solves retry/duplicate
+    # branch collision without a multi-user locking system.
     # ------------------------------------------------------------------
-    target_repo, repo_name = _resolve_target_repo(work_item)
+    mandatory_edits_for_record: list = []
+    if latest_debate is not None:
+        mandatory_edits_for_record = load_arbiter_mandatory_edits(
+            db, latest_debate
+        )
+    builder_task = BuilderTask(
+        work_item_id=work_item_id,
+        # Placeholder hermes_task_id — overwritten with the real
+        # value once _create_hermes_task() returns. Using a
+        # unique sentinel keeps the row visible in the
+        # active-task list while signalling "not yet handed off
+        # to Hermes" to any reader.
+        hermes_task_id=f"pending-{work_item_id}-{int(datetime.utcnow().timestamp())}",
+        hermes_board="legion-apps-build-queue",
+        hermes_status="creating",
+        hermes_assignee=request.hermes_assignee or "builder",
+        title=work_item.title,
+        target_app=work_item.target_app,
+        target_repo=None,
+        priority=request.priority or work_item.priority,
+        debate_run_id=latest_debate.id if latest_debate else None,
+        recommendation=latest_debate.final_recommendation if latest_debate else None,
+        implementation_readiness=latest_debate.implementation_readiness if latest_debate else None,
+        mandatory_edits_json=(
+            json.dumps(mandatory_edits_for_record)
+            if mandatory_edits_for_record
+            else None
+        ),
+    )
+    db.add(builder_task)
+    # Flush so the autoincrement id is populated. We do NOT commit
+    # yet — the row is still mutable, and we will not return it
+    # to the caller until after the worktree allocation, the
+    # safety check, the repo lock, the prompt generation, and
+    # the Hermes task creation all succeed.
+    db.flush()
+    db.refresh(builder_task)
+    attempt_id = builder_task.id
+    try:
+        (
+            target_worktree,
+            feature_branch,
+            chosen_base_ref,
+            _wt_result,
+        ) = ensure_task_worktree(
+            db, work_item, builder_task_id=attempt_id
+        )
+    except RuntimeError as exc:
+        # Worktree creation failed. Roll back the stub BuilderTask
+        # row so it does not appear in the active-task list and
+        # does not block a fresh retry.
+        db.delete(builder_task)
+        db.commit()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "blocker_code": "blocked_worktree_create_failed",
+                "blocker_message": str(exc),
+                "work_item_id": work_item_id,
+            },
+        )
+    # Save the orchestrator's metadata on the BuilderTask so the
+    # task record is self-describing and operators can audit
+    # which worktree/branch/base ref this task used.
+    builder_task.target_repo = target_worktree
+    builder_task.generated_prompt_snapshot = None  # set after prompt is generated
+
+    # ------------------------------------------------------------------
+    # Repo safety gate, retargeted at the task worktree. The
+    # /srv/repo/legion-dashboard shared checkout is the
+    # operator/control worktree. For worktree-isolated builds the
+    # path the builder will operate in is the new task worktree.
+    # Shared-repo checks (which would block because the operator
+    # may have other dirty work in the shared checkout) are NOT
+    # applied to the implementation path. The gate here is the
+    # last line of defence against an already-dirty task
+    # worktree leaking into the build (e.g. a previous builder
+    # crashed mid-edit). Triage-only sends still want the gate's
+    # dirty/branch feedback but skip the lock (mirroring the
+    # original behaviour).
+    # ------------------------------------------------------------------
+    target_repo = target_worktree
     skip_gate = os.environ.get("LEGION_SKIP_REPO_SAFETY_GATE") == "1"
-    # Triage-only sends queue a Hermes card without starting a build, so they
-    # must not lock the repo (or be blocked by an in-flight build's lock).
-    # We still run the dirty/branch checks so an operator sees the same gate
-    # feedback whether they triage or start immediately.
+    # Triage-only sends queue a Hermes card without starting a
+    # build, so they must not lock the repo (or be blocked by an
+    # in-flight build's lock). We still run the dirty/branch
+    # checks so an operator sees the same gate feedback whether
+    # they triage or start immediately.
     skip_lock = status_override == "triage"
     acquired_lock: Optional[RepoLock] = None
+    # _resolve_target_repo returns the shared operator/control
+    # repo path; we use the slug for the lock-name table and
+    # otherwise point the gate at the task worktree.
+    _, repo_name = _resolve_target_repo(work_item)
     if not skip_gate:
-        # Run the safety inspection on the host (via the preview executor)
-        # rather than inside the container. The container's /srv/repo mount
-        # is not a valid git worktree, so an in-container ``git status``
-        # would fail with ``fatal: not a git repository`` and the gate
-        # would 409 every Start Build with ``git_inspection_failed``. The
-        # host executor inspects the real worktree and returns the same
-        # RepoSafetyResult shape.
         safety = repo_safety.check_repo_clean_via_executor(target_repo)
         if not safety.is_clean:
             raise HTTPException(
@@ -282,9 +385,6 @@ def _create_builder_task(db: Session, work_item_id: int, request: SendToBuilderR
                 },
             )
 
-        # When the work item explicitly names a branch and the worktree is on
-        # a different one, refuse to start so the builder doesn't push to the
-        # wrong head.
         if (
             work_item.branch_name
             and safety.current_branch
@@ -330,12 +430,10 @@ def _create_builder_task(db: Session, work_item_id: int, request: SendToBuilderR
                 branch_name=safety.current_branch or "unknown",
                 commit_sha=safety.current_commit or "unknown",
                 work_item_id=work_item_id,
-                task_id=None,  # populated below after Hermes responds
+                task_id=None,
                 lock_owner=request.hermes_assignee or "builder",
             )
             if not lock_result.acquired:
-                # Race lost between check_repo_busy and the INSERT. Treat the
-                # same as busy.
                 raise HTTPException(
                     status_code=409,
                     detail={
@@ -348,67 +446,8 @@ def _create_builder_task(db: Session, work_item_id: int, request: SendToBuilderR
                     },
                 )
             acquired_lock = lock_result.lock
-    
-    # Get latest completed debate run for this work item
-    from ..models import DebateRun
-    latest_debate = db.query(DebateRun).filter(
-        DebateRun.work_item_id == work_item_id,
-        DebateRun.status == "completed"
-    ).order_by(DebateRun.completed_at.desc()).first()
 
-    # ------------------------------------------------------------------
-    # Per-task worktree allocation. The implementation Kanban card
-    # body MUST point the builder at a dedicated worktree under
-    # ``/srv/worktrees/`` rather than the shared operator/control
-    # worktree, so we create (or reuse) the worktree BEFORE we
-    # generate the prompt. A failure here blocks the send/start with
-    # a 409 so the operator can see the misrouting.
-    #
-    # The repo safety lock (if acquired) is released on failure so a
-    # misconfigured executor or a stale worktree does not pin the
-    # shared repo for the next build.
-    #
-    # We compute a per-attempt ``attempt_id`` (1-indexed count of
-    # prior builder tasks for this work item) so each new send
-    # produces a fresh worktree folder and branch. The first send
-    # has attempt_id=1, the second send has attempt_id=2, and so
-    # on. This avoids the stale-worktree reuse trap when a previous
-    # attempt is ``done`` or ``archived`` and the active-task check
-    # permits a fresh build.
-    # ------------------------------------------------------------------
-    prior_attempts = (
-        db.query(BuilderTask)
-        .filter(BuilderTask.work_item_id == work_item_id)
-        .count()
-    )
-    attempt_id = prior_attempts + 1
-    try:
-        (
-            target_worktree,
-            feature_branch,
-            chosen_base_ref,
-            _wt_result,
-        ) = ensure_task_worktree(
-            db, work_item, builder_task_id=attempt_id
-        )
-    except RuntimeError as exc:
-        if acquired_lock is not None:
-            repo_safety.release_repo_lock(
-                db,
-                target_repo,
-                release_reason="worktree_create_failed",
-                final_status="failed",
-            )
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "blocker_code": "blocked_worktree_create_failed",
-                "blocker_message": str(exc),
-                "work_item_id": work_item_id,
-            },
-        )
-
-    # Generate prompt. Pass the same attempt_id and the same
+    # Generate prompt. Pass the same builder_task.id and the same
     # feature branch we used to create the worktree so the prompt
     # body renders the exact path and branch the orchestrator just
     # provisioned. Without this, the prompt would point the
@@ -425,10 +464,10 @@ def _create_builder_task(db: Session, work_item_id: int, request: SendToBuilderR
         feature_branch=feature_branch,
         chosen_base_ref=chosen_base_ref,
     )
-    
+
     # Create Hermes task. If this fails we must release the lock we just
     # acquired so the repo doesn't stay pinned to a build that never started.
-    idempotency_key = f"legion-dashboard-work-item-{work_item_id}-builder-v1"
+    idempotency_key = f"legion-dashboard-work-item-{work_item_id}-builder-task-{attempt_id}-v1"
     try:
         hermes_result = _create_hermes_task(
             title=f"LEGION-WI-{work_item_id} — {work_item.title[:100]}",
@@ -446,41 +485,21 @@ def _create_builder_task(db: Session, work_item_id: int, request: SendToBuilderR
                 release_reason="hermes_task_create_failed",
                 final_status="failed",
             )
+        # Roll back the stub BuilderTask row so a fresh retry can
+        # allocate a new builder_task.id (and therefore a new
+        # worktree + branch).
+        db.delete(builder_task)
+        db.commit()
         raise
 
-    # Create builder task record
-    # mandatory_edits_json is now a real JSON list of mandatory edits
-    # extracted from the Final Arbiter's structured output. It used to
-    # be set to DebateRun.summary (which is the rationale text) — that
-    # was a prompt-generation bug. The actual edits live on the latest
-    # DebateArgument with side='arbiter'.
-    mandatory_edits_for_record: list = []
-    if latest_debate is not None:
-        mandatory_edits_for_record = load_arbiter_mandatory_edits(
-            db, latest_debate
-        )
-    builder_task = BuilderTask(
-        work_item_id=work_item_id,
-        hermes_task_id=hermes_result["task_id"],
-        hermes_board="legion-apps-build-queue",
-        hermes_status=hermes_result["status"],
-        hermes_assignee=request.hermes_assignee or "builder",
-        title=work_item.title,
-        target_app=work_item.target_app,
-        target_repo=target_repo,
-        priority=request.priority or work_item.priority,
-        debate_run_id=latest_debate.id if latest_debate else None,
-        recommendation=latest_debate.final_recommendation if latest_debate else None,
-        implementation_readiness=latest_debate.implementation_readiness if latest_debate else None,
-        mandatory_edits_json=(
-            json.dumps(mandatory_edits_for_record)
-            if mandatory_edits_for_record
-            else None
-        ),
-        generated_prompt_snapshot=prompt_body,
-    )
-
-    db.add(builder_task)
+    # Populate the BuilderTask stub row with the Hermes metadata
+    # and the generated prompt snapshot, then commit.
+    builder_task.hermes_task_id = hermes_result["task_id"]
+    builder_task.hermes_board = "legion-apps-build-queue"
+    builder_task.hermes_status = hermes_result["status"]
+    builder_task.hermes_assignee = request.hermes_assignee or "builder"
+    builder_task.target_repo = target_worktree
+    builder_task.generated_prompt_snapshot = prompt_body
     db.commit()
     db.refresh(builder_task)
 

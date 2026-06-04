@@ -1179,3 +1179,104 @@ def test_prompt_body_contains_chosen_base_ref_in_worktree_metadata():
         chosen_base_ref="feature/dashboard-bootstrap-control-plane",
     )
     assert "Base Ref: feature/dashboard-bootstrap-control-plane" in body, body
+
+
+# ---------------------------------------------------------------------------
+# Per-task worktree invariants (single-operator local control plane)
+# ---------------------------------------------------------------------------
+
+
+def test_prompt_body_has_worktree_verification_in_phase1():
+    """Phase 1 must explicitly verify the builder is operating in
+    the dedicated task worktree, not the shared
+    operator/control worktree. The shell check
+    ``git rev-parse --show-toplevel`` must equal the
+    TARGET WORKTREE path, and the current branch must equal
+    the provisioned feature branch. Any mismatch must abort
+    before the builder mutates state."""
+    wi = _make_work_item(id=47, title="Worktree Verification")
+    body = build_implementation_card_prompt(
+        wi,
+        debate_run_id=None,
+        recommendation=None,
+        implementation_readiness=None,
+        mandatory_edits=[],
+        target_repo="/srv/worktrees/legion-dashboard/wi-47-worktree-verification/t_000050",
+        target_worktree="/srv/worktrees/legion-dashboard/wi-47-worktree-verification/t_000050",
+        feature_branch="feature/wi-47-worktree-verification-t_000050",
+        chosen_base_ref="main",
+    )
+    # The verify-worktree shell block.
+    assert 'expected_topdir=$(git rev-parse --show-toplevel)' in body, body
+    assert (
+        'if [ "$expected_topdir" != '
+        '"/srv/worktrees/legion-dashboard/wi-47-worktree-verification/t_000050" ]'
+        in body
+    )
+    assert "FAIL: wrong worktree" in body, body
+    # The branch check.
+    assert "expected_branch=feature/wi-47-worktree-verification-t_000050" in body, body
+    assert "FAIL: wrong branch" in body, body
+
+
+def test_prompt_body_explicitly_forbids_cd_into_shared_repo():
+    """The prompt body must explicitly tell the builder not to
+    ``cd`` into /srv/repo/legion-dashboard. The shared
+    operator/control worktree is for the operator's source
+    checkout, not for builder implementation."""
+    wi = _make_work_item(id=48, title="Forbid Shared Repo Cd")
+    body = build_implementation_card_prompt(
+        wi,
+        debate_run_id=None,
+        recommendation=None,
+        implementation_readiness=None,
+        mandatory_edits=[],
+        target_repo="/srv/worktrees/legion-dashboard/wi-48-forbid-shared-cd/t_000051",
+        target_worktree="/srv/worktrees/legion-dashboard/wi-48-forbid-shared-cd/t_000051",
+        feature_branch="feature/wi-48-forbid-shared-cd-t_000051",
+        chosen_base_ref="main",
+    )
+    assert (
+        "Do NOT cd into /srv/repo/legion-dashboard at any point"
+        in body
+    )
+
+
+def test_ensure_task_worktree_safely_handles_concurrent_attempt_ids(
+    monkeypatch,
+):
+    """Two concurrent ``ensure_task_worktree`` calls for the same
+    work item would compute the same ``prior_attempts + 1`` and
+    both target the same worktree path/branch — unless the
+    caller reserves a per-attempt identifier through a different
+    channel. This test pins the orchestrator's contract: it
+    only allocates the worktree when the caller passes a unique
+    ``builder_task_id`` (the BuilderTask.id from the row inserted
+    earlier in the router). The orchestrator itself does not
+    attempt to detect collisions."""
+    from app import task_worktree
+
+    def _fake(worktree_path, feature_branch, base_ref, timeout=60):
+        return True, {"success": True, "reused": False, "base_ref": base_ref}, ""
+
+    monkeypatch.setattr(
+        task_worktree, "_worktree_create_result", _fake
+    )
+
+    wi = _make_work_item(id=49, title="Concurrent Attempt Ids")
+
+    # Two calls with DIFFERENT builder_task_ids succeed and
+    # produce different worktree paths and feature branches.
+    p1, b1, _base1, _r1 = task_worktree.ensure_task_worktree(
+        db=None, work_item=wi, builder_task_id=101
+    )
+    p2, b2, _base2, _r2 = task_worktree.ensure_task_worktree(
+        db=None, work_item=wi, builder_task_id=102
+    )
+    assert p1 != p2, (p1, p2)
+    assert b1 != b2, (b1, b2)
+    # The branch suffix uses the builder_task_id, not the
+    # work_item.id, so a second attempt for the same work item
+    # is on a different branch.
+    assert "t_000101" in b1
+    assert "t_000102" in b2
