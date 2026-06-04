@@ -1,10 +1,17 @@
 """Dashboard-side orchestration for the per-task worktree.
 
 This module is the thin glue between :mod:`app.worktree_paths` (pure
-helpers) and the host-side tool
-``/root/.hermes/LEGION_TOOLS/bin/legion-worktree-create`` (which
+helpers) and the in-image tool ``legion-worktree-create`` (which
 runs the actual ``git worktree add`` because the dashboard
 container mounts ``/srv/repo`` read-only).
+
+The tool location is resolved at import time from the
+``LEGION_WORKTREE_CREATE_TOOL`` environment variable; if unset, it
+falls back to :data:`DEFAULT_WORKTREE_CREATE_TOOL`
+(``/usr/local/bin/legion-worktree-create``), which is the path the
+Dockerfile installs the repo-owned script to. This lets the
+dashboard be deployed without depending on any host-only path
+under the operator's home directory.
 
 The router calls :func:`ensure_task_worktree` before generating the
 implementation Kanban card prompt. If the worktree cannot be
@@ -29,7 +36,10 @@ from .worktree_paths import (
 )
 
 
-WORKTREE_CREATE_TOOL = "/root/.hermes/LEGION_TOOLS/bin/legion-worktree-create"
+DEFAULT_WORKTREE_CREATE_TOOL = "/usr/local/bin/legion-worktree-create"
+WORKTREE_CREATE_TOOL = os.environ.get(
+    "LEGION_WORKTREE_CREATE_TOOL", DEFAULT_WORKTREE_CREATE_TOOL
+)
 
 
 # Per-repo integration base refs. The dashboard-side worktree

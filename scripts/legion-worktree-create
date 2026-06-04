@@ -1,0 +1,328 @@
+#!/usr/bin/env python3
+"""LEGION host-side worktree creator.
+
+The LEGION Dashboard runs inside a docker container with
+``/srv/repo:/srv/repo:ro`` (read-only). It cannot create new git
+worktrees on its own. The dashboard calls this tool (via subprocess)
+to create the per-task worktree before generating the implementation
+Kanban card prompt.
+
+This tool is intentionally minimal: it accepts a target worktree
+path, a base ref, and a feature branch name, and runs
+
+    git -C <shared-repo> worktree add -B <feature-branch> <worktree-path> <base-ref>
+
+If the worktree already exists for the same feature branch and is
+clean, it is reused. If the worktree exists for a different
+branch or is dirty, the request is refused and the operator must
+remediate manually.
+
+Security posture
+----------------
+* The tool runs as root on the host; treat all arguments as
+  untrusted and validate them strictly.
+* The target worktree path is validated to live under
+  ``/srv/worktrees/`` and to be a non-empty safe slug path
+  (lowercase letters, digits, ``-`` and ``_``).
+* The feature branch is restricted to git-ref-safe characters.
+* The base ref is similarly restricted.
+* The shared repo path is fixed to one of the allowlisted
+  ``/srv/repo/legion-dashboard`` or ``/srv/repo/lgn-hub`` paths,
+  derived from the worktree path.
+
+Failure modes
+------------
+* ``EX_USAGE`` (2): invalid arguments (bad path, bad ref, etc.)
+* ``EX_NOINPUT`` (66): a worktree already exists at the path but
+  for a different branch or is dirty
+* ``EX_CANTCREAT`` (73): ``git worktree add`` failed
+* ``EX_CONFIG`` (78): the shared repo is missing or not a git
+  worktree
+
+Exit code ``0`` means the worktree exists and is on the requested
+feature branch with a clean working tree.
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import subprocess
+import sys
+from typing import Optional, Tuple
+
+# Allowlisted shared operator/control repos.
+ALLOWED_SHARED_REPOS = (
+    "/srv/repo/legion-dashboard",
+    "/srv/repo/lgn-hub",
+)
+WORKTREES_ROOT = "/srv/worktrees"
+
+# Strict slug alphabet: lowercase letters, digits, ``-`` and ``_``.
+SAFE_PATH_RE = re.compile(r"^[a-z0-9][a-z0-9_\-/]*$")
+# Git-ref-safe characters: matches what the existing executor uses.
+GIT_REF_RE = re.compile(r"^[A-Za-z0-9._/\-]+$")
+
+
+def _log(msg: str) -> None:
+    print(msg, file=sys.stderr, flush=True)
+
+
+def _run(cmd: list, cwd: str, timeout: int = 60) -> Tuple[int, str, str]:
+    """Run ``cmd`` in ``cwd`` and return (rc, stdout, stderr)."""
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return 124, "", f"timeout after {exc.timeout}s"
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def _shared_repo_for_worktree(worktree_path: str) -> str:
+    """Return the shared operator/control repo for ``worktree_path``.
+
+    The first path component under ``/srv/worktrees/`` selects the
+    repo slug (``legion-dashboard`` or ``lgn-hub``).
+    """
+    rel = worktree_path[len(WORKTREES_ROOT) + 1 :]
+    head = rel.split("/", 1)[0]
+    for allowed in ALLOWED_SHARED_REPOS:
+        slug = os.path.basename(allowed)
+        if head == slug:
+            return allowed
+    # Fall back to the dashboard repo.
+    return ALLOWED_SHARED_REPOS[0]
+
+
+def _validate_worktree_path(path: str) -> None:
+    if not path or not path.startswith(WORKTREES_ROOT + "/"):
+        raise ValueError(
+            f"worktree path must live under {WORKTREES_ROOT}, got {path!r}"
+        )
+    rel = path[len(WORKTREES_ROOT) + 1 :]
+    if not rel or "/" not in rel and rel == "":
+        raise ValueError(f"worktree path has no component: {path!r}")
+    for component in rel.split("/"):
+        if not component:
+            raise ValueError(f"worktree path has empty component: {path!r}")
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_\-]*", component):
+            raise ValueError(
+                f"worktree path component {component!r} is not a safe slug"
+            )
+
+
+def _validate_ref(name: str, value: str) -> None:
+    if not value or not GIT_REF_RE.match(value) or value.startswith("-"):
+        raise ValueError(f"{name} {value!r} is not a git-ref-safe string")
+
+
+def _git_clean(repo_path: str) -> Optional[str]:
+    """Return None if the worktree is clean, else a short reason string."""
+    rc, out, _err = _run(
+        ["git", "-C", repo_path, "status", "--porcelain"], cwd=repo_path
+    )
+    if rc != 0:
+        return f"git status failed (rc={rc})"
+    if out.strip():
+        first = out.strip().splitlines()[0][:200]
+        return f"dirty: {first}"
+    return None
+
+
+def _current_branch(repo_path: str) -> Optional[str]:
+    rc, out, _err = _run(
+        ["git", "-C", repo_path, "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=repo_path,
+    )
+    if rc != 0:
+        return None
+    return out.strip() or None
+
+
+def _worktree_list(shared_repo: str, worktree_path: str) -> Optional[Tuple[str, str]]:
+    """Return ``(branch, commit)`` for the worktree, or None if missing."""
+    rc, out, _err = _run(
+        ["git", "-C", shared_repo, "worktree", "list", "--porcelain"],
+        cwd=shared_repo,
+    )
+    if rc != 0:
+        return None
+    current_path = None
+    current_branch = None
+    current_commit = None
+    for line in out.splitlines():
+        if line.startswith("worktree "):
+            current_path = line[len("worktree ") :].strip()
+            current_branch = None
+            current_commit = None
+        elif line.startswith("HEAD "):
+            current_commit = line[len("HEAD ") :].strip()
+        elif line.startswith("branch "):
+            current_branch = line[len("branch ") :].strip()
+        if current_path == worktree_path and current_branch and current_commit:
+            return current_branch, current_commit
+    return None
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Create a per-task worktree under /srv/worktrees/."
+    )
+    parser.add_argument(
+        "--worktree-path",
+        required=True,
+        help="Absolute path of the per-task worktree (must be under /srv/worktrees/).",
+    )
+    parser.add_argument(
+        "--feature-branch",
+        required=True,
+        help="Feature branch name to check out in the new worktree.",
+    )
+    parser.add_argument(
+        "--base-ref",
+        required=True,
+        help="Base ref (branch or SHA) the feature branch starts from.",
+    )
+    args = parser.parse_args()
+
+    try:
+        _validate_worktree_path(args.worktree_path)
+        _validate_ref("feature-branch", args.feature_branch)
+        _validate_ref("base-ref", args.base_ref)
+    except ValueError as exc:
+        _log(f"error: {exc}")
+        return 2
+
+    shared_repo = _shared_repo_for_worktree(args.worktree_path)
+    if not os.path.isdir(shared_repo):
+        _log(
+            f"error: shared repo {shared_repo!r} is missing on host "
+            f"(executor cannot find the canonical worktree)"
+        )
+        return 78
+    rc, _out, err = _run(
+        ["git", "-C", shared_repo, "rev-parse", "--show-toplevel"],
+        cwd=shared_repo,
+    )
+    if rc != 0:
+        _log(f"error: shared repo {shared_repo!r} is not a git worktree: {err}")
+        return 78
+
+    worktree_path = args.worktree_path
+
+    # If the worktree already exists, validate it is on the right
+    # branch and clean. Refuse to clobber operator state.
+    if os.path.isdir(worktree_path):
+        existing = _worktree_list(shared_repo, worktree_path)
+        if existing is None:
+            _log(
+                f"error: {worktree_path!r} exists but is not registered "
+                f"as a git worktree of {shared_repo!r}"
+            )
+            return 66
+        branch, commit = existing
+        # Refs may be reported as ``refs/heads/<name>`` — strip the
+        # ``refs/heads/`` prefix to get the short branch name. Use
+        # ``removeprefix`` so branches that contain ``/`` (e.g.
+        # ``feature/wi-17-task``) are preserved.
+        if branch.startswith("refs/heads/"):
+            branch_name = branch[len("refs/heads/") :]
+        elif branch == "HEAD":
+            branch_name = ""
+        else:
+            branch_name = branch
+        if branch_name != args.feature_branch:
+            _log(
+                f"error: {worktree_path!r} is on branch {branch_name!r}, "
+                f"expected {args.feature_branch!r}"
+            )
+            return 66
+        dirty = _git_clean(worktree_path)
+        if dirty:
+            _log(
+                f"error: {worktree_path!r} is dirty; refusing to reuse: {dirty}"
+            )
+            return 66
+        print(
+            json_safe({
+                "success": True,
+                "action": "worktree_create",
+                "worktree_path": worktree_path,
+                "feature_branch": branch_name,
+                "commit": commit,
+                "reused": True,
+            })
+        )
+        return 0
+
+    # Create parent directory if missing (worktree add does not).
+    parent = os.path.dirname(worktree_path)
+    if not os.path.isdir(parent):
+        try:
+            os.makedirs(parent, exist_ok=True)
+        except OSError as exc:
+            _log(f"error: cannot create parent {parent!r}: {exc}")
+            return 73
+
+    # Create the worktree with a new branch based on the base ref.
+    rc, _out, err = _run(
+        [
+            "git",
+            "-C",
+            shared_repo,
+            "worktree",
+            "add",
+            "-B",
+            args.feature_branch,
+            worktree_path,
+            args.base_ref,
+        ],
+        cwd=shared_repo,
+        timeout=120,
+    )
+    if rc != 0:
+        _log(
+            f"error: git worktree add failed (rc={rc}): {err.strip()[:400]}"
+        )
+        return 73
+
+    # The new worktree is checked out on args.feature_branch and clean
+    # by construction. Record the HEAD commit for the caller.
+    rc, out, _err = _run(
+        ["git", "-C", worktree_path, "rev-parse", "HEAD"],
+        cwd=worktree_path,
+    )
+    if rc != 0:
+        _log(f"error: cannot read HEAD after worktree add: {out}")
+        return 73
+    commit = out.strip()
+
+    print(
+        json_safe({
+            "success": True,
+            "action": "worktree_create",
+            "worktree_path": worktree_path,
+            "feature_branch": args.feature_branch,
+            "base_ref": args.base_ref,
+            "commit": commit,
+            "reused": False,
+        })
+    )
+    return 0
+
+
+def json_safe(payload: dict) -> str:
+    """Render ``payload`` as a single-line JSON string on stdout."""
+    import json
+
+    return json.dumps(payload, sort_keys=True)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

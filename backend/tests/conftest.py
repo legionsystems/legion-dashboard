@@ -17,6 +17,25 @@ SQLALCHEMY_DATABASE_URL = "sqlite:///./test.db"
 os.environ["DATABASE_URL"] = SQLALCHEMY_DATABASE_URL
 os.environ["LEGION_SKIP_SEED"] = "1"
 
+# The orchestrator resolves LEGION_WORKTREE_CREATE_TOOL at import
+# time and falls back to the in-image path
+# /usr/local/bin/legion-worktree-create. On the dev host the same
+# tool also lives at a legacy operator path. Tests that exercise
+# the real ensure_task_worktree (rather than stubbing
+# _worktree_create_result) need a real executable on disk; if the
+# in-image path is not present, fall back to the legacy operator
+# path before importing the app so the orchestrator captures a
+# working tool path. Honors any externally-set override (CI,
+# container) by checking the var first.
+if not os.environ.get("LEGION_WORKTREE_CREATE_TOOL"):
+    for _candidate in (
+        "/usr/local/bin/legion-worktree-create",
+        "/root/.hermes/LEGION_TOOLS/bin/legion-worktree-create",
+    ):
+        if os.path.isfile(_candidate):
+            os.environ["LEGION_WORKTREE_CREATE_TOOL"] = _candidate
+            break
+
 from app.database import Base, get_db  # noqa: E402
 from app.main import app  # noqa: E402
 

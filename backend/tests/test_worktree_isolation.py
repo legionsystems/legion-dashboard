@@ -12,6 +12,7 @@ Covers:
 """
 from __future__ import annotations
 
+import os
 import re
 from types import SimpleNamespace
 
@@ -1763,3 +1764,170 @@ def test_outer_wrapper_rolls_back_stub_when_prompt_generation_raises(
     )
     assert len(rows) == 1, [r.hermes_task_id for r in rows]
     assert rows[0].hermes_task_id == "hermes-prompt-raise-recovery-1"
+
+
+# ---------------------------------------------------------------------------
+# Container-native worktree tool: env-var resolution + deploy wiring
+# ---------------------------------------------------------------------------
+
+
+def _reload_task_worktree():
+    """Reimport :mod:`app.task_worktree` so module-level env-var
+    resolution re-runs against the current ``os.environ``."""
+    import importlib
+    from app import task_worktree
+
+    return importlib.reload(task_worktree)
+
+
+def _restore_env(key: str, original_value):
+    """Restore an env var to its pre-test value."""
+    if original_value is None:
+        os.environ.pop(key, None)
+    else:
+        os.environ[key] = original_value
+
+
+def test_default_worktree_create_tool_constant_is_image_default():
+    """The image-default path is the path the Dockerfile installs
+    the repo-owned script to. Test pins the constant so a future
+    edit cannot silently retarget the orchestrator at the legacy
+    host path."""
+    from app import task_worktree
+
+    assert (
+        task_worktree.DEFAULT_WORKTREE_CREATE_TOOL
+        == "/usr/local/bin/legion-worktree-create"
+    )
+
+
+def test_worktree_create_tool_defaults_to_image_path_when_env_unset():
+    """``WORKTREE_CREATE_TOOL`` falls back to
+    ``DEFAULT_WORKTREE_CREATE_TOOL`` when
+    ``LEGION_WORKTREE_CREATE_TOOL`` is not set in the environment."""
+    original = os.environ.get("LEGION_WORKTREE_CREATE_TOOL")
+    os.environ.pop("LEGION_WORKTREE_CREATE_TOOL", None)
+    try:
+        reloaded = _reload_task_worktree()
+        assert (
+            reloaded.WORKTREE_CREATE_TOOL
+            == reloaded.DEFAULT_WORKTREE_CREATE_TOOL
+            == "/usr/local/bin/legion-worktree-create"
+        )
+    finally:
+        _restore_env("LEGION_WORKTREE_CREATE_TOOL", original)
+        _reload_task_worktree()
+
+
+def test_worktree_create_tool_reflects_env_var_when_set():
+    """When ``LEGION_WORKTREE_CREATE_TOOL`` is set, the active
+    ``WORKTREE_CREATE_TOOL`` constant reflects the override."""
+    original = os.environ.get("LEGION_WORKTREE_CREATE_TOOL")
+    os.environ["LEGION_WORKTREE_CREATE_TOOL"] = "/opt/legion/bin/wtc-override"
+    try:
+        reloaded = _reload_task_worktree()
+        assert reloaded.WORKTREE_CREATE_TOOL == "/opt/legion/bin/wtc-override"
+        # The default is unchanged; only the active value moved.
+        assert (
+            reloaded.DEFAULT_WORKTREE_CREATE_TOOL
+            == "/usr/local/bin/legion-worktree-create"
+        )
+    finally:
+        _restore_env("LEGION_WORKTREE_CREATE_TOOL", original)
+        _reload_task_worktree()
+
+
+def test_worktree_create_result_missing_tool_error_includes_configured_path(
+    monkeypatch, tmp_path,
+):
+    """The ``_worktree_create_result`` error message names the
+    configured tool path so the operator can see which path the
+    orchestrator looked at — important when an env-var override is
+    misconfigured."""
+    from app import task_worktree
+
+    missing_path = str(tmp_path / "no-such-legion-worktree-create")
+    monkeypatch.setattr(task_worktree, "WORKTREE_CREATE_TOOL", missing_path)
+
+    ok, parsed, stderr = task_worktree._worktree_create_result(
+        worktree_path="/srv/worktrees/legion-dashboard/wi-1-x/t_000001",
+        feature_branch="feature/x",
+        base_ref="main",
+    )
+    assert ok is False
+    assert parsed == {}
+    assert "missing tool" in stderr
+    assert missing_path in stderr, (
+        f"error message must include the configured path; got {stderr!r}"
+    )
+
+
+def test_task_worktree_module_does_not_reference_legacy_host_path():
+    """No code path in ``task_worktree.py`` may bake in the legacy
+    ``/root/.hermes/...`` host-only path. The module must rely on
+    the env var + image default exclusively."""
+    import inspect
+    from app import task_worktree
+
+    source = inspect.getsource(task_worktree)
+    assert "/root/.hermes/" not in source, (
+        "task_worktree.py still references the legacy host-only "
+        "/root/.hermes/ path; the deploy must use the in-image "
+        "tool via LEGION_WORKTREE_CREATE_TOOL"
+    )
+
+
+def _load_compose_yaml() -> dict:
+    """Parse ``docker-compose.yml`` from the repo root and return
+    the loaded dict. The repo root is two parents above this test
+    file (backend/tests -> backend -> repo root)."""
+    import os
+    import yaml
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.abspath(os.path.join(here, "..", ".."))
+    compose_path = os.path.join(repo_root, "docker-compose.yml")
+    with open(compose_path, "r", encoding="utf-8") as fh:
+        return yaml.safe_load(fh)
+
+
+def test_docker_compose_app_service_mounts_srv_worktrees_read_write():
+    """The app service must bind-mount ``/srv/worktrees`` so the
+    container can create per-task worktrees the host can see, and
+    the mount MUST be read-write (no ``:ro``)."""
+    compose = _load_compose_yaml()
+    app_volumes = compose["services"]["app"]["volumes"]
+    matches = [
+        v for v in app_volumes
+        if isinstance(v, str) and v.startswith("/srv/worktrees:/srv/worktrees")
+    ]
+    assert matches, (
+        f"app service is missing /srv/worktrees bind mount; "
+        f"got volumes={app_volumes!r}"
+    )
+    for entry in matches:
+        assert not entry.endswith(":ro"), (
+            f"/srv/worktrees mount must be read-write (no :ro); "
+            f"got {entry!r}"
+        )
+
+
+def test_docker_compose_app_service_sets_legion_worktree_create_tool_env():
+    """The app service must set ``LEGION_WORKTREE_CREATE_TOOL`` to
+    the in-image path so the orchestrator resolves to the
+    repo-owned, container-internal tool."""
+    compose = _load_compose_yaml()
+    env = compose["services"]["app"]["environment"]
+    # docker-compose accepts either a mapping or a list of KEY=VAL;
+    # this repo uses the mapping form.
+    assert isinstance(env, dict), (
+        f"docker-compose.yml app.environment is not a mapping; "
+        f"got {type(env).__name__}"
+    )
+    assert "LEGION_WORKTREE_CREATE_TOOL" in env, (
+        f"app service is missing LEGION_WORKTREE_CREATE_TOOL env var; "
+        f"got environment keys={sorted(env.keys())!r}"
+    )
+    assert env["LEGION_WORKTREE_CREATE_TOOL"] == (
+        "/usr/local/bin/legion-worktree-create"
+    ), env["LEGION_WORKTREE_CREATE_TOOL"]

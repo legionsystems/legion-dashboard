@@ -24,6 +24,7 @@ services:
         condition: service_healthy
     volumes:
       - /srv/repo:/srv/repo:ro
+      - /srv/worktrees:/srv/worktrees
       - /var/run/docker.sock:/var/run/docker.sock
       - /srv/repo/legion-dashboard/.hermes-config.yaml:/app/.hermes/config.yaml:ro  # Hermes config (copied for container access)
       - app-attachments:/app/attachments
@@ -33,6 +34,7 @@ services:
       APP_ID: ${APP_ID:-legion-dashboard}
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg2://legion:legion@db:5432/legion_dashboard}
       LEGION_DOCKER_CONTROL_ENABLED: ${LEGION_DOCKER_CONTROL_ENABLED:-true}
+      LEGION_WORKTREE_CREATE_TOOL: /usr/local/bin/legion-worktree-create
       HERMES_HOME: /app/.hermes  # Point to mounted config location
       HERMES_KANBAN_BRIDGE_URL: http://host.docker.internal:8765
       # API_SERVER_KEY must be set in .env or the execution environment.
