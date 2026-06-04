@@ -11,8 +11,18 @@ Type=simple
 # appears on the command line or in systemd journal headers. The file
 # must be root:root and mode 0600 — operator provisions it during host
 # bootstrap (see ops/host-executor/README for the expected shape).
+#
+# The same EnvironmentFile is where the operator sets
+# LEGION_EXECUTOR_ALLOWED_REPO_ROOTS (comma-separated absolute paths)
+# when onboarding a new app. The executor falls back to its built-in
+# defaults when the variable is unset.
 EnvironmentFile=/etc/legion/preview-executor.env
-ExecStart=/usr/bin/python3 /root/.hermes/LEGION_TOOLS/bin/legion-preview-executor
+# ExecStart points at the source-controlled copy in /srv/repo/legion-dashboard
+# so a normal ``git pull`` + ``systemctl restart legion-preview-executor`` is
+# enough to roll forward — the older runtime under /root/.hermes/LEGION_TOOLS
+# is no longer the source of truth. Operators upgrading from the legacy path
+# must run ``systemctl daemon-reload`` once after pulling this unit change.
+ExecStart=/usr/bin/python3 /srv/repo/legion-dashboard/ops/host-executor/legion-preview-executor
 Restart=on-failure
 RestartSec=5
 
