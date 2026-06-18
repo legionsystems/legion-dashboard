@@ -340,8 +340,8 @@ def test_executor_accepts_correct_api_key(executor_module, monkeypatch, tmp_path
     passes the request through.
     """
     executor_module._set_api_key("secret-key")
-    allowlist = {str(tmp_path)}
-    monkeypatch.setattr(executor_module, "ALLOWED_REPOS", allowlist)
+    allowlist = [str(tmp_path)]
+    monkeypatch.setattr(executor_module, "ALLOWED_REPO_ROOTS", allowlist)
     monkeypatch.setattr(
         executor_module,
         "_perform_action",
@@ -377,7 +377,7 @@ def test_executor_rejects_unknown_repo_path(executor_module):
 
 def test_executor_rejects_unknown_action(executor_module, monkeypatch, tmp_path):
     executor_module._set_api_key("secret-key")
-    monkeypatch.setattr(executor_module, "ALLOWED_REPOS", {str(tmp_path)})
+    monkeypatch.setattr(executor_module, "ALLOWED_REPO_ROOTS", [str(tmp_path)])
     body = json.dumps(
         {
             "action": "rm_rf",
@@ -396,7 +396,7 @@ def test_executor_rejects_branch_with_shell_metachar(
 ):
     """Branch names with ``;`` / ``$`` / ``&`` etc must be refused."""
     executor_module._set_api_key("secret-key")
-    monkeypatch.setattr(executor_module, "ALLOWED_REPOS", {str(tmp_path)})
+    monkeypatch.setattr(executor_module, "ALLOWED_REPO_ROOTS", [str(tmp_path)])
     body = json.dumps(
         {
             "action": "deploy_preview",
@@ -415,7 +415,7 @@ def test_executor_rejects_missing_repo_directory(
 ):
     missing = tmp_path / "missing"
     executor_module._set_api_key("secret-key")
-    monkeypatch.setattr(executor_module, "ALLOWED_REPOS", {str(missing)})
+    monkeypatch.setattr(executor_module, "ALLOWED_REPO_ROOTS", [str(tmp_path)])
     body = json.dumps(
         {
             "action": "deploy_preview",
@@ -427,6 +427,194 @@ def test_executor_rejects_missing_repo_directory(
     _invoke_do_post(executor_module, handler)
     assert handler.status_code == 400
     assert handler.parsed_body()["error_code"] == "executor_repo_missing"
+
+
+# ---------------------------------------------------------------------------
+# Allowlist root logic — _is_under_allowed_root + request handling
+# ---------------------------------------------------------------------------
+
+
+def test_is_under_allowed_root_accepts_shared_repo(executor_module):
+    roots = ["/srv/repo/legion-dashboard", "/srv/repo/lgn-hub"]
+    ok, detail = executor_module._is_under_allowed_root(
+        "/srv/repo/legion-dashboard", roots
+    )
+    assert ok is True
+    assert detail == "/srv/repo/legion-dashboard"
+
+
+def test_is_under_allowed_root_accepts_generated_worktree(executor_module):
+    roots = ["/srv/worktrees/legion-dashboard"]
+    ok, detail = executor_module._is_under_allowed_root(
+        "/srv/worktrees/legion-dashboard/wi-23-test/t_999999", roots
+    )
+    assert ok is True
+    assert detail == "/srv/worktrees/legion-dashboard/wi-23-test/t_999999"
+
+
+def test_is_under_allowed_root_rejects_etc(executor_module):
+    roots = ["/srv/repo/legion-dashboard"]
+    ok, detail = executor_module._is_under_allowed_root("/etc", roots)
+    assert ok is False
+    assert "not under any allowed repo root" in detail
+
+
+def test_is_under_allowed_root_rejects_root(executor_module):
+    roots = ["/srv/repo/legion-dashboard"]
+    ok, detail = executor_module._is_under_allowed_root("/root", roots)
+    assert ok is False
+    assert "not under any allowed repo root" in detail
+
+
+def test_is_under_allowed_root_rejects_tmp(executor_module):
+    roots = ["/srv/repo/legion-dashboard"]
+    ok, detail = executor_module._is_under_allowed_root("/tmp/random", roots)
+    assert ok is False
+    assert "not under any allowed repo root" in detail
+
+
+def test_is_under_allowed_root_rejects_path_traversal(executor_module):
+    """``..`` traversal escapes to /etc/passwd → realpath catches it."""
+    roots = ["/srv/repo/legion-dashboard"]
+    ok, detail = executor_module._is_under_allowed_root(
+        "/srv/repo/legion-dashboard/../etc/passwd", roots
+    )
+    assert ok is False
+    # The canonical path that comes back should be the resolved escape,
+    # not the original input — proving realpath ran.
+    assert "/srv/repo/etc/passwd" in detail
+
+
+def test_is_under_allowed_root_rejects_sibling_with_same_stem(executor_module):
+    """``legion-dashboard-other`` must not match ``legion-dashboard`` root."""
+    roots = ["/srv/repo/legion-dashboard"]
+    ok, detail = executor_module._is_under_allowed_root(
+        "/srv/repo/legion-dashboard-other", roots
+    )
+    assert ok is False
+    assert "not under any allowed repo root" in detail
+
+
+def test_is_under_allowed_root_rejects_sibling_outside_dashboard_tree(
+    executor_module,
+):
+    """An lgn-hub-style sibling worktree is rejected when only the
+    legion-dashboard roots are configured."""
+    roots = [
+        "/srv/repo/legion-dashboard",
+        "/srv/worktrees/legion-dashboard",
+    ]
+    ok, detail = executor_module._is_under_allowed_root(
+        "/srv/worktrees/legion-hub/some/path", roots
+    )
+    assert ok is False
+    assert "not under any allowed repo root" in detail
+
+
+def test_is_under_allowed_root_rejects_non_string(executor_module):
+    roots = ["/srv/repo/legion-dashboard"]
+    ok, detail = executor_module._is_under_allowed_root(None, roots)
+    assert ok is False
+    assert "non-empty string" in detail
+
+
+def test_load_allowed_repo_roots_defaults_when_env_unset(
+    executor_module, monkeypatch
+):
+    monkeypatch.delenv("LEGION_EXECUTOR_ALLOWED_REPO_ROOTS", raising=False)
+    roots = executor_module._load_allowed_repo_roots()
+    assert "/srv/repo/legion-dashboard" in roots
+    assert "/srv/repo/lgn-hub" in roots
+    assert "/srv/worktrees/legion-dashboard" in roots
+
+
+def test_load_allowed_repo_roots_env_override_replaces_defaults(
+    executor_module, monkeypatch
+):
+    """Env var REPLACES the defaults — operator owns the full list."""
+    monkeypatch.setenv(
+        "LEGION_EXECUTOR_ALLOWED_REPO_ROOTS",
+        "/custom/root,/another/root",
+    )
+    roots = executor_module._load_allowed_repo_roots()
+    assert roots == ["/custom/root", "/another/root"]
+    # And the defaults are NOT silently merged in.
+    assert "/srv/repo/legion-dashboard" not in roots
+
+
+def test_load_allowed_repo_roots_env_override_canonicalizes(
+    executor_module, monkeypatch, tmp_path
+):
+    """The env-var entries are canonicalized at load time so prefix
+    matching is reliable even when the operator passes a path with a
+    trailing slash or ``..``."""
+    monkeypatch.setenv(
+        "LEGION_EXECUTOR_ALLOWED_REPO_ROOTS",
+        f"{tmp_path}/sub/../sub/,  /custom/root  ",
+    )
+    roots = executor_module._load_allowed_repo_roots()
+    assert roots == [str(tmp_path / "sub"), "/custom/root"]
+
+
+def test_executor_accepts_path_under_root_via_request(
+    executor_module, monkeypatch, tmp_path
+):
+    """End-to-end through do_POST: a sub-path of a configured root is
+    accepted by the allowlist gate (and forwarded to the action runner)."""
+    executor_module._set_api_key("secret-key")
+    sub = tmp_path / "wi-23" / "t_000017"
+    sub.mkdir(parents=True)
+    monkeypatch.setattr(
+        executor_module, "ALLOWED_REPO_ROOTS", [str(tmp_path)]
+    )
+    captured: dict = {}
+
+    def _fake_action(action, repo_path, branch, service):
+        captured["repo_path"] = repo_path
+        return {"success": True, "commit_sha": "y" * 40}
+
+    monkeypatch.setattr(executor_module, "_perform_action", _fake_action)
+    body = json.dumps(
+        {
+            "action": "deploy_preview",
+            "repo_path": str(sub),
+            "branch": "feature/x",
+        }
+    ).encode("utf-8")
+    handler = _FakeHandler(
+        "/preview", body, extra_headers={"X-Api-Key": "secret-key"}
+    )
+    _invoke_do_post(executor_module, handler)
+    assert handler.status_code == 200, handler.parsed_body()
+    # The handler should have forwarded the canonical path, not the
+    # raw user input.
+    assert captured["repo_path"] == str(sub.resolve())
+
+
+def test_executor_rejects_path_outside_roots_via_request(
+    executor_module, monkeypatch, tmp_path
+):
+    executor_module._set_api_key("secret-key")
+    other = tmp_path / "other"
+    other.mkdir()
+    monkeypatch.setattr(
+        executor_module, "ALLOWED_REPO_ROOTS", [str(tmp_path / "only-this")]
+    )
+    body = json.dumps(
+        {
+            "action": "deploy_preview",
+            "repo_path": str(other),
+            "branch": "feature/x",
+        }
+    ).encode("utf-8")
+    handler = _FakeHandler(
+        "/preview", body, extra_headers={"X-Api-Key": "secret-key"}
+    )
+    _invoke_do_post(executor_module, handler)
+    assert handler.status_code == 400
+    body_out = handler.parsed_body()
+    assert body_out["error_code"] == "executor_bad_repo"
+    assert "not under any allowed repo root" in body_out["error"]
 
 
 # ---------------------------------------------------------------------------

@@ -1093,6 +1093,50 @@ class PreviewExecutorResponse(BaseModel):
     merge_commit_sha: Optional[str] = None
 
 
+# ---------------------------------------------------------------------------
+# Executor allowlist surface
+# ---------------------------------------------------------------------------
+
+
+class ExecutorAllowlistRootRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    path: str
+    added_at: datetime
+    added_by: Optional[str] = None
+    note: Optional[str] = None
+    is_default: bool
+    is_enabled: bool
+
+
+class ExecutorAllowlistRootCreate(BaseModel):
+    path: str = Field(..., min_length=1, max_length=500)
+    note: Optional[str] = Field(default=None, max_length=500)
+    added_by: Optional[str] = Field(default=None, max_length=200)
+
+
+class ExecutorAllowlistRootUpdate(BaseModel):
+    is_enabled: Optional[bool] = None
+    note: Optional[str] = Field(default=None, max_length=500)
+
+
+class ExecutorAllowlistApplyRequest(BaseModel):
+    confirm: bool
+    applied_by: Optional[str] = Field(default=None, max_length=200)
+
+
+class ExecutorAllowlistConfigResponse(BaseModel):
+    roots: List[ExecutorAllowlistRootRead]
+    pending_apply: bool
+    last_apply_at: Optional[datetime] = None
+    last_apply_error: Optional[str] = None
+    last_apply_restart_ok: Optional[bool] = None
+    config_path: str
+    env_override_active: bool
+    env_override_value: Optional[str] = None
+
+
 # Resolve the forward reference from WorkItemResponse -> DebateRunSummary now
 # that both classes are defined.
 WorkItemResponse.model_rebuild()
